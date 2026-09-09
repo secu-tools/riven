@@ -1,0 +1,61 @@
+# Copyright (c) 2026 Jack L. (Cpt-JackL) (https://jack-l.com)
+# SPDX-License-Identifier: MIT
+
+# Binaries
+/riven
+/riven.exe
+riven_*
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+*.test.exe
+
+# Go coverage output
+*.out
+coverage.html
+coverage_report.txt
+cover/
+
+# Dependency directories
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build output
+build/
+
+# Riven working artifacts (pieces and keys may be sensitive).
+#
+# Pieces are named "<base>.<serial>" with a per-format suffix, so the numbered
+# forms below are what a stray binary piece or word list looks like. The .txt
+# (base64) and .png (QR) forms cannot be globbed without swallowing ordinary
+# project files, so keep pieces in their own directory rather than relying on
+# this. -o/--out is there for that.
+*.[0-9]
+*.[0-9][0-9]
+*.[0-9][0-9][0-9]
+*.b32.txt
+*.words.txt
+*.key
+*.pub
+scratch/
+pieces/
+testdata/tmp/
+
+# Go workspace
+go.work
+go.work.sum

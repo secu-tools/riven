@@ -1,0 +1,85 @@
+Third-Party Software Notices
+=============================
+
+Riven includes or depends on the following third-party software. Each is
+listed with its license type. See the linked repositories for full license
+text.
+
+------------------------------------------------------------------------
+
+Vendored source (redistributed inside this repository)
+
+github.com/hashicorp/vault/shamir  ->  internal/shamir/
+License: MPL-2.0 (Mozilla Public License, version 2.0)
+Copyright: IBM Corp. 2016, 2025
+Repository: https://github.com/hashicorp/vault/tree/main/shamir
+Full license text: internal/shamir/LICENSE
+
+The files in internal/shamir/ are redistributed under MPL-2.0 and retain
+their original license headers. They are NOT relicensed under this
+project's MIT license. Under MPL-2.0 these files may be combined with the
+rest of Riven (a "Larger Work") licensed under MIT, provided the MPL-2.0
+files remain under MPL-2.0 and their source stays available, as it does
+here. No modifications were made to the vendored source.
+
+The package has no go.mod of its own, so it belongs to the
+github.com/hashicorp/vault module, whose repository LICENSE is BUSL-1.1
+even though these particular files are MPL-2.0. Importing the package as a
+module would therefore place a BUSL-1.1 module in go.mod for the sake of
+two MPL-2.0 files. Copying them keeps the license position unambiguous.
+internal/shamir/UPSTREAM records the commit the copy came from, and CI
+fails if the copy drifts from upstream.
+
+------------------------------------------------------------------------
+
+Module dependencies (fetched via go modules)
+
+golang.org/x/crypto
+License: BSD-3-Clause
+Repository: https://go.googlesource.com/crypto
+Used for: Argon2id, ChaCha20-Poly1305/XChaCha20-Poly1305, Twofish, BLAKE2b, HKDF
+
+golang.org/x/sys
+License: BSD-3-Clause
+Repository: https://go.googlesource.com/sys
+Used for: mlock/munlock, VirtualLock/VirtualUnlock, rlimit/prctl hardening
+
+golang.org/x/term
+License: BSD-3-Clause
+Repository: https://go.googlesource.com/term
+Used for: masked (no-echo) password entry
+
+github.com/makiuchi-d/gozxing
+License: MIT for the Go port, Apache-2.0 for the original ZXing code it is
+         derived from (both texts are in the project's LICENSE file)
+Copyright: 2018 Daisuke MAKIUCHI; 2007-2018 ZXing authors
+Repository: https://github.com/makiuchi-d/gozxing
+Used for: QR code encoding and decoding (a pure-Go port of ZXing)
+Note: this is the only maintained pure-Go QR decoder with a permissive
+      license. Encoder-only libraries cannot read a piece back from a
+      scanned image, which Riven needs.
+
+golang.org/x/text
+License: BSD-3-Clause
+Repository: https://go.googlesource.com/text
+Used for: Unicode NFC normalization and GB18030 decoding of passwords
+          (internal/password), so the same password derives the same key
+          however it was typed or encoded; also by gozxing for character sets
+
+golang.org/x/xerrors
+License: BSD-3-Clause
+Repository: https://go.googlesource.com/xerrors
+Used indirectly by gozxing for error wrapping
+
+------------------------------------------------------------------------
+
+Standard library
+
+The recipient key mechanisms come from the Go standard library and are
+covered by the Go BSD-3-Clause license:
+
+  crypto/hpke   Hybrid Public Key Encryption (RFC 9180), used for every
+                recipient key type: X-Wing (ML-KEM-768 with X25519),
+                ML-KEM-768, ML-KEM-1024, X25519, P-256 and P-384
+  crypto/mlkem  ML-KEM (FIPS 203)
+  crypto/ecdh   X25519 and the NIST curves

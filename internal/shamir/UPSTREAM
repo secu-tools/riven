@@ -1,0 +1,36 @@
+Vendored source: Shamir secret sharing over GF(2^8)
+===================================================
+
+Upstream:   https://github.com/hashicorp/vault/tree/main/shamir
+Files:      shamir.go, shamir_test.go, LICENSE
+License:    MPL-2.0 (upstream's own shamir/LICENSE plus a per-file SPDX header)
+Copyright:  IBM Corp. 2016, 2025
+Last synced against upstream commit:
+            0c6c13dd38b9f921009b177797016dfc08dbc211  (2025-10-21)
+
+Why the source is copied rather than imported as a module
+---------------------------------------------------------
+The shamir package has no go.mod of its own, so it belongs to the
+github.com/hashicorp/vault module. That module's repository LICENSE is
+BUSL-1.1, while upstream scopes this directory to MPL-2.0 with both a
+per-file SPDX header and its own shamir/LICENSE, copied here unchanged.
+Importing the package would place a BUSL-1.1 module in go.mod for the sake
+of two files that are MPL-2.0. Copying the MPL-2.0 files, with their headers
+and the MPL text, keeps the licence position unambiguous and keeps the
+dependency graph small. The files are redistributed unmodified and remain
+under MPL-2.0; they are not relicensed under this project's MIT licence.
+
+Keeping the copy current
+------------------------
+Because this is a copy, "go get -u" does not touch it. CI runs a drift check
+that fetches the upstream files and diffs them against the copy, so an upstream
+change fails the build instead of going unnoticed. To sync deliberately:
+
+  curl -sL https://raw.githubusercontent.com/hashicorp/vault/main/shamir/shamir.go \
+    -o internal/shamir/shamir.go
+  curl -sL https://raw.githubusercontent.com/hashicorp/vault/main/shamir/shamir_test.go \
+    -o internal/shamir/shamir_test.go
+  curl -sL https://raw.githubusercontent.com/hashicorp/vault/main/shamir/LICENSE \
+    -o internal/shamir/LICENSE
+
+Then review the diff, run the tests, and update the commit recorded above.

@@ -1,0 +1,667 @@
+# Copyright (c) 2026 Jack L. (Cpt-JackL) (https://jack-l.com)
+# SPDX-License-Identifier: MIT
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: "Release type"
+        required: true
+        type: choice
+        options:
+          - beta
+          - release
+        default: "beta"
+      version:
+        description: "Base version (e.g. 1.0.3) -- leave empty to use version/version_base.txt"
+        required: false
+        type: string
+      build_number:
+        description: "Build number -- leave empty to use version/build_number.txt"
+        required: false
+        type: string
+      release_description:
+        description: "Release description (optional -- can be edited on GitHub after publishing)"
+        required: false
+        type: string
+
+# Read-only by default. Only the publish job, which pushes the version files and
+# creates the release, is given write, so the test and build jobs never hold a
+# token that could change the repository.
+permissions:
+  contents: read
+
+env:
+  # Set to "true" to keep the intermediate per-platform build artifacts after the
+  # release is published. Files on the release page are never touched by this.
+  KEEP_ARTIFACTS: "false"
+
+# Prevent concurrent release runs to avoid version file race conditions.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------
+  # 1. Full test suite on all three platforms before building.
+  #    Same -testall path as a local build: unit -> fuzz seeds ->
+  #    integration -> e2e -> smoke.
+  # ---------------------------------------------------------------
+  ci-tests:
+    name: Tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run full test suite (Linux / macOS)
+        if: runner.os != 'Windows'
+        run: bash ./build.sh -testall
+
+      - name: Run full test suite (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\build.ps1 -testall
+
+  # ---------------------------------------------------------------
+  # 2. Resolve the version and build number for this release.
+  # ---------------------------------------------------------------
+  resolve-version:
+    needs: ci-tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      build_number: ${{ steps.resolve.outputs.build_number }}
+      full_version: ${{ steps.resolve.outputs.full_version }}
+      tag_name: ${{ steps.resolve.outputs.tag_name }}
+      is_prerelease: ${{ steps.resolve.outputs.is_prerelease }}
+      version_changed: ${{ steps.resolve.outputs.version_changed }}
+      next_build_number: ${{ steps.resolve.outputs.next_build_number }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Resolve version and build number
+        id: resolve
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Read through the environment rather than interpolating into the
+          # script, so a dispatch input cannot inject shell.
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_BUILD_NUMBER: ${{ inputs.build_number }}
+          INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
+        run: |
+          FILE_VERSION="1.0.0"
+          if [ -f version/version_base.txt ]; then
+            FILE_VERSION=$(head -1 version/version_base.txt | tr -cd '0-9.')
+          fi
+          FILE_BUILD=0
+          if [ -f version/build_number.txt ]; then
+            FILE_BUILD=$(head -1 version/build_number.txt | tr -cd '0-9')
+          fi
+          [ -z "$FILE_BUILD" ] && FILE_BUILD=0
+
+          if [ -n "$INPUT_VERSION" ]; then
+            VERSION=$(printf '%s' "$INPUT_VERSION" | tr -cd '0-9.')
+            VERSION_CHANGED="true"
+          else
+            VERSION="$FILE_VERSION"
+            VERSION_CHANGED="false"
+          fi
+
+          if [ -n "$INPUT_BUILD_NUMBER" ]; then
+            BUILD_NUMBER=$(printf '%s' "$INPUT_BUILD_NUMBER" | tr -cd '0-9')
+          fi
+          # build_number.txt holds the number the next build takes, which is the
+          # convention build.sh and build.ps1 already follow. Publish writes the
+          # one after it, so two releases can never carry the same version --
+          # every piece records that version so the build that wrote it can be
+          # found again.
+          [ -z "$BUILD_NUMBER" ] && BUILD_NUMBER="$FILE_BUILD"
+          NEXT_BUILD_NUMBER=$((BUILD_NUMBER + 1))
+
+          FULL_VERSION="${VERSION}.${BUILD_NUMBER}"
+
+          # Git tags use semver so the module works with
+          # "go install github.com/secu-tools/riven@latest".
+          # Release tags:  v1.0.4          (pure semver, @latest picks this up)
+          # Beta tags:     v1.0.4-beta.N   (pre-release, excluded from @latest)
+          # Binary filenames embed the full four-part version (1.0.4.N).
+          if [ "$INPUT_RELEASE_TYPE" = "beta" ]; then
+            TAG_NAME="v${VERSION}-beta.${BUILD_NUMBER}"
+            IS_PRERELEASE="true"
+          else
+            TAG_NAME="v${VERSION}"
+            IS_PRERELEASE="false"
+          fi
+
+          echo "version=$VERSION"                     >> "$GITHUB_OUTPUT"
+          echo "build_number=$BUILD_NUMBER"           >> "$GITHUB_OUTPUT"
+          echo "full_version=$FULL_VERSION"           >> "$GITHUB_OUTPUT"
+          echo "tag_name=$TAG_NAME"                   >> "$GITHUB_OUTPUT"
+          echo "is_prerelease=$IS_PRERELEASE"         >> "$GITHUB_OUTPUT"
+          echo "version_changed=$VERSION_CHANGED"     >> "$GITHUB_OUTPUT"
+          echo "next_build_number=$NEXT_BUILD_NUMBER" >> "$GITHUB_OUTPUT"
+
+          echo "Resolved: $FULL_VERSION (tag: $TAG_NAME, prerelease: $IS_PRERELEASE)"
+          if [ -n "$GITHUB_RUN_ID" ]; then
+            RUN_NAME="${GITHUB_WORKFLOW} - ${FULL_VERSION}"
+            curl -s -X PATCH \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+              -d "$(printf '{"name":"%s"}' "$RUN_NAME")" || true
+          fi
+
+  # ---------------------------------------------------------------
+  # 3a. Linux binaries plus the .deb and .rpm packages.
+  #     The build scripts are the release path, so what ships is what
+  #     "./build.sh -linux -deb -rpm" produces locally. VERSION and
+  #     BUILD_NUMBER are passed in so the script uses the resolved
+  #     values instead of bumping version/build_number.txt.
+  # ---------------------------------------------------------------
+  build-linux:
+    needs: resolve-version
+    name: Build linux (amd64 + arm64, deb + rpm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build environment info
+        run: |
+          echo "Runner OS  : $(uname -s)"
+          echo "Runner arch: $(uname -m)"
+          echo "Go version : $(go version)"
+          echo "version    : ${{ needs.resolve-version.outputs.full_version }}"
+
+      - name: Install nfpm for deb/rpm packaging
+        run: |
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+          echo "nfpm version: $(nfpm --version)"
+
+      - name: Build linux binaries + deb/rpm packages
+        # Invoked through bash so the job does not depend on the executable bit
+        # surviving however the tree reached the runner.
+        env:
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+          BUILD_NUMBER: ${{ needs.resolve-version.outputs.build_number }}
+        run: bash ./build.sh -linux -deb -rpm
+
+      - name: List build outputs
+        run: |
+          find build/linux -type f | sort | while read -r f; do
+            echo "  $f  ($(stat -c%s "$f") bytes)"
+          done
+
+      - name: Verify binaries and packages
+        run: |
+          FULL="${{ needs.resolve-version.outputs.full_version }}"
+          fail=0
+          for arch in amd64 arm64; do
+            bin="build/linux/riven_${FULL}-linux-${arch}"
+            if [ ! -f "$bin" ]; then
+              echo "::error::FAIL: missing binary $bin"
+              fail=1
+            else
+              echo "OK binary: $bin ($(stat -c%s "$bin") bytes)"
+            fi
+            for ext in deb rpm; do
+              pkg="${bin}.${ext}"
+              if [ ! -f "$pkg" ]; then
+                echo "::error::FAIL: missing ${ext} package $pkg"
+                fail=1
+              else
+                echo "OK package: $pkg ($(stat -c%s "$pkg") bytes)"
+              fi
+            done
+          done
+          if [ $fail -ne 0 ]; then
+            echo "::error::Linux build or packaging failed -- aborting release"
+            exit 1
+          fi
+
+      - name: Verify package payload
+        run: |
+          FULL="${{ needs.resolve-version.outputs.full_version }}"
+          # A package is only useful if it drops the binary where the release
+          # notes say it does, so check the payload rather than just the size.
+          for arch in amd64 arm64; do
+            deb="build/linux/riven_${FULL}-linux-${arch}.deb"
+            echo "=== $deb ==="
+            dpkg-deb -c "$deb"
+            dpkg-deb -c "$deb" | grep -q '\./usr/bin/riven$' || {
+              echo "::error::$deb does not install /usr/bin/riven"; exit 1; }
+          done
+          if ! command -v rpm >/dev/null 2>&1; then
+            echo "rpm(1) is not on this runner -- skipping the .rpm payload check"
+            exit 0
+          fi
+          for arch in amd64 arm64; do
+            pkg="build/linux/riven_${FULL}-linux-${arch}.rpm"
+            if [ "$arch" = "amd64" ]; then want="x86_64"; else want="aarch64"; fi
+            echo "=== $pkg ==="
+            rpm -qlp "$pkg"
+            rpm -qlp "$pkg" | grep -qx '/usr/bin/riven' || {
+              echo "::error::$pkg does not install /usr/bin/riven"; exit 1; }
+            got=$(rpm -qp --qf '%{ARCH}' "$pkg")
+            if [ "$got" != "$want" ]; then
+              echo "::error::$pkg is built for $got, expected $want"
+              exit 1
+            fi
+          done
+
+      - name: Verify binary runs (linux/amd64)
+        env:
+          RIVEN_CI_PW: release-verification-password
+        run: |
+          BIN="build/linux/riven_${{ needs.resolve-version.outputs.full_version }}-linux-amd64"
+          "$BIN" version
+          # Exercise the real user path: split, then reconstruct, then compare.
+          printf 'release verification payload' > verify_input.bin
+          "$BIN" split verify_input.bin -n 3 -k 2 \
+            --password-env RIVEN_CI_PW --format all --out verify_out -y
+          "$BIN" combine verify_out/verify_input.bin.1 verify_out/verify_input.bin.2.txt \
+            --password-env RIVEN_CI_PW --out verify_recovered.bin -y
+          cmp verify_input.bin verify_recovered.bin
+          echo "Binary verified: split and combine round-trip succeeded."
+          rm -rf verify_input.bin verify_out verify_recovered.bin
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: build-linux
+          path: build/linux/
+          if-no-files-found: error
+          retention-days: 1
+
+  # ---------------------------------------------------------------
+  # 3b. Windows binaries (amd64 + arm64) on a native Windows runner.
+  # ---------------------------------------------------------------
+  build-windows:
+    needs: resolve-version
+    name: Build windows (amd64 + arm64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build environment info
+        shell: pwsh
+        run: |
+          Write-Host "Runner OS  : $([System.Runtime.InteropServices.RuntimeInformation]::OSDescription)"
+          Write-Host "Runner arch: $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)"
+          Write-Host "Go version : $(go version)"
+          Write-Host "version    : ${{ needs.resolve-version.outputs.full_version }}"
+
+      - name: Build windows binaries
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+          BUILD_NUMBER: ${{ needs.resolve-version.outputs.build_number }}
+        run: .\build.ps1 -windows
+
+      - name: List build outputs
+        shell: bash
+        run: |
+          find build/windows -type f | sort | while read -r f; do
+            echo "  $f  ($(stat -c%s "$f") bytes)"
+          done
+
+      - name: Verify binaries
+        shell: bash
+        run: |
+          FULL="${{ needs.resolve-version.outputs.full_version }}"
+          fail=0
+          for arch in amd64 arm64; do
+            bin="build/windows/riven_${FULL}-windows-${arch}.exe"
+            if [ ! -f "$bin" ]; then
+              echo "::error::FAIL: missing binary $bin"
+              fail=1
+            else
+              echo "OK binary: $bin ($(stat -c%s "$bin") bytes)"
+            fi
+          done
+          if [ $fail -ne 0 ]; then
+            echo "::error::Windows build failed -- aborting release"
+            exit 1
+          fi
+
+      - name: Verify binary runs (windows/amd64)
+        shell: bash
+        env:
+          RIVEN_CI_PW: release-verification-password
+        run: |
+          BIN="build/windows/riven_${{ needs.resolve-version.outputs.full_version }}-windows-amd64.exe"
+          "$BIN" version
+          printf 'release verification payload' > verify_input.bin
+          "$BIN" split verify_input.bin -n 3 -k 2 \
+            --password-env RIVEN_CI_PW --format all --out verify_out -y
+          "$BIN" combine verify_out/verify_input.bin.1 verify_out/verify_input.bin.2.txt \
+            --password-env RIVEN_CI_PW --out verify_recovered.bin -y
+          cmp verify_input.bin verify_recovered.bin
+          echo "Binary verified: split and combine round-trip succeeded."
+          rm -rf verify_input.bin verify_out verify_recovered.bin
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: build-windows
+          path: build/windows/
+          if-no-files-found: error
+          retention-days: 1
+
+  # ---------------------------------------------------------------
+  # 3c. macOS arm64 (macos-latest is an Apple silicon runner).
+  # ---------------------------------------------------------------
+  build-macos-arm64:
+    needs: resolve-version
+    name: Build darwin/arm64
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build environment info
+        run: |
+          echo "Runner OS  : $(uname -s)"
+          echo "Runner arch: $(uname -m)"
+          echo "Go version : $(go version)"
+          echo "version    : ${{ needs.resolve-version.outputs.full_version }}"
+
+      - name: Build darwin/arm64
+        env:
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+          BUILD_NUMBER: ${{ needs.resolve-version.outputs.build_number }}
+        run: bash ./build.sh -darwin -arm64
+
+      - name: Verify binary runs (darwin/arm64)
+        env:
+          RIVEN_CI_PW: release-verification-password
+        run: |
+          BIN="build/darwin/riven_${{ needs.resolve-version.outputs.full_version }}-darwin-arm64"
+          ls -l "$BIN"
+          "$BIN" version
+          printf 'release verification payload' > verify_input.bin
+          "$BIN" split verify_input.bin -n 3 -k 2 \
+            --password-env RIVEN_CI_PW --format all --out verify_out -y
+          "$BIN" combine verify_out/verify_input.bin.1 verify_out/verify_input.bin.2.txt \
+            --password-env RIVEN_CI_PW --out verify_recovered.bin -y
+          cmp verify_input.bin verify_recovered.bin
+          echo "Binary verified: split and combine round-trip succeeded."
+          rm -rf verify_input.bin verify_out verify_recovered.bin
+
+      - name: Upload macOS arm64 artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: build-macos-arm64
+          path: build/darwin/
+          if-no-files-found: error
+          retention-days: 1
+
+  # ---------------------------------------------------------------
+  # 3d. macOS amd64 on a native Intel runner, so the binary that ships
+  #     for Intel Macs has actually been run on one.
+  # ---------------------------------------------------------------
+  build-macos-amd64:
+    needs: resolve-version
+    name: Build darwin/amd64
+    runs-on: macos-26-intel
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build environment info
+        run: |
+          echo "Runner OS  : $(uname -s)"
+          echo "Runner arch: $(uname -m)"
+          echo "Go version : $(go version)"
+          echo "version    : ${{ needs.resolve-version.outputs.full_version }}"
+
+      - name: Build darwin/amd64
+        env:
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+          BUILD_NUMBER: ${{ needs.resolve-version.outputs.build_number }}
+        run: bash ./build.sh -darwin -amd64
+
+      - name: Verify binary runs (darwin/amd64)
+        env:
+          RIVEN_CI_PW: release-verification-password
+        run: |
+          BIN="build/darwin/riven_${{ needs.resolve-version.outputs.full_version }}-darwin-amd64"
+          ls -l "$BIN"
+          "$BIN" version
+          printf 'release verification payload' > verify_input.bin
+          "$BIN" split verify_input.bin -n 3 -k 2 \
+            --password-env RIVEN_CI_PW --format all --out verify_out -y
+          "$BIN" combine verify_out/verify_input.bin.1 verify_out/verify_input.bin.2.txt \
+            --password-env RIVEN_CI_PW --out verify_recovered.bin -y
+          cmp verify_input.bin verify_recovered.bin
+          echo "Binary verified: split and combine round-trip succeeded."
+          rm -rf verify_input.bin verify_out verify_recovered.bin
+
+      - name: Upload macOS amd64 artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: build-macos-amd64
+          path: build/darwin/
+          if-no-files-found: error
+          retention-days: 1
+
+  # ---------------------------------------------------------------
+  # 4. Collect artifacts, verify completeness, publish the release.
+  # ---------------------------------------------------------------
+  publish:
+    needs: [resolve-version, build-linux, build-windows, build-macos-arm64, build-macos-amd64]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: artifacts
+          pattern: build-*
+
+      - name: Collect release files
+        run: |
+          mkdir -p release
+          find artifacts -type f -name 'riven_*' -exec cp {} release/ \;
+          ls -l release
+
+      - name: Verify all release files are present
+        run: |
+          FULL="${{ needs.resolve-version.outputs.full_version }}"
+          fail=0
+          check() {
+            if [ ! -f "release/$1" ]; then
+              echo "::error::FAIL: missing $1"
+              fail=1
+            else
+              echo "OK: $1 ($(stat -c%s "release/$1") bytes)"
+            fi
+          }
+          for target in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
+            check "riven_${FULL}-${target}"
+          done
+          for target in windows-amd64 windows-arm64; do
+            check "riven_${FULL}-${target}.exe"
+          done
+          for arch in amd64 arm64; do
+            check "riven_${FULL}-linux-${arch}.deb"
+            check "riven_${FULL}-linux-${arch}.rpm"
+          done
+          if [ $fail -ne 0 ]; then
+            echo "::error::Required release files are missing -- aborting release"
+            exit 1
+          fi
+          echo ""
+          echo "All release files verified."
+
+      - name: Update version files
+        run: |
+          VERSION="${{ needs.resolve-version.outputs.version }}"
+          BUILD_NUMBER="${{ needs.resolve-version.outputs.build_number }}"
+          NEXT_BUILD_NUMBER="${{ needs.resolve-version.outputs.next_build_number }}"
+          VERSION_CHANGED="${{ needs.resolve-version.outputs.version_changed }}"
+
+          if [ "$VERSION_CHANGED" = "true" ]; then
+            printf '%s\n' "$VERSION" > version/version_base.txt
+            echo "Updated version_base.txt to $VERSION"
+          fi
+          printf '%s\n' "$NEXT_BUILD_NUMBER" > version/build_number.txt
+          echo "Updated build_number.txt: $BUILD_NUMBER -> $NEXT_BUILD_NUMBER"
+
+      - name: Commit and push version files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add version/version_base.txt version/build_number.txt
+          if git diff --cached --quiet; then
+            echo "No version file changes to commit."
+          else
+            git commit -m "release: update version files for ${{ needs.resolve-version.outputs.tag_name }}"
+            git push
+          fi
+
+      - name: Compute SHA256 checksums
+        run: |
+          cd release
+          # Checksums are listed in the release body rather than shipped as a file.
+          for f in $(ls -1 | sort); do
+            sha256sum "$f" >> /tmp/checksums.txt
+          done
+          {
+            echo "## SHA256 Checksums"
+            echo ""
+            echo "Check a download with \`sha256sum <file>\` against the list below."
+            echo ""
+            echo '```'
+            cat /tmp/checksums.txt
+            echo '```'
+          } > /tmp/checksums.md
+          cat /tmp/checksums.md
+
+      - name: Build release body
+        env:
+          RELEASE_DESC: ${{ inputs.release_description }}
+        run: |
+          TAG_NAME="${{ needs.resolve-version.outputs.tag_name }}"
+          FULL="${{ needs.resolve-version.outputs.full_version }}"
+          TYPE="${{ inputs.release_type }}"
+          {
+            if [ "$TYPE" = "beta" ]; then
+              echo "## Riven ${TAG_NAME} (Pre-release)"
+              echo ""
+              echo "> **This is a pre-release build.** It may contain bugs or incomplete features."
+            else
+              echo "## Riven ${TAG_NAME}"
+            fi
+            echo ""
+            if [ -n "$RELEASE_DESC" ]; then
+              echo "$RELEASE_DESC"
+              echo ""
+            fi
+            echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/commits/${TAG_NAME}"
+            echo ""
+            echo "---"
+            echo ""
+            echo "### Downloads"
+            echo ""
+            echo "| Platform | Architecture | File |"
+            echo "|---|---|---|"
+            echo "| Linux | amd64 | \`riven_${FULL}-linux-amd64\` |"
+            echo "| Linux | arm64 | \`riven_${FULL}-linux-arm64\` |"
+            echo "| Windows | amd64 | \`riven_${FULL}-windows-amd64.exe\` |"
+            echo "| Windows | arm64 | \`riven_${FULL}-windows-arm64.exe\` |"
+            echo "| macOS | arm64 | \`riven_${FULL}-darwin-arm64\` |"
+            echo "| macOS | amd64 | \`riven_${FULL}-darwin-amd64\` |"
+            echo "| Debian / Ubuntu | amd64 | \`riven_${FULL}-linux-amd64.deb\` |"
+            echo "| Debian / Ubuntu | arm64 | \`riven_${FULL}-linux-arm64.deb\` |"
+            echo "| Fedora / RHEL | x86_64 | \`riven_${FULL}-linux-amd64.rpm\` |"
+            echo "| Fedora / RHEL | aarch64 | \`riven_${FULL}-linux-arm64.rpm\` |"
+            echo ""
+            echo "The \`.deb\` and \`.rpm\` packages install the binary as \`/usr/bin/riven\`:"
+            echo ""
+            echo '```'
+            echo "sudo dpkg -i riven_${FULL}-linux-amd64.deb"
+            echo "sudo rpm -i riven_${FULL}-linux-amd64.rpm"
+            echo '```'
+            echo ""
+            echo "The plain binaries need no installation -- mark one executable and run it."
+            echo "The darwin binaries are built on native runners (arm64 on \`macos-latest\`,"
+            echo "amd64 on \`macos-26-intel\`) and are unsigned."
+            echo ""
+            echo "---"
+            echo ""
+            cat /tmp/checksums.md
+          } > /tmp/release_body.md
+          cat /tmp/release_body.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ needs.resolve-version.outputs.tag_name }}
+          name: "Riven ${{ needs.resolve-version.outputs.tag_name }}"
+          body_path: /tmp/release_body.md
+          prerelease: ${{ needs.resolve-version.outputs.is_prerelease == 'true' }}
+          files: release/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------
+  # 5. Delete the intermediate per-platform artifacts. Runs whatever
+  #    the outcome, so a failed run does not leave them behind either.
+  #    Files already uploaded to the release page are not touched, and
+  #    the build number is deliberately not rolled back on failure.
+  # ---------------------------------------------------------------
+  cleanup:
+    name: Cleanup
+    needs: [publish]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Delete intermediate build artifacts
+        if: env.KEEP_ARTIFACTS == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          artifact_ids=$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" \
+            --paginate \
+            --jq '.artifacts[] | select(.name | startswith("build-")) | .id')
+          if [ -z "$artifact_ids" ]; then
+            echo "No matching artifacts to delete."
+            exit 0
+          fi
+          for id in $artifact_ids; do
+            echo "Deleting artifact id=$id"
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id"
+          done

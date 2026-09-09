@@ -1,0 +1,247 @@
+# Copyright (c) 2026 Jack L. (Cpt-JackL) (https://jack-l.com)
+# SPDX-License-Identifier: MIT
+name: Build
+run-name: ${{ github.workflow }} - ${{ github.event.head_commit.message }}
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Set to "true" to keep build artifacts after each run.
+  KEEP_ARTIFACTS: "false"
+
+jobs:
+  build:
+    name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Read version
+        id: version
+        run: |
+          VERSION=$(cat version/version_base.txt | tr -d '[:space:]')
+          BUILD=$(cat version/build_number.txt | tr -d '[:space:]')
+          COMMIT=$(git rev-parse --short HEAD)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "full=$VERSION.$BUILD" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          MODULE="github.com/secu-tools/riven/internal/app"
+          EXT=""
+          if [ "${{ matrix.goos }}" = "windows" ]; then EXT=".exe"; fi
+          OUTPUT="build/riven_${{ steps.version.outputs.full }}-${{ matrix.goos }}-${{ matrix.goarch }}${EXT}"
+          go build \
+            -ldflags "-s -w -X ${MODULE}.version=${{ steps.version.outputs.version }} -X ${MODULE}.commit=${{ steps.version.outputs.commit }} -X ${MODULE}.buildNumber=${{ steps.version.outputs.build }}" \
+            -trimpath \
+            -o "$OUTPUT" \
+            ./
+
+      - name: Upload artifact
+        if: env.KEEP_ARTIFACTS == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: riven-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: build/riven_*
+
+  # ---------------------------------------------------------------
+  # Build script verification -- Linux.
+  # The release builds through build.sh, so the script itself is
+  # exercised here on every host it supports, packaging included.
+  # This is the only job that can inspect the packages it produced,
+  # so it checks the payload rather than only the file names.
+  # ---------------------------------------------------------------
+  build-scripts-linux:
+    name: Build Scripts (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install nfpm
+        run: |
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+          echo "nfpm version: $(nfpm --version)"
+
+      - name: Build every target
+        run: bash ./build.sh -all
+
+      - name: Build linux + create deb and rpm packages
+        run: bash ./build.sh -linux -deb -rpm
+
+      - name: Verify packages
+        run: |
+          fail=0
+          for arch in amd64 arm64; do
+            for ext in deb rpm; do
+              pkg=$(find build/linux -name "*-linux-${arch}.${ext}" -type f)
+              if [ -z "$pkg" ]; then
+                echo "::error::FAIL: ${ext} package not found for linux/${arch}"
+                fail=1
+              else
+                echo "OK: $pkg ($(stat -c%s "$pkg") bytes)"
+              fi
+            done
+          done
+          if [ $fail -ne 0 ]; then exit 1; fi
+
+          for arch in amd64 arm64; do
+            deb=$(find build/linux -name "*-linux-${arch}.deb" -type f)
+            dpkg-deb -c "$deb" | grep -q '\./usr/bin/riven$' || {
+              echo "::error::$deb does not install /usr/bin/riven"; exit 1; }
+            echo "OK payload: $deb installs /usr/bin/riven"
+
+            if ! command -v rpm >/dev/null 2>&1; then
+              echo "rpm(1) is not on this runner -- skipping the .rpm payload check"
+              continue
+            fi
+            pkg=$(find build/linux -name "*-linux-${arch}.rpm" -type f)
+            rpm -qlp "$pkg" | grep -qx '/usr/bin/riven' || {
+              echo "::error::$pkg does not install /usr/bin/riven"; exit 1; }
+            if [ "$arch" = "amd64" ]; then want="x86_64"; else want="aarch64"; fi
+            got=$(rpm -qp --qf '%{ARCH}' "$pkg")
+            if [ "$got" != "$want" ]; then
+              echo "::error::$pkg is built for $got, expected $want"
+              exit 1
+            fi
+            echo "OK payload: $pkg installs /usr/bin/riven ($got)"
+          done
+
+      - name: Upload build artifacts
+        if: env.KEEP_ARTIFACTS == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: build-scripts-linux
+          path: build/
+
+  # ---------------------------------------------------------------
+  # Build script verification -- macOS.
+  # ---------------------------------------------------------------
+  build-scripts-macos:
+    name: Build Scripts (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install nfpm
+        run: |
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+          echo "nfpm version: $(nfpm --version)"
+
+      - name: Build every target
+        run: bash ./build.sh -all
+
+      - name: Build linux + create deb and rpm packages
+        run: bash ./build.sh -linux -deb -rpm
+
+      - name: Verify packages
+        run: |
+          fail=0
+          for arch in amd64 arm64; do
+            for ext in deb rpm; do
+              pkg=$(find build/linux -name "*-linux-${arch}.${ext}" -type f)
+              if [ -z "$pkg" ]; then
+                echo "::error::FAIL: ${ext} package not found for linux/${arch}"
+                fail=1
+              else
+                echo "OK: $pkg ($(stat -f%z "$pkg") bytes)"
+              fi
+            done
+          done
+          exit $fail
+
+      - name: Upload build artifacts
+        if: env.KEEP_ARTIFACTS == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: build-scripts-macos
+          path: build/
+
+  # ---------------------------------------------------------------
+  # Build script verification -- Windows (build.ps1).
+  # ---------------------------------------------------------------
+  build-scripts-windows:
+    name: Build Scripts (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install nfpm
+        shell: pwsh
+        run: |
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+          Write-Host "nfpm version: $(nfpm --version)"
+
+      - name: Build every target
+        shell: pwsh
+        run: .\build.ps1 -all
+
+      - name: Build linux + create deb and rpm packages
+        shell: pwsh
+        run: .\build.ps1 -linux -deb -rpm
+
+      - name: Verify packages
+        shell: bash
+        run: |
+          fail=0
+          for arch in amd64 arm64; do
+            for ext in deb rpm; do
+              pkg=$(find build/linux -name "*-linux-${arch}.${ext}" -type f)
+              if [ -z "$pkg" ]; then
+                echo "::error::FAIL: ${ext} package not found for linux/${arch}"
+                fail=1
+              else
+                echo "OK: $pkg ($(stat -c%s "$pkg") bytes)"
+              fi
+            done
+          done
+          exit $fail
+
+      - name: Upload build artifacts
+        if: env.KEEP_ARTIFACTS == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: build-scripts-windows
+          path: build/

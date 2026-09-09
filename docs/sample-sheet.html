@@ -1,0 +1,81 @@
+<!doctype html>
+<!-- No link, script or image: this page has to render offline, years from now. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Riven recovery piece 1 of 3</title>
+<style>
+  body { font-family: sans-serif; margin: 2em; max-width: 40em; color: #000; }
+  h1 { font-size: 1.4em; margin-bottom: 0.2em; }
+  .lead { font-size: 1.1em; margin-top: 0; }
+  .box { border: 1px solid #000; padding: 0.8em 1em; margin: 1em 0; }
+  pre { font-family: monospace; font-size: 0.95em; line-height: 1.5;
+        white-space: pre-wrap; word-break: break-all; margin: 0; }
+  img { max-width: 100%; height: auto; }
+  .none { font-style: italic; }
+  .warn { border: 2px solid #000; padding: 0.6em 1em; font-weight: bold; }
+  ol { padding-left: 1.2em; }
+  .fill { border-bottom: 1px solid #000; display: inline-block; min-width: 12em; }
+  header, footer { font-size: 0.9em; }
+  footer { margin-top: 2em; }
+  @media print {
+    body { margin: 0.5em; max-width: none; }
+    /* The identity of the piece must not be left behind on page one. */
+    header { position: fixed; top: 0; }
+    body { padding-top: 1.6em; }
+    /* Keep the code, the instructions and the footer whole. */
+    .box, ol, footer, .warn { break-inside: avoid; page-break-inside: avoid; }
+    /* The text block is the one thing that may run over pages. */
+    #piece-text { break-inside: auto; page-break-inside: auto; }
+  }
+</style>
+</head>
+<body>
+<header>Riven recovery piece 1 of 3 - riven-sample.txt</header>
+<h1>Recovery piece 1 of 3</h1>
+<p class="lead">Any 2 of the 3 pieces rebuild the file. Fewer reveal nothing.</p>
+
+<div class="box">
+<img alt="piece 1" src="data:image/png;base64,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">
+</div>
+
+<div class="box">
+<pre id="piece-text">4WR4 H7VY BRTK 73ZF U5QG UF3Z FLVH AIZK
+TYO2 BLV6 NVDR OAJR H2NP 7KOP KERO PJJZ
+NTAO DNCJ QSE5 YVZ4 CIHD GL35 QLCG 237K
+D3OQ HE4I JUKB CM3L KNKY RB3A XOAQ GQZD
+TP45 EOHP XBCG 7LJ2 WZP7 ONV7 KFAT KJUT
+SUYP 7IPP ZJMW G5ZS AY7L ZDGK MFA7 EHUA
+DU6P TUMT DWPQ BRAA ELOF J2UY 4GBU GC3F
+PDAH YZ4T H2HD XSBR AM5K KTKC RDGU KU6Q
+GDHR R3V7 QG5J C7OH LUUK QFYO RLTN R2WR
+CKGZ AQSO 67UP YMHX FZRQ M4V3 KPFE JYY4
+4E3B D5E6 7EK3 P4XR ZP2U AKHC B766 7T2Q
+KLMS BUDC RLPI NT7Q VSCS H3DZ LQZW JGJ6
+FRID IZA4 YHTI DU6O XL34 POUO ZLRG GISM
+O7LS IWNX GH3P G6DI VLIT X23P JEP4 TEI6
+4US2 AEF6 2Q4Y QHY5 BWB6 RDAM TRDF YIQ=
+</pre>
+</div>
+
+<h2>How to use this</h2>
+<ol>
+  <li>Gather 2 different pieces of this set.</li>
+  <li>Get the tool: <code>go install github.com/secu-tools/riven@latest</code></li>
+  <li>Get each piece back into a file. Scanning the QR code with any QR reader is
+      easiest. Otherwise photograph or scan this page and run it through OCR: the
+      text is only A-Z and 2-7, with no characters that look alike, so it reads
+      back reliably. Retyping it works too, but there is a lot of it.</li>
+  <li>Run <code>riven combine PIECE1 PIECE2 ...</code> and supply the password.
+      Spacing, line breaks and capitals in the text do not matter, and a mistake
+      is reported rather than silently accepted.</li>
+</ol>
+<p>The password is not on this sheet and never will be. Without it, and without
+2 pieces, this page reveals nothing about the contents.</p>
+
+<footer>
+<p>Original file: riven-sample.txt</p>
+<p>Stored at: <span class="fill"></span> &nbsp; Date: <span class="fill"></span></p>
+</footer>
+</body>
+</html>
