@@ -2,6 +2,10 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)](go.mod)
+[![CI](https://github.com/secu-tools/riven/actions/workflows/ci.yml/badge.svg)](https://github.com/secu-tools/riven/actions/workflows/ci.yml)
+[![Build](https://github.com/secu-tools/riven/actions/workflows/build.yml/badge.svg)](https://github.com/secu-tools/riven/actions/workflows/build.yml)
+[![CodeQL](https://github.com/secu-tools/riven/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/secu-tools/riven/actions/workflows/github-code-scanning/codeql)
+[![Dependency Graph](https://github.com/secu-tools/riven/actions/workflows/dependabot/update-graph/badge.svg)](https://github.com/secu-tools/riven/actions/workflows/dependabot/update-graph)
 
 > [!WARNING]
 > **Testing phase, not a final release.** Every effort is made to keep your data
