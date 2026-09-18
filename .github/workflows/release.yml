@@ -129,6 +129,10 @@ jobs:
           # every piece records that version so the build that wrote it can be
           # found again.
           [ -z "$BUILD_NUMBER" ] && BUILD_NUMBER="$FILE_BUILD"
+          # Decimal whatever the spelling: "08" is not octal, and "007" has to
+          # name the same files on every platform. build.ps1 reads it as 7,
+          # so the zeros are dropped here, before the number reaches any job.
+          BUILD_NUMBER=$((10#$BUILD_NUMBER))
           NEXT_BUILD_NUMBER=$((BUILD_NUMBER + 1))
 
           FULL_VERSION="${VERSION}.${BUILD_NUMBER}"

@@ -59,3 +59,6 @@ testdata/tmp/
 # Go workspace
 go.work
 go.work.sum
+
+# Lock file created by the build scripts while taking a build number
+version/build_number.txt.lock

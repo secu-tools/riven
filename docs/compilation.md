@@ -11,8 +11,8 @@ go build -o riven ./
 Or with the helper scripts (they embed the version and bump the build number):
 
 ```
-make build            # Linux/macOS
 ./build.sh            # Linux/macOS
+./build.sh -native    # just this machine
 .\build.ps1           # Windows PowerShell
 build.cmd             # Windows CMD (forwards to build.ps1)
 ```
@@ -40,6 +40,7 @@ All three scripts accept the same flags. Run the one for your OS:
 | `-integration` | Run integration tests (tag: `integration`) |
 | `-teste2e` | Run end-to-end tests (tag: `e2e`) |
 | `-testsmoke` | Run smoke tests (tag: `smoke`) |
+| `-testscripts` | Run the build script tests (tag: `scripts`) |
 | `-coverage` | Run tests with a coverage report |
 | `-clean` | Remove build artifacts |
 
@@ -55,7 +56,7 @@ Example: `./build.sh -linux -arm64 -deb` builds linux/arm64 and packages it as `
 ./build.sh -all                 # linux + windows + darwin, amd64 + arm64
 ./build.sh -linux -arm64
 ./build.sh -windows
-make cross
+./build.sh -native              # just this machine
 .\build.ps1 -all
 ```
 
@@ -92,11 +93,11 @@ release and beta ships all four (amd64 and arm64, deb and rpm).
 ## Tests
 
 ```
-make test          # unit + fuzz seed corpus
-make integration   # library matrix (tag: integration)
-make e2e           # drives the built binary (tag: e2e)
-make smoke         # build-and-run sanity (tag: smoke)
-make test-all      # everything
+./build.sh -test           # unit + fuzz seed corpus
+./build.sh -integration    # library matrix (tag: integration)
+./build.sh -teste2e        # drives the built binary (tag: e2e)
+./build.sh -testsmoke      # build-and-run sanity (tag: smoke)
+./build.sh -testscripts    # the build scripts themselves (tag: scripts)
 ./build.sh -testall
 .\build.ps1 -testall
 ```

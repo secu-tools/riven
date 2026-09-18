@@ -97,11 +97,13 @@ jobs:
           go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
           echo "nfpm version: $(nfpm --version)"
 
-      - name: Build every target
-        run: bash ./build.sh -all
+      - name: Build every target and package linux as deb and rpm
+        # One pass: the script starts by clearing build/, so a second call
+        # would discard what the first produced.
+        run: bash ./build.sh -all -deb -rpm
 
-      - name: Build linux + create deb and rpm packages
-        run: bash ./build.sh -linux -deb -rpm
+      - name: Build script tests
+        run: go test -tags scripts -count=1 -timeout 900s ./tests/scripts/
 
       - name: Verify packages
         run: |
@@ -149,53 +151,6 @@ jobs:
           path: build/
 
   # ---------------------------------------------------------------
-  # Build script verification -- macOS.
-  # ---------------------------------------------------------------
-  build-scripts-macos:
-    name: Build Scripts (macOS)
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Install nfpm
-        run: |
-          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
-          echo "nfpm version: $(nfpm --version)"
-
-      - name: Build every target
-        run: bash ./build.sh -all
-
-      - name: Build linux + create deb and rpm packages
-        run: bash ./build.sh -linux -deb -rpm
-
-      - name: Verify packages
-        run: |
-          fail=0
-          for arch in amd64 arm64; do
-            for ext in deb rpm; do
-              pkg=$(find build/linux -name "*-linux-${arch}.${ext}" -type f)
-              if [ -z "$pkg" ]; then
-                echo "::error::FAIL: ${ext} package not found for linux/${arch}"
-                fail=1
-              else
-                echo "OK: $pkg ($(stat -f%z "$pkg") bytes)"
-              fi
-            done
-          done
-          exit $fail
-
-      - name: Upload build artifacts
-        if: env.KEEP_ARTIFACTS == 'true'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: build-scripts-macos
-          path: build/
-
-  # ---------------------------------------------------------------
   # Build script verification -- Windows (build.ps1).
   # ---------------------------------------------------------------
   build-scripts-windows:
@@ -214,13 +169,15 @@ jobs:
           go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
           Write-Host "nfpm version: $(nfpm --version)"
 
-      - name: Build every target
+      - name: Build every target and package linux as deb and rpm
+        # One pass: the script starts by clearing build/, so a second call
+        # would discard what the first produced.
         shell: pwsh
-        run: .\build.ps1 -all
+        run: .\build.ps1 -all -deb -rpm
 
-      - name: Build linux + create deb and rpm packages
+      - name: Build script tests
         shell: pwsh
-        run: .\build.ps1 -linux -deb -rpm
+        run: go test -tags scripts -count=1 -timeout 900s ./tests/scripts/
 
       - name: Verify packages
         shell: bash
@@ -245,3 +202,52 @@ jobs:
         with:
           name: build-scripts-windows
           path: build/
+  # ---------------------------------------------------------------
+  # Build script verification -- macOS.
+  # ---------------------------------------------------------------
+  build-scripts-macos:
+    name: Build Scripts (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install nfpm
+        run: |
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+          echo "nfpm version: $(nfpm --version)"
+
+      - name: Build every target and package linux as deb and rpm
+        # One pass: the script starts by clearing build/, so a second call
+        # would discard what the first produced.
+        run: bash ./build.sh -all -deb -rpm
+
+      - name: Build script tests
+        run: go test -tags scripts -count=1 -timeout 900s ./tests/scripts/
+
+      - name: Verify packages
+        run: |
+          fail=0
+          for arch in amd64 arm64; do
+            for ext in deb rpm; do
+              pkg=$(find build/linux -name "*-linux-${arch}.${ext}" -type f)
+              if [ -z "$pkg" ]; then
+                echo "::error::FAIL: ${ext} package not found for linux/${arch}"
+                fail=1
+              else
+                echo "OK: $pkg ($(stat -f%z "$pkg") bytes)"
+              fi
+            done
+          done
+          exit $fail
+
+      - name: Upload build artifacts
+        if: env.KEEP_ARTIFACTS == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: build-scripts-macos
+          path: build/
+

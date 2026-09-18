@@ -74,7 +74,7 @@ sudo rpm -i riven_<version>-linux-amd64.rpm
 Or build from source (Go 1.26+):
 
 ```
-go build -o riven ./       # or: make build / ./build.sh / .\build.ps1
+go build -o riven ./       # or: ./build.sh -native / .\build.ps1 -native
 ```
 
 ## Quick start

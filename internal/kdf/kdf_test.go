@@ -5,6 +5,8 @@ package kdf
 
 import (
 	"bytes"
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -173,6 +175,39 @@ func TestPresetsAreEncodable(t *testing.T) {
 		}
 		if err := p.Validate(); err != nil {
 			t.Fatalf("preset %q is not encodable: %v", name, err)
+		}
+	}
+}
+
+// A number too large for its field was narrowed before it was checked, so it
+// could wrap into a value that happens to be legal: m=4194312 became 8 MiB and
+// p=257 one lane. A mistyped cost was then accepted as a weaker one instead of
+// being refused, and with --record-kdf false the user would have to reproduce
+// the same mistake to open the pieces again.
+func TestParseRefusesNumbersThatWouldWrap(t *testing.T) {
+	for _, spec := range []string{
+		"m=4194312",    // (2^22 + 8) * 1024 wraps a uint32 to 8192 KiB
+		"m=4194368",    // wraps to 64 MiB, the default itself
+		"p=257",        // wraps a uint8 to 1
+		"p=260",        // wraps a uint8 to 4
+		"t=4294967297", // wraps a uint32 to 1
+		"t=4294967299", // wraps a uint32 to 3
+		"m=1025",       // above the largest choice, in range of the type
+		"m=64,t=3,p=4,m=4194368",
+	} {
+		p, err := Parse(spec)
+		if err == nil {
+			t.Errorf("%q parsed as %s; it must be refused", spec, p.Describe())
+			continue
+		}
+		if !strings.Contains(err.Error(), "bad value") {
+			t.Errorf("%q: error does not name the value: %v", spec, err)
+		}
+	}
+	// The bound is the largest legal value, so every real choice still parses.
+	for _, m := range MemoryChoices() {
+		if _, err := Parse(fmt.Sprintf("m=%d,t=%d,p=%d", m, MaxTime, ParChoices()[len(ParChoices())-1])); err != nil {
+			t.Errorf("m=%d: %v", m, err)
 		}
 	}
 }

@@ -1,6 +1,6 @@
 # Testing
 
-Four tiers. Unit and fuzz tests live next to the code in `internal/`; the rest
+Five tiers. Unit and fuzz tests live next to the code in `internal/`; the rest
 live under `tests/` behind build tags.
 
 ```
@@ -8,7 +8,8 @@ go test ./... -count=1                             # unit and fuzz seeds
 go test -tags integration ./tests/integration/     # library, in process
 go test -tags e2e ./tests/e2e/                     # the compiled binary
 go test -tags smoke ./tests/smoke/                 # binary starts and answers
-make test-all                                      # all four, as the release does
+go test -tags scripts ./tests/scripts/             # the build scripts, against a copy
+./build.sh -testall                                # all five, as the release does
 ```
 
 ## What the tiers cover
@@ -25,6 +26,10 @@ make test-all                                      # all four, as the release do
   standard input, keygen, completion scripts, the `-y` output contract, and the
   failure paths.
 - **Smoke** (`tests/smoke/`) -- the binary starts, answers, and exits correctly.
+- **Build scripts** (`tests/scripts/`) -- build.sh and build.ps1, run against a
+  copy of the tree: the build number convention, a failed compile, a failed
+  package, finding or failing to install nfpm, and `-native` building only this
+  host.
 
 Every defect found during development has a regression test naming the original
 behaviour (`*/regression_test.go`). Keyless mode is checked from both directions:

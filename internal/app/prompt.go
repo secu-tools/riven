@@ -46,7 +46,12 @@ func secretOut() io.Writer {
 }
 
 // isInteractive reports whether stdin is a terminal we can prompt on.
-func isInteractive() bool {
+//
+// It is a variable so the tests can stand in a terminal and drive the paths that
+// only run with one attached: the menu, the overwrite questions, and the prompts
+// for what a set did not record. The prompts themselves read from the shared
+// reader either way, so scripted answers reach them unchanged.
+var isInteractive = func() bool {
 	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 

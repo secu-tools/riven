@@ -12,6 +12,7 @@ package kdf
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -181,6 +182,18 @@ func (p Params) Describe() string {
 	return fmt.Sprintf("Argon2id %d MiB, %d passes, %d lanes", p.Memory/1024, p.Time, p.Par)
 }
 
+// specLimit bounds the number given for a key in an explicit spec, so that the
+// narrowing conversion in Parse cannot wrap it into a smaller value that happens
+// to validate: without this, m=4194312 read as 8 MiB and p=257 as one lane, and
+// a mistyped cost was silently replaced by a weaker one. The memory size in MiB
+// is the largest legal number in any field; lanes must fit their byte.
+func specLimit(key string) int {
+	if key == "p" || key == "par" || key == "lanes" {
+		return math.MaxUint8
+	}
+	return int(MaxMemory / 1024)
+}
+
 // Parse accepts a preset name or an explicit "m=<MiB>,t=<passes>,p=<lanes>"
 // specification. Any subset of the explicit keys may be given; the rest come
 // from the recommended preset.
@@ -205,11 +218,12 @@ func Parse(s string) (Params, error) {
 		if !ok {
 			return Params{}, fmt.Errorf("kdf: cannot parse %q", field)
 		}
+		key = strings.TrimSpace(key)
 		n, err := strconv.Atoi(strings.TrimSpace(val))
-		if err != nil || n < 0 {
+		if err != nil || n < 0 || n > specLimit(key) {
 			return Params{}, fmt.Errorf("kdf: bad value in %q", field)
 		}
-		switch strings.TrimSpace(key) {
+		switch key {
 		case "m", "memory":
 			p.Memory = uint32(n) * 1024
 		case "t", "time", "passes":

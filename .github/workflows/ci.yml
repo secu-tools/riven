@@ -170,6 +170,51 @@ jobs:
           if $FAILED; then exit 1; fi
 
   # ---------------------------------------------------------------
+  # Vendored Shamir: fail when the upstream copy drifts
+  # ---------------------------------------------------------------
+  vendored-shamir:
+    name: Vendored Shamir Drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # internal/shamir is a copy of an MPL-2.0 file from a BUSL-1.1 repository,
+      # so it cannot be tracked by go modules. Fail the build when upstream moves,
+      # rather than letting the copy drift unnoticed. See internal/shamir/UPSTREAM.
+      - name: Compare against upstream
+        shell: bash
+        run: |
+          base=https://raw.githubusercontent.com/hashicorp/vault/main/shamir
+          status=0
+          for f in shamir.go shamir_test.go; do
+            curl -fsSL "$base/$f" -o "upstream-$f"
+            if ! diff -u "upstream-$f" "internal/shamir/$f"; then
+              echo "::error::internal/shamir/$f differs from upstream; see internal/shamir/UPSTREAM"
+              status=1
+            fi
+          done
+          grep -q 'SPDX-License-Identifier: MPL-2.0' internal/shamir/shamir.go || {
+            echo "::error::the vendored shamir file lost its MPL-2.0 header"; status=1; }
+          exit $status
+
+  # ---------------------------------------------------------------
+  # Cross-compile every release target
+  # ---------------------------------------------------------------
+  cross-compile:
+    name: Cross-compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build every target
+        # Invoked through bash so the job does not depend on the executable bit
+        # surviving however the tree reached the runner.
+        run: bash ./build.sh -all
+
+  # ---------------------------------------------------------------
   # Lint: vet, format, ineffectual assignments, spelling, complexity
   # ---------------------------------------------------------------
   lint:
@@ -188,6 +233,7 @@ jobs:
           go vet -tags integration ./tests/integration/
           go vet -tags e2e ./tests/e2e/
           go vet -tags smoke ./tests/smoke/
+          go vet -tags scripts ./tests/scripts/
 
       - name: Format check
         shell: bash
@@ -243,51 +289,6 @@ jobs:
             echo "$files"
             exit 1
           fi
-
-  # ---------------------------------------------------------------
-  # Vendored Shamir: fail when the upstream copy drifts
-  # ---------------------------------------------------------------
-  vendored-shamir:
-    name: Vendored Shamir Drift
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      # internal/shamir is a copy of an MPL-2.0 file from a BUSL-1.1 repository,
-      # so it cannot be tracked by go modules. Fail the build when upstream moves,
-      # rather than letting the copy drift unnoticed. See internal/shamir/UPSTREAM.
-      - name: Compare against upstream
-        shell: bash
-        run: |
-          base=https://raw.githubusercontent.com/hashicorp/vault/main/shamir
-          status=0
-          for f in shamir.go shamir_test.go; do
-            curl -fsSL "$base/$f" -o "upstream-$f"
-            if ! diff -u "upstream-$f" "internal/shamir/$f"; then
-              echo "::error::internal/shamir/$f differs from upstream; see internal/shamir/UPSTREAM"
-              status=1
-            fi
-          done
-          grep -q 'SPDX-License-Identifier: MPL-2.0' internal/shamir/shamir.go || {
-            echo "::error::the vendored shamir file lost its MPL-2.0 header"; status=1; }
-          exit $status
-
-  # ---------------------------------------------------------------
-  # Cross-compile every release target
-  # ---------------------------------------------------------------
-  cross-compile:
-    name: Cross-compile
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Build every target
-        # Invoked through bash so the job does not depend on the executable bit
-        # surviving however the tree reached the runner.
-        run: bash ./build.sh -all
 
   # ---------------------------------------------------------------
   # Vulnerability check (informational -- does not block CI)

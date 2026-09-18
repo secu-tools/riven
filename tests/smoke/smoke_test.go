@@ -20,6 +20,11 @@ import (
 
 var binPath string
 
+// workDir is where the binary runs. Every invocation gets it as its working
+// directory, so a command that writes files -- "keygen -y" writes a key pair
+// into the current directory -- lands there and not in the source tree.
+var workDir string
+
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "riven-smoke")
 	if err != nil {
@@ -34,6 +39,10 @@ func TestMain(m *testing.M) {
 	if out, err := build.CombinedOutput(); err != nil {
 		panic("build failed: " + string(out))
 	}
+	workDir = filepath.Join(dir, "work")
+	if err := os.MkdirAll(workDir, 0o700); err != nil {
+		panic(err)
+	}
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)
@@ -41,6 +50,7 @@ func TestMain(m *testing.M) {
 
 func run(args ...string) (string, error) {
 	cmd := exec.Command(binPath, args...)
+	cmd.Dir = workDir
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
@@ -81,6 +91,7 @@ func runBounded(t *testing.T, args ...string) (string, error) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, binPath, args...)
+	cmd.Dir = workDir
 	cmd.Stdin = nil // not a terminal, and never becomes one
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() != nil {
@@ -132,5 +143,27 @@ func TestNoInvocationPanics(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Every invocation used to run in the package directory, so "keygen -y" wrote
+// a private key into the source tree, where it sat unnoticed beside the tests.
+// The binary now runs in its own working directory, and the key lands there.
+func TestCommandsDoNotWriteIntoTheSourceTree(t *testing.T) {
+	src, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := runBounded(t, "keygen", "-y", "--pub", "smoke.pub", "--priv", "smoke.key")
+	if err != nil {
+		t.Fatalf("keygen: %v\n%s", err, out)
+	}
+	for _, name := range []string{"smoke.pub", "smoke.key"} {
+		if _, err := os.Stat(filepath.Join(src, name)); err == nil {
+			t.Errorf("%s was written into the source tree", name)
+		}
+		if _, err := os.Stat(filepath.Join(workDir, name)); err != nil {
+			t.Errorf("%s was not written into the working directory: %v", name, err)
+		}
 	}
 }
