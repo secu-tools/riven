@@ -283,7 +283,9 @@ func TestConfirmOverwriteAsksOnlyForAnExistingFile(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "not overwriting") {
 		t.Errorf("a no was not honoured: %v", err)
 	}
-	if !strings.Contains(out, "already exists") {
+	// The question is folded, and the length of the temporary path decides
+	// where, so the words are looked for with the folds taken back out.
+	if !strings.Contains(strings.Join(strings.Fields(out), " "), "already exists") {
 		t.Errorf("the question does not say the file exists:\n%s", out)
 	}
 	withTerminal(t, "y\n", func() { err = confirmOverwrite(&cliOptions{}, existing) })
