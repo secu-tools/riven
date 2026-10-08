@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/secu-tools/riven/internal/core"
 	"github.com/secu-tools/riven/internal/kdf"
@@ -479,6 +480,43 @@ func TestResolveFormatsRetriesABadAnswer(t *testing.T) {
 	}
 	if !strings.Contains(out, "NOT AVAILABLE") || !strings.Contains(out, "cannot export as QR") {
 		t.Errorf("the size problem was not stated:\n%s", out)
+	}
+}
+
+// The export menu is the wizard's widest listing: its notes carry a byte count
+// and a limit, so an entry can run half as long again as the screen. Every line
+// has to fit the width, and a note too long to sit beside its description
+// belongs on a line of its own rather than folded into the middle of one.
+func TestExportMenuFitsTheLineWidth(t *testing.T) {
+	const width = 79
+	plan := &splitPlan{}
+	plan.opts.N = 2
+	// Past every format limit, so each of words, qr and sheet carries a note.
+	huge := pieceio.Bip39MaxPiece * 100
+
+	var err error
+	var out string
+	withLineWidth(t, width, func() {
+		out = withTerminal(t, "binary\n", func() {
+			_, err = resolveFormats(&cliOptions{}, plan, huge)
+		})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	notesOwnLine := 0
+	for _, line := range strings.Split(out, "\n") {
+		if n := utf8.RuneCountInString(line); n > width {
+			t.Errorf("line is %d columns, over %d:\n%s", n, width, line)
+		}
+		if strings.HasPrefix(strings.TrimLeft(line, " "), "NOT AVAILABLE") {
+			notesOwnLine++
+		}
+	}
+	if notesOwnLine != 3 {
+		t.Errorf("want words, qr and sheet each explained on their own line, got %d:\n%s",
+			notesOwnLine, out)
 	}
 }
 

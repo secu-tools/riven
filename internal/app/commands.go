@@ -81,7 +81,8 @@ func cmdSplit(opts *cliOptions) error {
 		}
 		if err := verifySplit(out, input, verifyPaths, plan); err != nil {
 			fmt.Fprintf(out, "\nWARNING: verification failed: %v\n", err)
-			fmt.Fprintln(out, "The pieces were written but could NOT be verified. Do not rely on them.")
+			writeWrapped(out, "", "The pieces were written but could NOT be verified. "+
+				"Do not rely on them.")
 			return err
 		}
 	}
@@ -304,9 +305,9 @@ func reportQRSizes(out io.Writer, sizes []int) {
 	for _, n := range names {
 		parts = append(parts, fmt.Sprintf("%s for %d piece(s), ~%d%% recoverable", n, counts[n], recovery[n]))
 	}
-	fmt.Fprintf(out, "  qr: error correction %s\n", strings.Join(parts, "; "))
+	writeWrapped(out, "  ", "qr: error correction "+strings.Join(parts, "; "))
 	if weakest {
-		fmt.Fprintln(out, "  qr: pieces are near capacity and use the weakest correction; print at high quality")
+		writeWrapped(out, "  ", "qr: pieces are near capacity and use the weakest correction; print at high quality")
 	}
 	// A large symbol has small modules, which a photograph may not resolve. Say so
 	// while the user can still choose more, smaller pieces.
@@ -352,7 +353,8 @@ func verifySplit(out io.Writer, input []byte, paths []string, plan *splitPlan) e
 					return ierr
 				}
 			}
-			fmt.Fprintln(out, "Verification: pieces open and are consistent (full decrypt needs the recipient key).")
+			writeWrapped(out, "", "Verification: pieces open and are consistent "+
+				"(full decrypt needs the recipient key).")
 			return nil
 		}
 		return err
@@ -365,13 +367,16 @@ func verifySplit(out io.Writer, input []byte, paths []string, plan *splitPlan) e
 }
 
 func printSplitSummary(out io.Writer, plan *splitPlan, formats []pieceio.Format, written map[pieceio.Format][]string, verified bool) {
-	fmt.Fprintf(out, "\nDone. %d pieces written, any %d reconstruct the original.\n", plan.opts.N, plan.opts.K)
+	fmt.Fprintln(out)
+	writeWrapped(out, "", fmt.Sprintf("Done. %d pieces written, any %d reconstruct "+
+		"the original.", plan.opts.N, plan.opts.K))
 
 	if plan.opts.Keyless {
-		fmt.Fprintln(out, "Mode: split only, no encryption and no password.")
-		fmt.Fprintf(out, "Anyone holding any %d pieces can rebuild the file. Fewer reveal no content,\n", plan.opts.K)
-		fmt.Fprintln(out, "but a piece's metadata is readable to anyone with this tool, and nothing")
-		fmt.Fprintln(out, "authenticates the set. Add a password layer if either matters.")
+		writeWrapped(out, "", "Mode: split only, no encryption and no password.")
+		writeWrapped(out, "", fmt.Sprintf("Anyone holding any %d pieces can rebuild "+
+			"the file. Fewer reveal no content, but a piece's metadata is readable to "+
+			"anyone with this tool, and nothing authenticates the set. Add a password "+
+			"layer if either matters.", plan.opts.K))
 	} else {
 		fmt.Fprintln(out, "Layers (outer to inner):")
 		for i, l := range plan.opts.Layers {
@@ -383,29 +388,36 @@ func printSplitSummary(out io.Writer, plan *splitPlan, formats []pieceio.Format,
 			}
 		}
 		if plan.hasRecipient() {
-			fmt.Fprintln(out, "Every recipient private key listed above is required to decrypt.")
+			writeWrapped(out, "", "Every recipient private key listed above is "+
+				"required to decrypt.")
 		}
 		if len(plan.verifyPasswords) > 0 {
-			fmt.Fprintln(out, "Key derivation: "+plan.opts.Params.Describe())
+			writeWrapped(out, "", "Key derivation: "+plan.opts.Params.Describe())
 		} else {
-			fmt.Fprintln(out, "No password: the recipient private keys alone decrypt this.")
+			writeWrapped(out, "", "No password: the recipient private keys alone "+
+				"decrypt this.")
 		}
 		if !plan.opts.RecordAlgo {
-			fmt.Fprintln(out, "Algorithms are NOT recorded: keep note of them, --algo is required to decrypt.")
+			writeWrapped(out, "", "Algorithms are NOT recorded: keep note of them, "+
+				"--algo is required to decrypt.")
 		}
 		if !plan.opts.RecordKDF && len(plan.verifyPasswords) > 0 {
-			fmt.Fprintln(out, "Argon2 cost is NOT recorded: keep note of it, --kdf is required to decrypt.")
+			writeWrapped(out, "", "Argon2 cost is NOT recorded: keep note of it, "+
+				"--kdf is required to decrypt.")
 		}
 	}
 
 	printPaddingLine(out, plan)
 	if plan.opts.Name != "" {
-		fmt.Fprintf(out, "File name: %q is recorded inside the pieces, so combine restores it.\n", plan.opts.Name)
+		writeWrapped(out, "", fmt.Sprintf("File name: %q is recorded inside the "+
+			"pieces, so combine restores it.", plan.opts.Name))
 	}
 	if verified {
-		fmt.Fprintln(out, "Verification: PASSED (re-read pieces reconstruct the original).")
+		writeWrapped(out, "", "Verification: PASSED "+
+			"(re-read pieces reconstruct the original).")
 	} else {
-		fmt.Fprintln(out, "Verification: SKIPPED (--no-verify); the pieces were not checked.")
+		writeWrapped(out, "", "Verification: SKIPPED (--no-verify); "+
+			"the pieces were not checked.")
 	}
 	for _, f := range formats {
 		fmt.Fprintf(out, "Pieces (%s):\n", f)
@@ -422,13 +434,14 @@ func printSplitSummary(out io.Writer, plan *splitPlan, formats []pieceio.Format,
 func printPaddingLine(out io.Writer, plan *splitPlan) {
 	switch {
 	case core.PaddingApplies(plan.opts):
-		fmt.Fprintf(out, "Piece size: padded to a %d percent size class, so it gives only a range.\n",
-			plan.opts.Padding.Width())
+		writeWrapped(out, "", fmt.Sprintf("Piece size: padded to a %d percent size "+
+			"class, so it gives only a range.", plan.opts.Padding.Width()))
 	case plan.opts.Padding.Off:
-		fmt.Fprintln(out, "Piece size: not padded, so it reveals the length of the content.")
+		writeWrapped(out, "", "Piece size: not padded, "+
+			"so it reveals the length of the content.")
 	default:
-		fmt.Fprintln(out, "Piece size: not padded. Without a password the piece metadata is readable,")
-		fmt.Fprintln(out, "so padding could not hide the content length anyway.")
+		writeWrapped(out, "", "Piece size: not padded. Without a password the piece "+
+			"metadata is readable, so padding could not hide the content length anyway.")
 	}
 }
 
@@ -816,7 +829,8 @@ func cmdKeygen(opts *cliOptions) error {
 		scheme.Name(), pubPath, privPath)
 	fmt.Fprintf(out, "Each piece sent to this key carries %d extra bytes.\n", scheme.CiphertextSize())
 	if !scheme.PostQuantum() {
-		fmt.Fprintln(out, "Note: this key type is not post-quantum. It is for compatibility and small pieces.")
+		writeWrapped(out, "", "Note: this key type is not post-quantum. "+
+			"It is for compatibility and small pieces.")
 	}
 	return nil
 }
@@ -1009,6 +1023,6 @@ func warnUnverified(out io.Writer, det pieceio.Detected) {
 	if det.Verified {
 		return
 	}
-	fmt.Fprintf(out, "  warning: %s carries no matching checksum, so the text may have been mistyped or damaged\n",
-		filepath.Base(det.Path))
+	writeWrapped(out, "  ", fmt.Sprintf("warning: %s carries no matching checksum, "+
+		"so the text may have been mistyped or damaged", filepath.Base(det.Path)))
 }

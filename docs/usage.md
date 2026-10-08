@@ -406,10 +406,11 @@ Aliases: `bin`/`raw`, `b64`/`text`, `b32`, `qrcode`/`png`, `paper`/`print`/`html
 `bip39`/`mnemonic`.
 
 The wizard asks the same thing and accepts either numbers or names, mixed:
-`2,3`, `base64,qr`, `base32,4`, or `all`. Beside each entry it states what that
+`2,3`, `base64,qr`, `base32,4`, or `all`. With each entry it states what that
 choice costs for the pieces at hand: a format the pieces are too large for is
 marked `NOT AVAILABLE` with the size and the limit, and `words` gives the word
-count per piece. The same limits are enforced for `--format`, before any file is
+count per piece. A note too long to sit beside its entry takes the line under
+it, and the listing as a whole is folded to the width of the terminal. The same limits are enforced for `--format`, before any file is
 written.
 
 The three text formats carry a checksum, so a mistyped character is reported as a

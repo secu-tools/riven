@@ -82,7 +82,7 @@ func groupBySet(out io.Writer, items []heldPiece, open core.OpenOptions) (map[st
 	for _, item := range items {
 		info, err := core.Info(item.bytes, open)
 		if err != nil {
-			fmt.Fprintf(out, "  %q: FAILED to open (%v)\n", item.det.Path, err)
+			writeWrapped(out, "  ", fmt.Sprintf("%q: FAILED to open (%v)", item.det.Path, err))
 			unreadable++
 			continue
 		}
@@ -94,8 +94,8 @@ func groupBySet(out io.Writer, items []heldPiece, open core.OpenOptions) (map[st
 		if !item.det.Verified {
 			checked = ", no checksum in this format"
 		}
-		fmt.Fprintf(out, "  %q: piece %d of %d, %s, read as %s%s\n",
-			item.det.Path, info.Serial, info.N, status, item.det.Format, checked)
+		writeWrapped(out, "  ", fmt.Sprintf("%q: piece %d of %d, %s, read as %s%s",
+			item.det.Path, info.Serial, info.N, status, item.det.Format, checked))
 		if !info.Intact {
 			unreadable++
 			continue

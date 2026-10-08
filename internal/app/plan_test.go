@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/secu-tools/riven/internal/ciphers"
 	"github.com/secu-tools/riven/internal/core"
@@ -248,6 +249,32 @@ func TestSplitSummaryForKeylessSets(t *testing.T) {
 	}
 	if strings.Contains(out, "Key derivation") {
 		t.Fatalf("keyless summary should not mention key derivation:\n%s", out)
+	}
+}
+
+// A summary line carrying a file name used to run past the edge of the screen
+// and fold wherever that fell. Nothing it prints may be wider than the terminal,
+// whatever the name turns out to be. A lone path is the exception: it has no
+// break in it, so it overflows rather than being cut in half.
+func TestSplitSummaryFitsTheLineWidth(t *testing.T) {
+	const width = 60
+	t.Setenv("RIVEN_UNIT_PW1", "one")
+	plan := planFor(t, "--password-env", "RIVEN_UNIT_PW1", "--kdf", "m=8,t=1,p=1",
+		"--record-algo", "false", "--record-kdf", "false", "--pad", "10")
+	plan.opts.Name = "Bitwarden_20251114_LTS.rar"
+
+	var buf bytes.Buffer
+	withLineWidth(t, width, func() {
+		printSplitSummary(&buf, plan, []pieceio.Format{pieceio.Binary},
+			map[pieceio.Format][]string{pieceio.Binary: {"a.1"}}, true)
+	})
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if n := utf8.RuneCountInString(line); n > width && len(strings.Fields(line)) > 1 {
+			t.Errorf("summary line is %d columns, over %d:\n%s", n, width, line)
+		}
+	}
+	if !strings.Contains(buf.String(), plan.opts.Name) {
+		t.Errorf("the recorded name is missing:\n%s", buf.String())
 	}
 }
 

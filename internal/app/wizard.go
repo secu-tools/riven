@@ -6,6 +6,7 @@ package app
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 
@@ -233,9 +234,9 @@ func resolveMode(opts *cliOptions, interactive bool) (securityMode, error) {
 	}
 
 	fmt.Println("Security:")
-	fmt.Println("  1) recommended: encrypt with one password (" + ciphers.Default().Name + ")")
-	fmt.Println("  2) advanced: several layers, each a password or a recipient key")
-	fmt.Println("  3) no encryption: split only, no password, any K pieces rebuild the file")
+	writeWrapped(os.Stdout, "  1) ", "recommended: encrypt with one password ("+ciphers.Default().Name+")")
+	writeWrapped(os.Stdout, "  2) ", "advanced: several layers, each a password or a recipient key")
+	writeWrapped(os.Stdout, "  3) ", "no encryption: split only, no password, any K pieces rebuild the file")
 	choice, err := readInt("Choose", 1, 1, 3)
 	if err != nil {
 		return modeRecommended, err
@@ -244,9 +245,9 @@ func resolveMode(opts *cliOptions, interactive bool) (securityMode, error) {
 	case 2:
 		return modeAdvanced, nil
 	case 3:
-		fmt.Println("  warning: anyone with K pieces can rebuild the file. A piece's metadata")
-		fmt.Println("           (file name, length, set) is readable to anyone with this tool,")
-		fmt.Println("           and nothing authenticates the set against substitution.")
+		writeWrapped(os.Stdout, "  warning: ", "anyone with K pieces can rebuild the file. "+
+			"A piece's metadata (file name, length, set) is readable to anyone with "+
+			"this tool, and nothing authenticates the set against substitution.")
 		return modeKeyless, nil
 	default:
 		return modeRecommended, nil
@@ -354,8 +355,8 @@ func layersInteractive(plan *splitPlan, opts *cliOptions) error {
 	var prev uint8
 	for i := 0; ; i++ {
 		fmt.Printf("\nLayer %d:\n", i+1)
-		fmt.Println("  1) password")
-		fmt.Println("  2) recipient key (only the holder of the private key can peel it)")
+		writeWrapped(os.Stdout, "  1) ", "password")
+		writeWrapped(os.Stdout, "  2) ", "recipient key (only the holder of the private key can peel it)")
 		kind, err := readInt("Keyed by", 1, 1, 2)
 		if err != nil {
 			return err
@@ -509,8 +510,9 @@ func planPadding(plan *splitPlan, opts *cliOptions) error {
 	if opts.padSet {
 		return nil
 	}
-	fmt.Println("\nPieces are padded up to a size class, so their size gives only a range")
-	fmt.Println("for the content. A wider class hides more and costs more storage.")
+	fmt.Println()
+	writeWrapped(os.Stdout, "", "Pieces are padded up to a size class, so their size gives only a range "+
+		"for the content. A wider class hides more and costs more storage.")
 	pct, err := readInt("Padding percent (0 disables padding)", core.DefaultPadPercent, 0, maxWizardPad)
 	if err != nil {
 		return err
@@ -630,7 +632,7 @@ func chooseScheme(def, forbid uint8) (uint8, error) {
 		}
 		sid, err := resolveSchemeAnswer(answer, all)
 		if err != nil {
-			fmt.Println("  " + err.Error())
+			writeWrapped(os.Stdout, "  ", err.Error())
 			continue
 		}
 		if sid == forbid {
@@ -699,8 +701,8 @@ func chooseKeyScheme(opts *cliOptions) (kem.Scheme, error) {
 	all := kem.All()
 	fmt.Println("Recipient key type:")
 	for i, s := range all {
-		fmt.Printf("  %d) %-12s %s; %d bytes added to every piece\n",
-			i+1, s.Name(), s.Summary(), s.CiphertextSize())
+		writeItem(os.Stdout, fmt.Sprintf("  %d) %-12s ", i+1, s.Name()), s.Summary(),
+			fmt.Sprintf("%d bytes added to every piece", s.CiphertextSize()))
 	}
 	choice, err := readInt("Choose", 1, 1, len(all))
 	if err != nil {
@@ -738,7 +740,7 @@ func chooseKDF(def kdf.Params) (kdf.Params, error) {
 		}
 		p, err := kdf.Parse(spec)
 		if err != nil {
-			fmt.Println("  " + err.Error())
+			writeWrapped(os.Stdout, "  ", err.Error())
 			continue
 		}
 		return p, nil
@@ -765,7 +767,7 @@ func resolveFormats(opts *cliOptions, plan *splitPlan, pieceSize int) ([]pieceio
 
 	fmt.Println("\nExport format:")
 	for i, f := range all {
-		fmt.Printf("  %d) %-7s %s%s\n", i+1, f, f.Describe(), formatNote(f, pieceSize))
+		writeItem(os.Stdout, fmt.Sprintf("  %d) %-7s ", i+1, f), f.Describe(), formatNote(f, pieceSize))
 	}
 
 	for {
@@ -775,11 +777,11 @@ func resolveFormats(opts *cliOptions, plan *splitPlan, pieceSize int) ([]pieceio
 		}
 		formats, err := resolveFormatAnswer(answer, all)
 		if err != nil {
-			fmt.Println("  " + err.Error())
+			writeWrapped(os.Stdout, "  ", err.Error())
 			continue
 		}
 		if err := checkFormatsFit(plan, formats, pieceSize, plan.opts.N); err != nil {
-			fmt.Println("  " + err.Error())
+			writeWrapped(os.Stdout, "  ", err.Error())
 			continue
 		}
 		return formats, nil
@@ -949,7 +951,7 @@ func askMissingAlgos(opts *cliOptions, layers int) ([]uint8, error) {
 		}
 		ids, err := resolveSchemeList(spec, all)
 		if err != nil {
-			fmt.Println("  " + err.Error())
+			writeWrapped(os.Stdout, "  ", err.Error())
 			continue
 		}
 		if len(ids) != layers {
@@ -978,31 +980,33 @@ func resolveSchemeList(spec string, all []ciphers.Scheme) ([]uint8, error) {
 }
 
 // formatNote states why a format is unavailable, or what it costs, so the choice
-// is made with the consequence in view rather than after the fact.
+// is made with the consequence in view rather than after the fact. The note is
+// returned bare: writeItem decides whether it sits beside the description or on
+// a line of its own.
 func formatNote(f pieceio.Format, pieceSize int) string {
 	switch f {
 	case pieceio.QR:
 		if !pieceio.QRFits(pieceSize) {
-			return fmt.Sprintf("  NOT AVAILABLE: pieces are %d bytes, over the %d limit",
+			return fmt.Sprintf("NOT AVAILABLE: pieces are %d bytes, over the %d limit",
 				pieceSize, pieceio.QRMaxBytes)
 		}
 	case pieceio.Sheet:
 		switch {
 		case pieceSize > pieceio.SheetMaxPiece:
-			return fmt.Sprintf("  NOT AVAILABLE: pieces are %d bytes, which is over %d printed pages",
+			return fmt.Sprintf("NOT AVAILABLE: pieces are %d bytes, over %d printed pages",
 				pieceSize, pieceio.SheetMaxPages)
 		case !pieceio.QRFits(pieceSize):
-			return fmt.Sprintf("  (text only, about %d page(s): too large for a QR code)",
+			return fmt.Sprintf("(text only, about %d page(s): too large for a QR code)",
 				pieceio.SheetPages(pieceSize))
 		case pieceio.SheetPages(pieceSize) > 1:
-			return fmt.Sprintf("  (about %d printed pages per piece)", pieceio.SheetPages(pieceSize))
+			return fmt.Sprintf("(about %d printed pages per piece)", pieceio.SheetPages(pieceSize))
 		}
 	case pieceio.Words:
 		if pieceSize > pieceio.Bip39MaxPiece {
-			return fmt.Sprintf("  NOT AVAILABLE: pieces are %d bytes, over the %d limit",
+			return fmt.Sprintf("NOT AVAILABLE: pieces are %d bytes, over the %d limit",
 				pieceSize, pieceio.Bip39MaxPiece)
 		}
-		return fmt.Sprintf("  (%d words per piece, about %.1f times the size)",
+		return fmt.Sprintf("(%d words per piece, about %.1f times the size)",
 			pieceio.Bip39Words(pieceSize), pieceio.Bip39Expansion)
 	}
 	return ""

@@ -59,9 +59,9 @@ var isInteractive = func() bool {
 // line, or def if the user just presses Enter.
 func readLine(prompt, def string) (string, error) {
 	if def != "" {
-		fmt.Printf("%s [default: %s]: ", prompt, def)
+		writePrompt(fmt.Sprintf("%s [default: %s]:", prompt, def))
 	} else {
-		fmt.Printf("%s: ", prompt)
+		writePrompt(prompt + ":")
 	}
 	line, err := stdin.ReadString('\n')
 	if err != nil && line == "" {
@@ -97,7 +97,7 @@ func confirm(prompt string, def bool) (bool, error) {
 		d = "yes"
 	}
 	for {
-		fmt.Printf("%s (y/n) [default: %s]: ", prompt, d)
+		writePrompt(fmt.Sprintf("%s (y/n) [default: %s]:", prompt, d))
 		line, err := stdin.ReadString('\n')
 		if err != nil && line == "" {
 			return false, promptErr(err)
