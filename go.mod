@@ -5,7 +5,7 @@ module github.com/secu-tools/riven
 
 go 1.26.0
 
-toolchain go1.26.3
+toolchain go1.26.8
 
 require (
 	github.com/makiuchi-d/gozxing v0.1.1
