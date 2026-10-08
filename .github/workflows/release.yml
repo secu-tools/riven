@@ -56,7 +56,7 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@v4
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -89,7 +89,7 @@ jobs:
       version_changed: ${{ steps.resolve.outputs.version_changed }}
       next_build_number: ${{ steps.resolve.outputs.next_build_number }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@v4
 
       - name: Resolve version and build number
         id: resolve
@@ -180,7 +180,7 @@ jobs:
     name: Build linux (amd64 + arm64, deb + rpm)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@v4
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -286,7 +286,7 @@ jobs:
           rm -rf verify_input.bin verify_out verify_recovered.bin
 
       - name: Upload Linux artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@v4
         with:
           name: build-linux
           path: build/linux/
@@ -301,7 +301,7 @@ jobs:
     name: Build windows (amd64 + arm64)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@v4
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -365,7 +365,7 @@ jobs:
           rm -rf verify_input.bin verify_out verify_recovered.bin
 
       - name: Upload Windows artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@v4
         with:
           name: build-windows
           path: build/windows/
@@ -380,7 +380,7 @@ jobs:
     name: Build darwin/arm64
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@v4
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -416,7 +416,7 @@ jobs:
           rm -rf verify_input.bin verify_out verify_recovered.bin
 
       - name: Upload macOS arm64 artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@v4
         with:
           name: build-macos-arm64
           path: build/darwin/
@@ -432,7 +432,7 @@ jobs:
     name: Build darwin/amd64
     runs-on: macos-26-intel
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@v4
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -468,7 +468,7 @@ jobs:
           rm -rf verify_input.bin verify_out verify_recovered.bin
 
       - name: Upload macOS amd64 artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@v4
         with:
           name: build-macos-amd64
           path: build/darwin/
@@ -484,10 +484,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@v4
 
       - name: Download all artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@v4
         with:
           path: artifacts
           pattern: build-*
@@ -628,7 +628,7 @@ jobs:
           cat /tmp/release_body.md
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.resolve-version.outputs.tag_name }}
           name: "Riven ${{ needs.resolve-version.outputs.tag_name }}"
