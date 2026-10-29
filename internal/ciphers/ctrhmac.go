@@ -15,6 +15,8 @@ import (
 	"io"
 
 	"golang.org/x/crypto/hkdf"
+
+	"github.com/secu-tools/riven/internal/memory"
 )
 
 // ctrHMAC implements cipher.AEAD as AES-256-CTR followed by HMAC-SHA-256
@@ -47,9 +49,7 @@ func newAESCTRHMAC(key []byte) (cipher.AEAD, error) {
 		return nil, err
 	}
 	block, err := aes.NewCipher(encKey)
-	for i := range encKey {
-		encKey[i] = 0
-	}
+	memory.Zero(encKey)
 	if err != nil {
 		return nil, err
 	}

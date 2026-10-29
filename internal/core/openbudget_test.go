@@ -27,7 +27,6 @@ func pieceDeclaring(t *testing.T, declared kdf.Params) []byte {
 		K:           2,
 		N:           3,
 		Serial:      1,
-		PayloadLen:  10,
 		PayloadHash: make([]byte, 32),
 		Share:       []byte("xxxxxxxxxx"),
 		RecordKDF:   true,

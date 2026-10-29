@@ -11,7 +11,6 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
-	"runtime"
 
 	"github.com/secu-tools/riven/internal/cascade"
 	"github.com/secu-tools/riven/internal/ciphers"
@@ -24,18 +23,13 @@ import (
 	"github.com/secu-tools/riven/internal/split"
 )
 
-// zeroAll wipes every buffer in bufs, releasing the locked ones.
-func zeroAll(bufs [][]byte) {
-	memory.FreeAll(bufs)
-}
-
 // canonicalPasswords returns NFC-canonical copies of pws so that a password
 // entered in a different Unicode composition or character encoding still derives
 // the same key (see internal/password). The returned cleanup wipes the copies;
 // the inputs are left for their owner to wipe.
 func canonicalPasswords(pws [][]byte) (out [][]byte, cleanup func()) {
 	out = password.CanonicalAll(pws)
-	return out, func() { zeroAll(out) }
+	return out, func() { memory.FreeAll(out) }
 }
 
 // canonicalizeOpen returns opts with its passwords replaced by canonical copies,
@@ -61,15 +55,19 @@ func canonicalizeSpecs(specs []LayerSpec) (out []LayerSpec, cleanup func()) {
 			copies = append(copies, c)
 		}
 	}
-	return out, func() { zeroAll(copies) }
+	return out, func() { memory.FreeAll(copies) }
 }
 
 // Padding rounds a piece up to the next size class, so its length gives only
 // the class rather than the content length. The class depends on the length
 // alone, so every piece of a set is the same size and extra pieces reveal
 // nothing further. The zero value pads at DefaultPadPercent.
+//
+// The padding is random fill shared with the payload, so it works without a
+// password too: fewer than k pieces cannot tell content from fill. Every set
+// carries at least format.MinFill bytes of it, padding or not.
 type Padding struct {
-	// Off leaves the natural length, which reveals the content length.
+	// Off leaves only the minimum fill, which reveals the content length.
 	Off bool
 
 	// Percent is the class width, and so the worst-case storage cost. Zero means
@@ -77,10 +75,10 @@ type Padding struct {
 	Percent int
 }
 
-// Padding widths. The default is deliberately small: it costs little, and the
-// classes are still wide enough that a length cannot be read off a piece.
+// Padding widths. The default is the narrowest: it costs little, everything small
+// still lands in the floor class, and a larger piece gives a range, not a length.
 const (
-	DefaultPadPercent = 5
+	DefaultPadPercent = 1
 	MinPadPercent     = 1
 	MaxPadPercent     = 500
 )
@@ -137,22 +135,18 @@ func BucketFor(n, percent int) int {
 	return size
 }
 
-// PaddingApplies reports whether padding will have any effect.
-//
-// The padding length lives inside the manifest, and a split with no password
-// layer seals its envelope with the public keyless key: the length is then
-// readable by anyone holding this tool, padded or not. Padding is skipped there
-// rather than charged for.
-func PaddingApplies(opts SplitOptions) bool {
-	if opts.Padding.Off || opts.Keyless {
-		return false
+// fillLen returns how much random fill to share after a payload of payloadLen
+// bytes: format.MinFill, plus whatever brings the piece up to its size class.
+// Every share has the same length and every manifest the same shape, so one fill
+// length covers the whole set.
+func fillLen(payloadLen, layerCount int, opts SplitOptions) int {
+	if opts.Padding.Off {
+		return format.MinFill
 	}
-	for _, l := range opts.Layers {
-		if l.Kind == PasswordLayer {
-			return true
-		}
-	}
-	return false
+	overhead := format.PieceLen(0, layerCount, len(opts.Name)+len(opts.CreatorVersion)+len(opts.CreatorCommit))
+	secret := format.SharedLen(payloadLen, format.MinFill)
+	target := BucketFor(overhead+split.ShareLen(secret, opts.K), opts.Padding.Width())
+	return format.MinFill + split.SecretLen(target-overhead, opts.K) - secret
 }
 
 // LayerKind says how a cascade layer is keyed.
@@ -221,6 +215,11 @@ type OpenOptions struct {
 
 	Params  *kdf.Params // non-nil overrides the recorded cost parameters
 	Schemes []uint8     // cascade algorithms, for pieces that omit them
+
+	// Damaged, when set, is told about each piece that did not open although
+	// another did, by its index among the pieces given. Such a piece is set aside
+	// and the set rebuilt from the rest, provided enough of them remain.
+	Damaged func(index int, err error)
 }
 
 // ErrSchemesRequired indicates the set did not record its algorithms and none
@@ -239,8 +238,6 @@ type splitPrep struct {
 	payloadHash     []byte
 	descs           []cascade.Descriptor
 	envPasswords    [][]byte
-	padLen          int
-	payloadLen      int
 	encrypted       bool
 	hybrid          bool
 	envelopeKeyless bool
@@ -298,15 +295,18 @@ func prepare(input []byte, opts SplitOptions) (*splitPrep, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := split.ValidateParams(opts.N, opts.K, len(payload)); err != nil {
-		memory.Zero(payload)
+	shared, payloadHash, err := format.WrapPayload(payload, fillLen(len(payload), len(layers), opts))
+	memory.Zero(payload)
+	if err != nil {
+		return nil, err
+	}
+	if err := split.ValidateParams(opts.N, opts.K, len(shared)); err != nil {
+		memory.Zero(shared)
 		return nil, err
 	}
 
-	payloadHash := format.Hash(payload)
-	shares, err := split.Split(payload, opts.N, opts.K)
-	payloadLen := len(payload)
-	memory.Zero(payload)
+	shares, err := split.Split(shared, opts.N, opts.K)
+	memory.Zero(shared)
 	if err != nil {
 		return nil, err
 	}
@@ -321,23 +321,14 @@ func prepare(input []byte, opts SplitOptions) (*splitPrep, error) {
 		descs[i] = cascade.Descriptor{Kind: l.Kind, SchemeID: l.SchemeID, Recorded: opts.RecordAlgo}
 	}
 
-	// Every share is the same length and every manifest the same shape, so one
-	// padding length covers the whole set. See PaddingApplies for when it is
-	// skipped.
-	padLen := 0
-	if PaddingApplies(opts) && len(shares) > 0 {
-		natural := format.PieceLen(len(shares[0]), 0, len(layers), len(opts.Name)+len(opts.CreatorVersion)+len(opts.CreatorCommit))
-		padLen = BucketFor(natural, opts.Padding.Width()) - natural
-	}
-
 	prep := &splitPrep{
 		shares: shares, setID: setID, payloadHash: payloadHash, descs: descs,
-		envPasswords: envPasswords, padLen: padLen, payloadLen: payloadLen,
-		encrypted: encrypted, hybrid: hybrid, envelopeKeyless: envelopeKeyless,
+		envPasswords: envPasswords, encrypted: encrypted, hybrid: hybrid,
+		envelopeKeyless: envelopeKeyless,
 	}
 	prep.cleanup = func() {
 		wipeCanon()
-		zeroAll(prep.shares)
+		memory.FreeAll(prep.shares)
 	}
 	committed = true
 	return prep, nil
@@ -416,12 +407,10 @@ func (p *splitPrep) encode(i int, opts SplitOptions) ([]byte, error) {
 		RecordAlgo:     opts.RecordAlgo,
 		RecordKDF:      opts.RecordKDF,
 		Keyless:        p.envelopeKeyless,
-		PayloadLen:     uint64(p.payloadLen),
 		PayloadHash:    p.payloadHash,
 		Layers:         p.descs,
 		Share:          p.shares[i],
 		Name:           opts.Name,
-		PadLen:         p.padLen,
 		CreatorVersion: opts.CreatorVersion,
 		CreatorCommit:  opts.CreatorCommit,
 		Passwords:      p.envPasswords,
@@ -443,24 +432,9 @@ func MemoryEstimate(inputLen, n int) int64 {
 // deliberately memory-hungry, so the count is bounded by a memory budget as well
 // as by the available parallelism.
 func derivationWorkers(p kdf.Params, n int) int {
-	if n <= 1 {
-		return 1
-	}
-	w := runtime.GOMAXPROCS(0)
-	if w > n {
-		w = n
-	}
+	w := parallel.Workers(n)
 	if p.Memory > 0 {
-		byMemory := int(parallelMemoryBudgetKiB / p.Memory)
-		if byMemory < 1 {
-			byMemory = 1
-		}
-		if w > byMemory {
-			w = byMemory
-		}
-	}
-	if w < 1 {
-		w = 1
+		w = min(w, max(1, int(parallelMemoryBudgetKiB/p.Memory)))
 	}
 	return w
 }
@@ -479,7 +453,6 @@ type PieceInfo struct {
 	AlgoStored     bool
 	KDFStored      bool
 	Keyless        bool
-	PayloadLen     uint64
 	PayloadHashHex string
 	Name           string // original file name, empty when it was not recorded
 
@@ -515,7 +488,6 @@ func Info(piece []byte, opts OpenOptions) (*PieceInfo, error) {
 		AlgoStored:     m.AlgoStored,
 		KDFStored:      m.KDFStored,
 		Keyless:        m.Keyless,
-		PayloadLen:     m.PayloadLen,
 		PayloadHashHex: fmt.Sprintf("%x", m.PayloadHash),
 		Name:           SafeName(m.Name),
 		CreatorVersion: m.CreatorVersion,
@@ -553,68 +525,31 @@ func CombineFile(pieces [][]byte, opts OpenOptions) ([]byte, string, error) {
 	opts, wipe := canonicalizeOpen(opts)
 	defer wipe()
 
-	first, usedParams, bySerial, err := openPieces(pieces, opts)
+	first, usedParams, bySerial, damaged, err := openPieces(pieces, opts)
 	if err != nil {
 		return nil, "", err
 	}
 	name := SafeName(first.Name)
 
-	k := first.K
-	if len(bySerial) < k {
-		return nil, "", fmt.Errorf("core: need %d distinct pieces, have %d", k, len(bySerial))
-	}
-
-	shares := make([][]byte, 0, len(bySerial))
-	for _, m := range bySerial {
-		shares = append(shares, m.Share)
-		if len(shares) == k {
-			break
-		}
-	}
-
-	payload, err := split.Combine(shares, k)
+	shares, err := pickShares(first.K, bySerial, damaged, opts.Damaged)
 	if err != nil {
 		return nil, "", err
 	}
-	defer memory.Zero(payload)
+	shared, err := split.Combine(shares, first.K)
+	if err != nil {
+		return nil, "", err
+	}
+	defer memory.Zero(shared)
 
-	if !bytes.Equal(format.Hash(payload), first.PayloadHash) {
+	payload, ok := format.UnwrapPayload(shared, first.PayloadHash)
+	if !ok {
 		return nil, "", errors.New("core: reconstruction failed integrity check (wrong or corrupt pieces)")
 	}
 
-	// Peel the cascade. Count password layers to route passwords correctly.
-	pwLayers := 0
-	for _, d := range first.Layers {
-		if d.Kind == cascade.Password {
-			pwLayers++
-		}
+	cascadePws, decaps, err := peelCredentials(first.Layers, opts)
+	if err != nil {
+		return nil, "", err
 	}
-	var cascadePws [][]byte
-	if pwLayers > 0 {
-		if len(opts.Passwords) != pwLayers {
-			return nil, "", fmt.Errorf("core: this set needs %d password(s), got %d", pwLayers, len(opts.Passwords))
-		}
-		cascadePws = opts.Passwords
-	}
-
-	// Count recipient layers so a missing key is reported before doing the work.
-	kemLayers := 0
-	for _, d := range first.Layers {
-		if d.Kind == cascade.KEM {
-			kemLayers++
-		}
-	}
-	var decaps []cascade.Decapsulator
-	if kemLayers > 0 {
-		if len(opts.PrivateKeys) == 0 {
-			return nil, "", fmt.Errorf("core: this set has %d recipient layer(s); the matching private key(s) are required", kemLayers)
-		}
-		for _, k := range opts.PrivateKeys {
-			key := k
-			decaps = append(decaps, func(ct []byte) ([]byte, error) { return key.Decapsulate(ct) })
-		}
-	}
-
 	schemes := opts.Schemes
 	if !first.AlgoStored && len(first.Layers) > 0 && len(schemes) == 0 {
 		return nil, "", ErrSchemesRequired
@@ -627,8 +562,67 @@ func CombineFile(pieces [][]byte, opts OpenOptions) ([]byte, string, error) {
 	return plaintext, name, nil
 }
 
-// SchemeName returns the display name for a cipher scheme id.
-func SchemeName(id uint8) string { return ciphers.Name(id) }
+// pickShares returns k shares of distinct pieces. Damaged pieces are reported
+// through onDamaged when enough intact ones remain to rebuild without them; when
+// too few remain, the first damaged piece is the error, since it is what to
+// replace.
+func pickShares(k int, bySerial map[int]*format.Manifest, damaged []error, onDamaged func(int, error)) ([][]byte, error) {
+	if len(bySerial) < k {
+		for i, derr := range damaged {
+			if derr != nil {
+				return nil, fmt.Errorf("core: piece %d did not open although another did, so that file is damaged: %w",
+					i+1, derr)
+			}
+		}
+		return nil, fmt.Errorf("core: need %d distinct pieces, have %d", k, len(bySerial))
+	}
+	for i, derr := range damaged {
+		if derr != nil && onDamaged != nil {
+			onDamaged(i, derr)
+		}
+	}
+	shares := make([][]byte, 0, k)
+	for _, m := range bySerial {
+		shares = append(shares, m.Share)
+		if len(shares) == k {
+			break
+		}
+	}
+	return shares, nil
+}
+
+// peelCredentials matches the supplied passwords and private keys to the layers,
+// so a wrong number of passwords or a missing key is reported before any key is
+// derived.
+func peelCredentials(layers []cascade.Descriptor, opts OpenOptions) ([][]byte, []cascade.Decapsulator, error) {
+	pwLayers, kemLayers := 0, 0
+	for _, d := range layers {
+		switch d.Kind {
+		case cascade.Password:
+			pwLayers++
+		case cascade.KEM:
+			kemLayers++
+		}
+	}
+	var passwords [][]byte
+	if pwLayers > 0 {
+		if len(opts.Passwords) != pwLayers {
+			return nil, nil, fmt.Errorf("core: this set needs %d password(s), got %d", pwLayers, len(opts.Passwords))
+		}
+		passwords = opts.Passwords
+	}
+	var decaps []cascade.Decapsulator
+	if kemLayers > 0 {
+		if len(opts.PrivateKeys) == 0 {
+			return nil, nil, fmt.Errorf("%w: this set has %d recipient layer(s) and no private key was given",
+				ErrKeyRequired, kemLayers)
+		}
+		for _, key := range opts.PrivateKeys {
+			decaps = append(decaps, func(ct []byte) ([]byte, error) { return key.Decapsulate(ct) })
+		}
+	}
+	return passwords, decaps, nil
+}
 
 // AssignSchemes resolves the algorithm for every layer. A layer that names one
 // keeps it; a layer that leaves it zero gets the default, stepping to another
@@ -644,15 +638,7 @@ func AssignSchemes(layers []LayerSpec) ([]uint8, error) {
 	for i, l := range layers {
 		id := l.SchemeID
 		if id == 0 {
-			id = ciphers.Default().ID
-			if id == prev {
-				for _, s := range ciphers.All() {
-					if s.ID != prev {
-						id = s.ID
-						break
-					}
-				}
-			}
+			id = ciphers.Avoiding(ciphers.Default().ID, prev)
 		}
 		if _, ok := ciphers.ByID(id); !ok {
 			return nil, fmt.Errorf("core: layer %d names unknown algorithm id %d", i+1, id)
@@ -667,19 +653,15 @@ func AssignSchemes(layers []LayerSpec) ([]uint8, error) {
 	return out, nil
 }
 
+// describeLayer names a layer's algorithm and what keys it. A piece does not
+// carry the encapsulated key, which lives in the payload, so the recipient key
+// type cannot be named from one piece.
 func describeLayer(d cascade.Descriptor) string {
 	name := ciphers.Name(d.SchemeID)
-	switch d.Kind {
-	case cascade.KEM:
-		// The recipient key type is not recorded, but the encapsulated key has a
-		// distinct length per type, which is enough to name it.
-		if s := kem.SchemeForCiphertextSize(d.KEMCiphertextLen); len(s) == 1 {
-			return name + " (" + s[0].Name() + " recipient key)"
-		}
+	if d.Kind == cascade.KEM {
 		return name + " (recipient key)"
-	default:
-		return name + " (password)"
 	}
+	return name + " (password)"
 }
 
 // checkSplitOptions validates and normalises the options a split was asked for.
@@ -708,7 +690,7 @@ func checkSplitOptions(opts *SplitOptions) error {
 func buildLayers(specs []LayerSpec, schemeIDs []uint8) (layers []cascade.Layer, envPasswords [][]byte, hybrid bool, cleanup func(), err error) {
 	var secrets [][]byte
 	cleanup = func() {
-		zeroAll(secrets)
+		memory.FreeAll(secrets)
 	}
 
 	for i, l := range specs {
@@ -780,52 +762,58 @@ func openWorkers(pieces [][]byte, opts OpenOptions, first kdf.Params, rest int) 
 	return derivationWorkers(openBudget(pieces, opts, first), rest)
 }
 
-// openPieces opens every piece and checks they describe one set, returning the
-// first manifest, the cost that opened it, and the manifests keyed by serial.
+// openPieces opens the pieces and checks they describe one set. It returns the
+// manifest of the piece the others are measured against, the cost that opened
+// it, the manifests keyed by serial, and, by index, why each piece that did not
+// open failed.
 //
-// The first piece is opened alone because its recorded cost bounds how many of
-// the rest may be derived at once. Consistency is checked in index order, so an
-// inconsistent set names the same piece whatever the scheduling.
-func openPieces(pieces [][]byte, opts OpenOptions) (*format.Manifest, kdf.Params, map[int]*format.Manifest, error) {
+// That reference piece is opened alone, because its recorded cost bounds how
+// many of the rest may be derived at once. It is the first piece, or the second
+// when the first does not open, so one damaged file is not taken for a wrong
+// password; when neither opens, the credentials are what is wrong. A piece that
+// fails once the reference has opened is damaged rather than wrongly keyed, and
+// is set aside rather than failing the set, since spare pieces exist for exactly
+// this. Consistency is checked in index order, so an inconsistent set names the
+// same piece whatever the scheduling.
+func openPieces(pieces [][]byte, opts OpenOptions) (*format.Manifest, kdf.Params, map[int]*format.Manifest, []error, error) {
 	opened := make([]*format.Manifest, len(pieces))
-	openedParams := make([]kdf.Params, len(pieces))
+	failed := make([]error, len(pieces))
 
+	ref := 0
 	m0, p0, err := format.Decode(pieces[0], opts.Passwords, opts.Params)
-	if err != nil {
-		return nil, kdf.Params{}, nil, fmt.Errorf("core: piece 1: %w", err)
+	if err != nil && len(pieces) > 1 {
+		if m1, p1, err1 := format.Decode(pieces[1], opts.Passwords, opts.Params); err1 == nil {
+			failed[0] = err
+			ref, m0, p0, err = 1, m1, p1, nil
+		}
 	}
-	opened[0], openedParams[0] = m0, p0
+	if err != nil {
+		return nil, kdf.Params{}, nil, nil, fmt.Errorf("core: piece 1: %w", err)
+	}
+	opened[ref] = m0
 
-	if rest := len(pieces) - 1; rest > 0 {
-		err = parallel.Do(rest, openWorkers(pieces, opts, p0, rest), func(i int) error {
-			idx := i + 1
-			m, params, derr := format.Decode(pieces[idx], opts.Passwords, opts.Params)
-			if derr != nil {
-				// Piece 1 already opened with these credentials, so this one is
-				// damaged rather than wrongly keyed. Saying which it is decides
-				// whether to retype the password or find another copy.
-				return fmt.Errorf("core: piece %d did not open although piece 1 did, so that file is damaged: %w",
-					idx+1, derr)
-			}
-			opened[idx], openedParams[idx] = m, params
+	if rest := len(pieces) - ref - 1; rest > 0 {
+		_ = parallel.Do(rest, openWorkers(pieces, opts, p0, rest), func(i int) error {
+			idx := ref + 1 + i
+			opened[idx], _, failed[idx] = format.Decode(pieces[idx], opts.Passwords, opts.Params)
 			return nil
 		})
-		if err != nil {
-			return nil, kdf.Params{}, nil, err
-		}
 	}
 
 	bySerial := make(map[int]*format.Manifest, len(pieces))
 	for idx, m := range opened {
-		if idx > 0 {
+		if m == nil {
+			continue
+		}
+		if idx != ref {
 			if !bytes.Equal(m.SetID, m0.SetID) {
-				return nil, kdf.Params{}, nil, fmt.Errorf("core: piece %d belongs to a different set", idx+1)
+				return nil, kdf.Params{}, nil, nil, fmt.Errorf("core: piece %d belongs to a different set", idx+1)
 			}
 			if m.K != m0.K || m.N != m0.N || !bytes.Equal(m.PayloadHash, m0.PayloadHash) {
-				return nil, kdf.Params{}, nil, fmt.Errorf("core: piece %d is inconsistent with the set", idx+1)
+				return nil, kdf.Params{}, nil, nil, fmt.Errorf("core: piece %d is inconsistent with the set", idx+1)
 			}
 		}
 		bySerial[m.Serial] = m
 	}
-	return m0, p0, bySerial, nil
+	return m0, p0, bySerial, failed, nil
 }

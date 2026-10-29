@@ -8,8 +8,8 @@
 //	salt(16) || kdf(1) || nonce(24) || XChaCha20-Poly1305(key, nonce, manifest) || tag(16)
 //
 // Every byte is uniform random (salt, nonce), a masked cost byte, or AEAD
-// ciphertext. Nothing is in the clear: version, metadata, share and padding all
-// live inside the sealed manifest.
+// ciphertext. Nothing is in the clear: version, metadata and share all live
+// inside the sealed manifest.
 //
 // The kdf byte holds the Argon2id cost masked by a keystream derived from the
 // salt. Every byte value decodes to a plausible cost, so a random byte is
@@ -18,7 +18,9 @@
 package format
 
 import (
+	"bytes"
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 
@@ -32,8 +34,17 @@ import (
 )
 
 // Version is the manifest schema version. A reader refuses a version it does not
-// know rather than guessing at the layout.
-const Version uint16 = 1
+// know rather than guessing at the layout. Version 2 moved the content length and
+// the padding into the shared bytes.
+const Version uint16 = 2
+
+// MinFill is the least random fill shared after the payload. The payload hash
+// covers it, so the hash cannot be checked against a guess of the content by
+// anyone holding fewer than k shares, and the fill pads the piece as well.
+const MinFill = 32
+
+// lengthLen is the size of the payload length that starts the shared bytes.
+const lengthLen = 8
 
 // MaxNameLen bounds the recorded file name. Every piece carries it, so it is kept
 // short enough that recording a name never decides whether a piece fits a QR code.
@@ -85,7 +96,6 @@ type Manifest struct {
 	AlgoStored  bool
 	KDFStored   bool
 	Keyless     bool
-	PayloadLen  uint64
 	PayloadHash []byte
 	Layers      []cascade.Descriptor
 	Share       []byte
@@ -113,12 +123,10 @@ type EncodeInput struct {
 	RecordAlgo  bool
 	RecordKDF   bool
 	Keyless     bool // seal the envelope with the public keyless key, not a password
-	PayloadLen  uint64
 	PayloadHash []byte
 	Layers      []cascade.Descriptor
 	Share       []byte
 	Name        string // original file name, empty to record none
-	PadLen      int    // padding bytes appended inside the manifest
 
 	// CreatorVersion and CreatorCommit identify the build writing the piece. Set
 	// by the caller from its own build info; not user-configurable.
@@ -146,9 +154,6 @@ func (in EncodeInput) validate() error {
 	}
 	if len(in.CreatorVersion) > MaxCreatorLen || len(in.CreatorCommit) > MaxCreatorLen {
 		return fmt.Errorf("format: creator version/commit exceed %d bytes", MaxCreatorLen)
-	}
-	if in.PadLen < 0 {
-		return errors.New("format: negative padding length")
 	}
 	if in.Keyless {
 		if len(in.Passwords) > 0 {
@@ -223,23 +228,15 @@ func Encode(in EncodeInput) ([]byte, error) {
 		return nil, err
 	}
 
-	pad := make([]byte, in.PadLen)
-	if in.PadLen > 0 {
-		if _, err := rand.Read(pad); err != nil {
-			return nil, err
-		}
-	}
-
 	flags := in.flags()
 
-	w := wire.NewWriter(len(in.Share) + in.PadLen + 128)
+	w := wire.NewWriter(len(in.Share) + 128)
 	w.U16(Version)
 	w.Raw(in.SetID)
 	w.U8(uint8(in.K))
 	w.U8(uint8(in.N))
 	w.U8(uint8(in.Serial))
 	w.U8(flags)
-	w.U64(in.PayloadLen)
 	w.Raw(in.PayloadHash)
 	w.U8(uint8(len(in.Layers)))
 	for _, d := range in.Layers {
@@ -254,7 +251,6 @@ func Encode(in EncodeInput) ([]byte, error) {
 	w.Bytes([]byte(in.CreatorVersion))
 	w.Bytes([]byte(in.CreatorCommit))
 	w.Bytes(in.Share)
-	w.Bytes(pad)
 	body := w.Result()
 
 	var key []byte
@@ -284,18 +280,17 @@ func Encode(in EncodeInput) ([]byte, error) {
 var ErrWrongPassword = errors.New("format: wrong password or parameters, or not a riven piece")
 
 // fixedManifestLen is the manifest overhead that does not depend on the share,
-// the padding, the name, the creator strings, or the number of layers:
-// version(2) + set id(16) + k/n/serial/flags(4) + payload length(8) + payload
-// hash(32) + layer count(1) + five length prefixes(20): name, creator version,
-// creator commit, share, padding.
-const fixedManifestLen = 2 + setIDLen + 4 + 8 + hashLen + 1 + 20
+// the name, the creator strings, or the number of layers: version(2) + set
+// id(16) + k/n/serial/flags(4) + payload hash(32) + layer count(1) + four length
+// prefixes(16): name, creator version, creator commit, share.
+const fixedManifestLen = 2 + setIDLen + 4 + hashLen + 1 + 16
 
 // PieceLen returns the exact encoded length of a piece, without encoding it. The
 // padding is chosen to reach a target size, so that target has to be known before
 // the piece is built. metaLen is the combined length of the name and creator
 // version/commit strings. The package tests assert this against real encodings.
-func PieceLen(shareLen, padLen, layerCount, metaLen int) int {
-	return headerLen + fixedManifestLen + 2*layerCount + metaLen + shareLen + padLen + tagLen
+func PieceLen(shareLen, layerCount, metaLen int) int {
+	return headerLen + fixedManifestLen + 2*layerCount + metaLen + shareLen + tagLen
 }
 
 // PeekParams reports the cost parameters a piece declares, without deriving a
@@ -383,10 +378,6 @@ func parseManifest(pt []byte) (*Manifest, error) {
 	if err != nil {
 		return nil, err
 	}
-	payloadLen, err := r.U64()
-	if err != nil {
-		return nil, err
-	}
 	payloadHash, err := r.Raw(hashLen)
 	if err != nil {
 		return nil, err
@@ -428,7 +419,9 @@ func parseManifest(pt []byte) (*Manifest, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Remaining bytes are padding and are ignored.
+	if r.Remaining() != 0 {
+		return nil, errors.New("format: unexpected bytes after the share")
+	}
 
 	if k < 1 || n < k || serial < 1 || serial > n {
 		return nil, errors.New("format: invalid k/n/serial in manifest")
@@ -445,7 +438,6 @@ func parseManifest(pt []byte) (*Manifest, error) {
 		AlgoStored:     algoStored,
 		KDFStored:      flags&flagKDFRecorded != 0,
 		Keyless:        flags&flagKeyless != 0,
-		PayloadLen:     payloadLen,
 		PayloadHash:    payloadHash,
 		Layers:         layers,
 		Share:          share,
@@ -487,9 +479,49 @@ func envelopeAD(salt []byte, kdfByte byte) []byte {
 // Hash returns the BLAKE2b-256 of b, used for payload identity and integrity.
 func Hash(b []byte) []byte {
 	h := blake2b.Sum256(b)
-	out := make([]byte, len(h))
-	copy(out, h[:])
-	return out
+	return h[:]
+}
+
+// SharedLen returns the length of the shared bytes for a payload of payloadLen
+// bytes followed by fill random bytes.
+func SharedLen(payloadLen, fill int) int { return lengthLen + payloadLen + fill }
+
+// WrapPayload returns what is shared for payload, and the hash every manifest of
+// the set carries. The shared bytes are the payload length (8 bytes, big-endian),
+// the payload, then fill random bytes, at least MinFill.
+//
+// The fill does two jobs. It pads, and because the length sits inside the shared
+// bytes, fewer than k pieces cannot tell the payload from the fill even when the
+// envelope is public. It also salts the hash, which would otherwise be a function
+// of the content alone: a keyless piece would then let anyone confirm a guess of
+// the content, reading a PIN or a short password straight off a single piece.
+func WrapPayload(payload []byte, fill int) (shared, hash []byte, err error) {
+	if fill < MinFill {
+		return nil, nil, fmt.Errorf("format: fill of %d bytes is under the minimum %d", fill, MinFill)
+	}
+	shared = make([]byte, SharedLen(len(payload), fill))
+	binary.BigEndian.PutUint64(shared, uint64(len(payload)))
+	copy(shared[lengthLen:], payload)
+	if _, err := rand.Read(shared[lengthLen+len(payload):]); err != nil {
+		memory.Zero(shared)
+		return nil, nil, err
+	}
+	return shared, Hash(shared), nil
+}
+
+// UnwrapPayload checks reconstructed shared bytes against the manifest's hash and
+// returns the payload they carry, which aliases shared. It reports false when the
+// hash does not match, which is how a wrong or corrupt share is detected, or when
+// the recorded length leaves less than MinFill.
+func UnwrapPayload(shared, hash []byte) ([]byte, bool) {
+	if len(shared) < SharedLen(0, MinFill) || !bytes.Equal(Hash(shared), hash) {
+		return nil, false
+	}
+	n := binary.BigEndian.Uint64(shared)
+	if n > uint64(len(shared)-SharedLen(0, MinFill)) {
+		return nil, false
+	}
+	return shared[lengthLen : lengthLen+int(n)], true
 }
 
 // safeCreator reduces a recorded build identifier to characters that are safe to

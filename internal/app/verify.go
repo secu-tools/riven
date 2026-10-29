@@ -33,7 +33,7 @@ func cmdVerify(opts *cliOptions) error {
 		return err
 	}
 	raw := pieceBytes(pieces)
-	defer wipeAll(raw)
+	defer memory.FreeAll(raw)
 
 	open, wipe, err := resolveOpenCredentials(opts, raw)
 	if err != nil {
@@ -118,9 +118,12 @@ func sortedSetIDs(sets map[string][]opened) []string {
 // enough distinct pieces are present. It returns false when the set is short or
 // the reconstruction fails.
 func verifySet(out io.Writer, id string, held []opened, open core.OpenOptions) bool {
-	distinct := map[int]bool{}
+	// One piece per serial: a second copy of a piece adds nothing to a rebuild.
+	distinct := map[int][]byte{}
 	for _, h := range held {
-		distinct[h.info.Serial] = true
+		if _, ok := distinct[h.info.Serial]; !ok {
+			distinct[h.info.Serial] = h.piece
+		}
 	}
 	need, total := held[0].info.K, held[0].info.N
 	short := need - len(distinct)
@@ -135,16 +138,11 @@ func verifySet(out io.Writer, id string, held []opened, open core.OpenOptions) b
 	// Rebuilding in memory is the only check that covers the shares as well as
 	// the envelopes, so it is worth the work when the pieces are there.
 	subset := make([][]byte, 0, need)
-	used := map[int]bool{}
-	for _, h := range held {
+	for _, piece := range distinct {
 		if len(subset) == need {
 			break
 		}
-		if used[h.info.Serial] {
-			continue
-		}
-		used[h.info.Serial] = true
-		subset = append(subset, h.piece)
+		subset = append(subset, piece)
 	}
 	recovered, err := core.Combine(subset, open)
 	if err != nil {

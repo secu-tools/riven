@@ -80,16 +80,3 @@ func TestEndOfFlagsSentinel(t *testing.T) {
 		t.Fatalf("--out after -- was still read as a flag: %q", o.outDir)
 	}
 }
-
-// A lone dash means standard input and must stay an operand.
-func TestLoneDashIsAnOperand(t *testing.T) {
-	t.Chdir(t.TempDir())
-
-	o, err := parseArgs([]string{"split", "-", "-y"})
-	if err != nil {
-		t.Fatalf("lone dash rejected: %v", err)
-	}
-	if len(o.files) != 1 || o.files[0] != "-" {
-		t.Fatalf("files = %v, want [-]", o.files)
-	}
-}

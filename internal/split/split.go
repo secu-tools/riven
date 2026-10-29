@@ -69,6 +69,24 @@ func chunkCount(shareLen int) int {
 	return m
 }
 
+// ShareLen returns the length of each share of a secret of secretLen bytes.
+func ShareLen(secretLen, k int) int {
+	if k == 1 {
+		return secretLen
+	}
+	return secretLen + (secretLen+chunkBytes-1)/chunkBytes
+}
+
+// SecretLen returns the longest secret whose shares are at most shareLen bytes.
+// It inverts ShareLen exactly, except at a chunk boundary, where no secret has
+// shares of exactly shareLen and the result is one byte short.
+func SecretLen(shareLen, k int) int {
+	if k == 1 {
+		return shareLen
+	}
+	return shareLen - chunkCount(shareLen)
+}
+
 // Split divides secret into n parts, k of which are required to reconstruct it.
 //
 // For k == 1 each part is an independent full copy of the secret. For k >= 2 the

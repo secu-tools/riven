@@ -34,3 +34,10 @@ change fails the build instead of going unnoticed. To sync deliberately:
     -o internal/shamir/LICENSE
 
 Then review the diff, run the tests, and update the commit recorded above.
+
+Riven's own tests
+-----------------
+properties_test.go is Riven's own (MIT), not part of the copy, and a sync
+leaves it alone. It covers what the upstream tests do not: the field
+arithmetic, every threshold up to 255, and that fewer shares than the
+threshold reveal nothing.

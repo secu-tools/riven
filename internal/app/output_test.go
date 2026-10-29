@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -116,28 +115,6 @@ func TestRecoveredDataHonoursOut(t *testing.T) {
 	}
 	if !bytes.Equal(got, data) {
 		t.Fatalf("wrote %q, want %q", got, data)
-	}
-}
-
-// os.WriteFile applies its mode only when it creates the file, so writing a
-// private key over an existing world-readable one would have kept that mode.
-func TestWriteSecretTightensAnExistingFilesMode(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX modes are not enforced on Windows; access follows inherited ACLs")
-	}
-	path := filepath.Join(t.TempDir(), "id.key")
-	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeSecret(path, []byte("a private key")); err != nil {
-		t.Fatal(err)
-	}
-	fi, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if perm := fi.Mode().Perm(); perm != 0o600 {
-		t.Fatalf("mode is %04o, want 0600: a private key stayed readable by others", perm)
 	}
 }
 

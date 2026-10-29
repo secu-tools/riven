@@ -664,18 +664,10 @@ func TestNegativeCases(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := func(n string) string { return filepath.Join(out, n) }
-	badEnv := []string{"RIVEN_TEST_BAD=wrong-password"}
 
-	// Below threshold.
-	if _, err := riven(t, env1, "combine", p("n.1"), p("n.2"),
-		"--password-env", flagPw1, "--out", filepath.Join(dir, "x1"), "-y"); err == nil {
-		t.Fatal("below-threshold combine should fail")
-	}
-	// Wrong password.
-	if _, err := riven(t, badEnv, "combine", p("n.1"), p("n.2"), p("n.3"),
-		"--password-env", "RIVEN_TEST_BAD", "--out", filepath.Join(dir, "x2"), "-y"); err == nil {
-		t.Fatal("wrong-password combine should fail")
-	}
+	// A threshold or password failure is covered, with what it leaves behind, by
+	// TestFailedCombineLeavesNoTrace. These are the failures of the request itself.
+
 	// Missing environment variable.
 	if _, err := riven(t, nil, "combine", p("n.1"), p("n.2"), p("n.3"),
 		"--password-env", "RIVEN_TEST_NOT_SET", "--out", filepath.Join(dir, "x3"), "-y"); err == nil {
@@ -752,7 +744,7 @@ func TestQRPaddingInteraction(t *testing.T) {
 	dir := t.TempDir()
 	// Sized so the unpadded pieces fit in a QR code but the next size class does
 	// not: the natural piece is under the limit, the padded one is over it.
-	data := make([]byte, 2700)
+	data := make([]byte, 2682)
 	rand.Read(data)
 	in := writeFile(t, dir, "edge.bin", data)
 

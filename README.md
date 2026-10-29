@@ -207,7 +207,7 @@ Two consequences worth knowing before you start:
   ~1 GB files. That is what makes fewer than K pieces reveal nothing.
 
 Every piece of a set is the same size, and splitting the same input again gives
-that size again. `--pad` sets how coarse the size class is: 5 percent by default,
+that size again. `--pad` sets how coarse the size class is: 1 percent by default,
 up to 500 for a vaguer answer, or `none` for exact sizes.
 
 Each piece records the algorithms, the Argon2id cost and the input file's name by
@@ -224,8 +224,8 @@ Its metadata is readable, by design. There is no password to ask for, so
 `riven info` on a single piece tells you what it is: which set it belongs to,
 which piece it is, how many more you need, and the original file name. That is
 the point -- a keyless piece found later is identifiable rather than an anonymous
-blob of noise. The payload hash is readable for the same reason, so someone who
-can already guess the file exactly can confirm the guess.
+blob of noise. The content is not readable, nor is its exact length, and a single
+piece cannot even confirm a guess of it.
 
 A keyless set is also unauthenticated: substituted pieces rebuild without
 complaint. This is not a gap that can be closed. Authentication needs a secret

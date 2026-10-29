@@ -15,6 +15,7 @@ import (
 	"github.com/secu-tools/riven/internal/core"
 	"github.com/secu-tools/riven/internal/kdf"
 	"github.com/secu-tools/riven/internal/kem"
+	"github.com/secu-tools/riven/internal/memory"
 	"github.com/secu-tools/riven/internal/pieceio"
 )
 
@@ -278,8 +279,9 @@ func TestSplitSummaryFitsTheLineWidth(t *testing.T) {
 	}
 }
 
-// TestPaddingLineStatesWhatTheSizeReveals covers all three cases, since this is
-// the line that tells a user whether the piece size is covered.
+// TestPaddingLineStatesWhatTheSizeReveals covers padded, unpadded and a set with
+// no password, since this is the line that tells a user whether the piece size
+// is covered.
 func TestPaddingLineStatesWhatTheSizeReveals(t *testing.T) {
 	cases := []struct {
 		name string
@@ -287,8 +289,8 @@ func TestPaddingLineStatesWhatTheSizeReveals(t *testing.T) {
 		want string
 	}{
 		{"padded", []string{"--pad", "10"}, "padded to a 10 percent size class"},
-		{"off", []string{"--pad", "none"}, "not padded, so it reveals"},
-		{"no password", []string{"--keyless", "-n", "3", "-k", "2"}, "Without a password"},
+		{"off", []string{"--pad", "none"}, "not padded to a size class"},
+		{"no password", []string{"--keyless", "-n", "3", "-k", "2", "--pad", "10"}, "padded to a 10 percent size class"},
 	}
 	for _, c := range cases {
 		args := c.args
@@ -408,7 +410,7 @@ func TestGeneratedPasswordsReachTheUser(t *testing.T) {
 
 func TestWipeAllClearsEveryBuffer(t *testing.T) {
 	bufs := [][]byte{[]byte("secret one"), []byte("secret two"), nil}
-	wipeAll(bufs)
+	memory.FreeAll(bufs)
 	for i, b := range bufs {
 		for _, c := range b {
 			if c != 0 {

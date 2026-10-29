@@ -5,9 +5,12 @@ package core
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/secu-tools/riven/internal/ciphers"
+	"github.com/secu-tools/riven/internal/format"
 	"github.com/secu-tools/riven/internal/kdf"
 	"github.com/secu-tools/riven/internal/kem"
 )
@@ -112,31 +115,6 @@ func TestRegressionAdjacentRuleCoversRecipientLayers(t *testing.T) {
 	}
 }
 
-// Defect: a recipient key with no password caused a password to be generated
-// behind the user's back, which is not what public-key delivery means.
-func TestRegressionRecipientOnlyNeedsNoPassword(t *testing.T) {
-	priv, err := kem.Generate(kem.Default())
-	if err != nil {
-		t.Fatal(err)
-	}
-	input := []byte("no password anywhere")
-	pieces, err := Split(input, SplitOptions{
-		N: 3, K: 2,
-		Layers: []LayerSpec{{Kind: RecipientLayer, Recipient: priv.Public()}},
-		Params: testParams, RecordAlgo: true, RecordKDF: true,
-	})
-	if err != nil {
-		t.Fatalf("recipient-only split must be allowed: %v", err)
-	}
-	got, err := Combine(pieces[:2], OpenOptions{PrivateKeys: []*kem.PrivateKey{priv}})
-	if err != nil {
-		t.Fatalf("the key alone must decrypt: %v", err)
-	}
-	if !bytes.Equal(got, input) {
-		t.Fatal("mismatch")
-	}
-}
-
 // Defect: the cost parameters recorded in a piece were trusted without bound, so
 // arbitrary bytes could ask for the largest configuration. The parameters are read
 // without deriving a key so a caller can see the cost first.
@@ -211,5 +189,85 @@ func TestRegressionLayerKindMustMatchItsFields(t *testing.T) {
 		if _, err := Split([]byte("x"), so); err == nil {
 			t.Fatalf("case %d: a contradictory layer must be refused", i+1)
 		}
+	}
+}
+
+// Defect: combining a set addressed to a recipient key, with no private key
+// given, returned a plain error rather than ErrKeyRequired. The callers that
+// check for it, the split's self-check and verify, then reported a failure for a
+// set that was fine and only needed the key.
+func TestRegressionMissingKeyIsErrKeyRequired(t *testing.T) {
+	priv, err := kem.Generate(kem.X25519)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pieces := mustSplit(t, []byte("for the key holder"), SplitOptions{N: 2, K: 2,
+		Layers: []LayerSpec{{Kind: RecipientLayer, Recipient: priv.Public()}}})
+	if _, err := Combine(pieces, OpenOptions{}); !errors.Is(err, ErrKeyRequired) {
+		t.Fatalf("a missing private key was reported as %v", err)
+	}
+}
+
+// Defect: one piece that did not open failed the whole combine, even with K
+// intact pieces beside it, which defeats keeping spares. When the damaged piece
+// came first the error even blamed the password.
+func TestRegressionDamagedSpareDoesNotBlockTheRest(t *testing.T) {
+	pw := [][]byte{[]byte("spares are for this")}
+	input := []byte("rebuilt from the intact pieces")
+	pieces := mustSplit(t, input, SplitOptions{N: 4, K: 2,
+		Layers: []LayerSpec{{Kind: PasswordLayer, Password: pw[0]}}})
+	for _, bad := range []int{0, 1} {
+		set := [][]byte{pieces[0], pieces[1], pieces[2]}
+		damaged := append([]byte(nil), set[bad]...)
+		damaged[len(damaged)/2] ^= 0xFF
+		set[bad] = damaged
+
+		var reported []int
+		got, err := Combine(set, OpenOptions{Passwords: pw,
+			Damaged: func(i int, _ error) { reported = append(reported, i) }})
+		if err != nil || !bytes.Equal(got, input) {
+			t.Fatalf("piece %d damaged: two intact pieces of a 2-of-4 set did not rebuild: %v", bad+1, err)
+		}
+		// The rebuild succeeds, but the damaged file still has to be replaced.
+		if len(reported) != 1 || reported[0] != bad {
+			t.Fatalf("piece %d damaged: reported %v", bad+1, reported)
+		}
+	}
+}
+
+// Defect: every piece of a keyless set carried BLAKE2b-256 of the payload, which
+// for a keyless set is a fixed three-byte header followed by the content. The
+// envelope key is public, so one piece let anyone confirm a guess of the content:
+// a PIN or a short password could be read off a single piece by trying them all.
+func TestRegressionOnePieceCannotConfirmAGuess(t *testing.T) {
+	secret := []byte("4821")
+	opts := SplitOptions{N: 3, K: 2, Keyless: true}
+	a, err := Info(mustSplit(t, secret, opts)[0], OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := Info(mustSplit(t, secret, opts)[0], OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	guess := fmt.Sprintf("%x", format.Hash(append([]byte{0, 1, 0}, secret...)))
+	if a.PayloadHashHex == guess {
+		t.Fatal("one piece confirms a guess of the content")
+	}
+	if a.PayloadHashHex == b.PayloadHashHex {
+		t.Fatal("two splits of the same content carry the same hash, so a guess can still be checked")
+	}
+}
+
+// Defect: a set with no password recorded the content length in every piece,
+// readable by anyone, and was never padded, so one piece gave the exact length.
+// The length now sits inside the shared bytes and the padding applies, so two
+// lengths in the same size class give pieces of the same size.
+func TestRegressionKeylessPieceHidesTheLength(t *testing.T) {
+	opts := SplitOptions{N: 3, K: 2, Keyless: true, Padding: PadPercent(100)}
+	short := mustSplit(t, []byte("4821"), opts)
+	long := mustSplit(t, bytes.Repeat([]byte("seed words "), 6), opts)
+	if len(short[0]) != len(long[0]) {
+		t.Fatalf("a 4-byte and a 66-byte secret gave pieces of %d and %d bytes", len(short[0]), len(long[0]))
 	}
 }

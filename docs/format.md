@@ -21,12 +21,14 @@ piece file
   XChaCha20-Poly1305(manifest) + tag
       manifest
         set metadata (version, set id, k, n, serial, flags, ...)
-        share            one Shamir share of the payload
-        padding          random bytes, to reach a size class
+        share            one Shamir share of the shared bytes
 
-payload  (reassembled from k shares, never stored whole in one piece)
-  cascade header (per-layer kind, algorithm, salt, nonce, encapsulated key)
-  ciphertext     the input, wrapped once per layer
+shared bytes  (reassembled from k shares, never stored whole in one piece)
+  payload length
+  payload
+    cascade header (per-layer kind, algorithm, salt, nonce, encapsulated key)
+    ciphertext     the input, wrapped once per layer
+  fill           random bytes: the hash salt and the padding
 ```
 
 Nothing outside the header is in the clear. The header is a random salt, a masked
@@ -46,8 +48,8 @@ Fixed header: 41 bytes. Minimum piece: 57 bytes (header plus tag, an empty
 manifest). Total length:
 
 ```
-piece = 41 + 83 + 2*layers + name + creator version + creator commit + share + padding + 16
-      = 140 + 2*layers + name + creator version + creator commit + share + padding
+piece = 41 + 71 + 2*layers + name + creator version + creator commit + share + 16
+      = 128 + 2*layers + name + creator version + creator commit + share
 ```
 
 The associated data covering the ciphertext is:
@@ -64,23 +66,23 @@ The plaintext sealed by the envelope. Fields appear in this order.
 
 | Size | Field | Notes |
 |------|-------|-------|
-| 2 | `u16` version | 1 |
+| 2 | `u16` version | 2 |
 | 16 | set id | random per split, identical across the pieces of one set |
 | 1 | `u8` k | pieces required, 1..255 |
 | 1 | `u8` n | pieces produced, k..255 |
 | 1 | `u8` serial | this piece, 1..n |
 | 1 | `u8` flags | section 3.1 |
-| 8 | `u64` payload length | length of the cascade payload, not of the input file. Informational: reconstruction uses the share lengths |
-| 32 | payload hash | BLAKE2b-256 of the payload; identical across the set |
+| 32 | payload hash | BLAKE2b-256 of the shared bytes (section 6); identical across the set |
 | 1 | `u8` layer count | 0..255 |
 | 2 per layer | layer descriptors | section 3.2 |
 | blob | file name | section 3.3; empty when none was recorded |
 | blob | creator version | section 3.4; may be empty, though the CLI always writes it |
 | blob | creator commit | section 3.4; may be empty, though the CLI always writes it |
 | blob | share | one Shamir share (section 6) |
-| blob | padding | random bytes, length 0 or more (section 7) |
 
-Fixed part: 2 + 16 + 4 + 8 + 32 + 1 + five `u32` length prefixes = 83 bytes.
+Nothing follows the share; a reader rejects a manifest with bytes left over.
+
+Fixed part: 2 + 16 + 4 + 32 + 1 + four `u32` length prefixes = 71 bytes.
 
 ### 3.1 Flags
 
@@ -184,22 +186,49 @@ key = BLAKE2b-256("riven-keyless-envelope-v1" || salt)
 ```
 
 This key is public. Anyone holding this specification can open the envelope of
-such a piece and read its manifest, including the payload length. The content
-still needs k shares and, for a recipient set, the private keys.
+such a piece and read its manifest. The content, and its length, still need k
+shares and, for a recipient set, the private keys.
 
 ## 6. Share
 
-The payload is split with Shamir secret sharing over GF(2^8).
+What is shared is the payload length, the payload, then random fill:
+
+```
+shared = u64(payload length) || payload || fill
+```
+
+The fill is at least 32 random bytes, plus whatever padding adds (section 7).
+The payload hash covers all of it, so fewer than k pieces can neither check a
+guess of the content against the hash nor tell the content from the fill, even
+when the envelope is public (section 5.2).
+
+The shared bytes are split with Shamir secret sharing over GF(2^8), the byte
+field AES uses: addition is XOR, multiplication is modulo `0x11B`. Each byte `s`
+gets its own random polynomial of degree k-1:
+
+```
+f(x) = s + a1*x + ... + a(k-1)*x^(k-1)      a1..a(k-1) uniformly random
+```
+
+A share is `f(x)` for every byte at one x-coordinate. The x-coordinates are
+distinct and never zero. A byte is recovered from k shares `(xi, yi)` with
+
+```
+s = sum over i of ( yi * product over j != i of ( xj / (xi + xj) ) )
+```
+
+Fewer than k shares still produce an answer, just a wrong one, so a reader
+checks the payload hash (section 10).
 
 | Threshold | Share layout |
 |-----------|--------------|
-| k = 1 | the payload itself, no tag: every piece is a full copy |
-| k >= 2, payload <= 524288 | `bytes(payload length) \|\| u8 x-coordinate` |
-| k >= 2, payload > 524288 | one such share per 512 KiB chunk, concatenated |
+| k = 1 | the shared bytes themselves, no tag: every piece is a full copy |
+| k >= 2, shared <= 524288 bytes | `bytes(shared length) \|\| u8 x-coordinate` |
+| k >= 2, shared > 524288 bytes | one such share per 512 KiB chunk, concatenated |
 
 Chunking exists so a large split can use every core. Chunks are 524288 bytes
 except the last. The chunk count is not stored; it follows from the share length,
-because a share of m chunks covering s payload bytes is `s + m` long with
+because a share of m chunks covering s shared bytes is `s + m` long with
 `(m-1)*524288 < s <= m*524288`, which admits exactly one m:
 
 ```
@@ -212,22 +241,23 @@ interpolate each chunk separately.
 
 ## 7. Padding
 
-Padding hides the content length. A piece is rounded up to the next size class:
-classes start at 256 bytes, and each is `--pad` percent wider than the one below
-(5 by default, maximum 500):
+Padding hides the content length. The fill (section 6) grows until the piece
+reaches the next size class: classes start at 256 bytes, and each is `--pad`
+percent wider than the one below (a whole number, 1 by default, maximum 500):
 
 ```
 size(0) = 256
 size(i+1) = size(i) + max(1, size(i) * percent / 100)
 ```
 
-The padding length is whatever brings the piece to the first class at or above its
-natural length, so every piece of a set is the same size, and splitting the same
-input again produces that size again.
+The piece is measured with the minimum 32 bytes of fill, and the fill then grows
+to reach the first class at or above that size. So every piece of a set is the
+same size, and splitting the same input again produces that size again. Where no
+fill length gives a share of exactly the right size, at a 512 KiB chunk boundary
+(section 6), the piece lands one byte short of the class. `--pad none` keeps the
+minimum fill.
 
-Padding is omitted entirely when the envelope is keyless (section 5.2): the
-padding length lives in the manifest, which is readable there, so it would hide
-nothing.
+The fill is shared, so padding works the same for a keyless envelope.
 
 ## 8. Cascade payload
 
@@ -266,6 +296,16 @@ unchanged. That is the split-only case.
 | 3 | `xchacha20-poly1305` | 32 | 24 | 16 |
 | 4 | `twofish-256-gcm` | 32 | 12 | 16 |
 | 5 | `aes-256-ctr-hmac` | 32 | 16 | 32 |
+
+Every layer writes `ciphertext || tag`. `twofish-256-gcm` is standard GCM with
+Twofish in place of AES. `aes-256-ctr-hmac` is encrypt-then-MAC, with the nonce
+as the initial counter block and `ad` the layer associated data (section 8.3):
+
+```
+encKey || macKey = HKDF-SHA-512(layer key, salt = empty, info = "riven-aes-ctr-hmac-v1"), 64 bytes
+ciphertext       = AES-256-CTR(encKey, nonce) XOR plaintext
+tag              = HMAC-SHA-256(macKey, u64 len(ad) || ad || u64 len(nonce) || nonce || ciphertext)
+```
 
 Id 0 is reserved for "not recorded" and is never assigned. Ids are permanent: a
 number is never reused for a different algorithm. Two neighbouring layers may not
@@ -417,11 +457,12 @@ the extension above: `secret.pdf.1` for five pieces, `secret.pdf.01` for ten.
    cost comes from the cost byte unless supplied separately.
 3. Check every manifest reports the same version, set id, k, n and payload hash.
    Collect one share per distinct serial.
-4. Interpolate the shares (section 6) to recover the payload. The padding is a
-   separate field and is simply not used.
-5. Check the payload against the payload hash. This is what detects a wrong or
-   corrupt share, since interpolation below the threshold yields plausible bytes
-   rather than an error.
+4. Interpolate the shares (section 6) to recover the shared bytes.
+5. Check the shared bytes against the payload hash, then read the payload length
+   from the first 8 bytes and take that many bytes after it: the payload. The rest
+   is fill, and a length that leaves less than 32 bytes of it is rejected. The
+   hash is what detects a wrong or corrupt share, since interpolation below the
+   threshold yields plausible bytes rather than an error.
 6. Peel the cascade (section 8) from the outermost layer inward.
 
 Fewer than k pieces cannot complete step 4, at any computational cost.
@@ -452,11 +493,15 @@ Public key files are written with mode 0644, private with 0600.
 
 ## 12. Versioning
 
-The manifest carries a `u16` version, currently 1; the cascade header carries its
+The manifest carries a `u16` version, currently 2; the cascade header carries its
 own, currently 1. A reader refuses a version it does not know rather than
 guessing. Algorithm ids and key type identifiers are permanent and never reused.
 
+Version 2 moved the payload length out of the manifest and replaced the padding
+field with fill shared with the payload (sections 6 and 7). Version 1 pieces are
+not read.
+
 > [!WARNING]
-> Riven is in beta and the format is not yet stable. While the version stays at
-> 1 it may change without notice, and pieces written by one build are not
-> guaranteed to open with another. Re-split anything important after upgrading.
+> Riven is in beta and the format is not yet stable. It may change without
+> notice, and pieces written by one build are not guaranteed to open with
+> another. Re-split anything important after upgrading.

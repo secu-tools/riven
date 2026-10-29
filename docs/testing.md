@@ -17,14 +17,16 @@ go test -tags scripts ./tests/scripts/             # the build scripts, against 
 - **Unit** (`internal/*/`) -- each package against its own contract: the pipeline
   in every mode, the byte format against [format.md](format.md), padding, the
   transport encodings, key types, the CLI surface, and the stealth properties
-  (no constant offsets, uniform bytes, nothing recognisable in a piece).
+  (no constant offsets, uniform bytes, nothing recognisable in a piece), that
+  fewer than K pieces reveal nothing, every order of the algorithms, and that
+  pieces from an earlier build still open.
 - **Integration** (`tests/integration/`) -- the library end to end across a matrix
   of content shapes, sizes, thresholds, transports, modes and recording choices,
-  including every K-sized subset.
+  including every K-sized subset and every order of the five algorithms.
 - **End to end** (`tests/e2e/`) -- the compiled binary, driven as a user drives it:
   every algorithm and key type, the export formats and mixed input, text and
-  standard input, keygen, completion scripts, the `-y` output contract, and the
-  failure paths.
+  standard input, keygen, completion scripts, the `-y` output contract, the
+  failure paths, and rebuilding pieces from [format.md](format.md) alone.
 - **Smoke** (`tests/smoke/`) -- the binary starts, answers, and exits correctly.
 - **Build scripts** (`tests/scripts/`) -- build.sh and build.ps1, run against a
   copy of the tree: the build number convention, a failed compile, a failed
@@ -50,8 +52,8 @@ go test ./internal/format -fuzz "^FuzzDecode" -fuzztime=60s   # active fuzzing
 
 - Tests use a low-cost Argon2id configuration; production defaults are far
   stronger.
-- `go vet ./...` and `gofmt -l .` are expected to be clean, except for the
-  vendored `internal/shamir/`, which is left byte-for-byte as upstream.
+- `go vet ./...` and `gofmt -l .` are expected to be clean, except for the two
+  vendored files in `internal/shamir/`, which are left byte-for-byte as upstream.
 - Some tests skip where the platform cannot host them, and say so when they do:
   file mode checks on Windows, where access follows inherited ACLs instead;
   creating a symlink or a file name containing a terminal escape, which not every

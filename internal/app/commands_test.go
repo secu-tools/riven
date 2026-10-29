@@ -170,6 +170,16 @@ func TestCheckQRFeasible(t *testing.T) {
 	if !strings.Contains(err.Error(), "--pad none") {
 		t.Fatalf("with padding on, the message should suggest turning it off: %v", err)
 	}
+	if !strings.Contains(err.Error(), "narrower class") {
+		t.Fatalf("a wide class should suggest a narrower one: %v", err)
+	}
+
+	// At the narrowest class there is nothing narrower to suggest.
+	narrowest := planFor(t, "--password-env", "RIVEN_UNIT_QR", "--pad", "1", "--kdf", "m=8,t=1,p=1")
+	err = checkQRFeasible(narrowest, []pieceio.Format{pieceio.QR}, 99999, 2)
+	if err == nil || !strings.Contains(err.Error(), "--pad none") || strings.Contains(err.Error(), "narrower class") {
+		t.Fatalf("at 1 percent only --pad none is worth suggesting: %v", err)
+	}
 
 	err = checkQRFeasible(unpadded, []pieceio.Format{pieceio.QR}, 99999, 2)
 	if err == nil {

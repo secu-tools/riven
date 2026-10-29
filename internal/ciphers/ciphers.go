@@ -120,6 +120,20 @@ func Default() Scheme {
 	return s
 }
 
+// Avoiding returns id, or the first registered scheme other than avoid when id
+// is avoid, so a default never repeats the algorithm of the layer above.
+func Avoiding(id, avoid uint8) uint8 {
+	if id != avoid {
+		return id
+	}
+	for _, s := range registry {
+		if s.ID != avoid {
+			return s.ID
+		}
+	}
+	return id
+}
+
 // Name returns the display name for an id, or a placeholder if it is unknown.
 func Name(id uint8) string {
 	if s, ok := ByID(id); ok {

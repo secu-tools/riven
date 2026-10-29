@@ -22,7 +22,7 @@ func TestPieceMatchesTheSpecification(t *testing.T) {
 	const (
 		specHeaderLen = 41 // salt 16 + cost 1 + nonce 24
 		specTagLen    = 16
-		specFixedBody = 83 // version 2 + set id 16 + k/n/serial/flags 4 + len 8 + hash 32 + count 1 + five u32 prefixes 20 (name, creator version, creator commit, share, padding)
+		specFixedBody = 71 // version 2 + set id 16 + k/n/serial/flags 4 + hash 32 + count 1 + four u32 prefixes 16 (name, creator version, creator commit, share)
 	)
 
 	setID := []byte("0123456789abcdef")
@@ -31,15 +31,14 @@ func TestPieceMatchesTheSpecification(t *testing.T) {
 	hash := blake2b.Sum256([]byte("payload"))
 	params := kdf.Params{Memory: 32 * 1024, Time: 3, Par: 2}
 	password := []byte("spec password")
-	const padLen = 9
 
 	creatorVersion := "1.2.3"
 	creatorCommit := "abc1234"
 
 	piece, err := Encode(EncodeInput{
 		SetID: setID, K: 3, N: 5, Serial: 2,
-		PayloadLen: 7, PayloadHash: hash[:],
-		Share: share, PadLen: padLen, Name: name,
+		PayloadHash: hash[:],
+		Share:       share, Name: name,
 		CreatorVersion: creatorVersion, CreatorCommit: creatorCommit,
 		Encrypted: true, RecordAlgo: true, RecordKDF: true,
 		Layers: []cascade.Descriptor{
@@ -53,7 +52,7 @@ func TestPieceMatchesTheSpecification(t *testing.T) {
 	}
 
 	// Section 2: the piece length formula.
-	wantLen := specHeaderLen + specFixedBody + 2*2 + len(name) + len(creatorVersion) + len(creatorCommit) + len(share) + padLen + specTagLen
+	wantLen := specHeaderLen + specFixedBody + 2*2 + len(name) + len(creatorVersion) + len(creatorCommit) + len(share) + specTagLen
 	if len(piece) != wantLen {
 		t.Fatalf("piece is %d bytes, the specification says %d", len(piece), wantLen)
 	}
@@ -101,7 +100,6 @@ func TestPieceMatchesTheSpecification(t *testing.T) {
 	pos := 0
 	u16 := func() uint16 { v := binary.BigEndian.Uint16(body[pos:]); pos += 2; return v }
 	u8 := func() byte { v := body[pos]; pos++; return v }
-	u64 := func() uint64 { v := binary.BigEndian.Uint64(body[pos:]); pos += 8; return v }
 	raw := func(n int) []byte { v := body[pos : pos+n]; pos += n; return v }
 	blob := func() []byte {
 		n := int(binary.BigEndian.Uint32(body[pos:]))
@@ -111,8 +109,8 @@ func TestPieceMatchesTheSpecification(t *testing.T) {
 		return v
 	}
 
-	if v := u16(); v != 1 {
-		t.Fatalf("version is %d, the specification says 1", v)
+	if v := u16(); v != 2 {
+		t.Fatalf("version is %d, the specification says 2", v)
 	}
 	if got := raw(16); !bytes.Equal(got, setID) {
 		t.Fatalf("set id is %x", got)
@@ -140,9 +138,6 @@ func TestPieceMatchesTheSpecification(t *testing.T) {
 		t.Fatalf("flags are %#02x, bits 5 to 7 are reserved and must be zero", flags)
 	}
 
-	if got := u64(); got != 7 {
-		t.Fatalf("payload length is %d, want 7", got)
-	}
 	if got := raw(32); !bytes.Equal(got, hash[:]) {
 		t.Fatalf("payload hash is %x", got)
 	}
@@ -170,9 +165,6 @@ func TestPieceMatchesTheSpecification(t *testing.T) {
 	if got := blob(); !bytes.Equal(got, share) {
 		t.Fatalf("share is %x, want %x", got, share)
 	}
-	if got := blob(); len(got) != padLen {
-		t.Fatalf("padding is %d bytes, want %d", len(got), padLen)
-	}
 	if pos != len(body) {
 		t.Fatalf("%d bytes left after the documented fields", len(body)-pos)
 	}
@@ -184,8 +176,8 @@ func TestPieceMatchesTheSpecification(t *testing.T) {
 func TestKeylessEnvelopeMatchesTheSpecification(t *testing.T) {
 	piece, err := Encode(EncodeInput{
 		SetID: make([]byte, 16), K: 2, N: 3, Serial: 1,
-		PayloadLen: 4, PayloadHash: make([]byte, 32),
-		Share: []byte{1, 2, 3, 4, 5}, Keyless: true,
+		PayloadHash: make([]byte, 32),
+		Share:       []byte{1, 2, 3, 4, 5}, Keyless: true,
 	})
 	if err != nil {
 		t.Fatal(err)

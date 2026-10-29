@@ -1,0 +1,6 @@
+# Copyright (c) 2026 Jack L. (Cpt-JackL) (https://jack-l.com)
+# SPDX-License-Identifier: MIT
+
+# Known-answer pieces and their key are raw bytes. A short one can hold no NUL
+# byte and pass for text, and a line-ending conversion would then corrupt it.
+internal/core/testdata/** binary

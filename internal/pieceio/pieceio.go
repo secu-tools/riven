@@ -252,9 +252,25 @@ func Path(dir, base string, f Format) string {
 	}
 }
 
-// Write stores data at path with owner-only permissions.
+// Write stores data at path with owner-only permissions. It is how every file
+// that must stay private is written: pieces, private keys and recovered data.
+//
+// os.WriteFile applies its mode only when it creates the file, so writing over
+// an existing readable file would silently keep that file's mode. The mode is set
+// explicitly instead. Windows has no POSIX modes and governs access by inherited
+// ACLs, so the Chmod is best effort there, as it is for a device such as
+// /dev/null that the user does not own.
 func Write(path string, data []byte) error {
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("writing %q: %w", path, err)
+	}
+	_ = f.Chmod(0o600)
+	_, err = f.Write(data)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
 		return fmt.Errorf("writing %q: %w", path, err)
 	}
 	return nil

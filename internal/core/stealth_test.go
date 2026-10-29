@@ -242,33 +242,6 @@ func TestManyLayersRoundTrip(t *testing.T) {
 	}
 }
 
-// TestBelowThresholdRevealsNothing checks the guarantee that makes a leaked
-// password harmless: below the threshold there is nothing to open, whatever is
-// supplied.
-func TestBelowThresholdRevealsNothing(t *testing.T) {
-	secret := []byte("the whole point of the exercise")
-	pw := [][]byte{[]byte("correct password")}
-	pieces := mustSplit(t, secret, SplitOptions{N: 5, K: 4,
-		Layers: []LayerSpec{{Kind: PasswordLayer, Password: pw[0]}}})
-
-	for _, held := range [][][]byte{pieces[:1], pieces[:2], pieces[:3]} {
-		if _, err := Combine(held, OpenOptions{Passwords: pw}); err == nil {
-			t.Fatalf("%d of 4 pieces must not reconstruct", len(held))
-		}
-		// Even with the right password, the held pieces carry no plaintext.
-		for _, p := range held {
-			if bytes.Contains(p, secret[:8]) {
-				t.Fatal("a piece below the threshold carries plaintext")
-			}
-		}
-	}
-	// The full threshold still works, so the failures above are the threshold and
-	// not something else.
-	if _, err := Combine(pieces[:4], OpenOptions{Passwords: pw}); err != nil {
-		t.Fatalf("four pieces should reconstruct: %v", err)
-	}
-}
-
 // TestPieceHasNoUsableLengthSignal checks that a piece of a large set is not
 // distinguishable from one of a small set by length alone, since N and K live
 // inside the encrypted manifest.

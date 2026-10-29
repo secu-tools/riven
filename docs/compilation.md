@@ -116,9 +116,9 @@ All dependencies are pure Go, so `CGO_ENABLED=0` builds work on every target:
 
 Recipient key mechanisms come from the standard library: `crypto/hpke` (RFC 9180),
 `crypto/mlkem` and `crypto/ecdh`. `crypto/hpke` is why Go 1.26 is the minimum.
-`internal/shamir/` is vendored third-party source under MPL-2.0, deliberately left
-unformatted and unmodified; `gofmt` checks skip it, and a CI job fails if it drifts
-from upstream (see `internal/shamir/UPSTREAM`).
+The two vendored files in `internal/shamir/` (MPL-2.0) are kept exactly as
+upstream: the `gofmt` and ASCII checks skip them, and CI fails if they drift (see
+`internal/shamir/UPSTREAM`).
 
 ## Install
 

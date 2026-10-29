@@ -15,12 +15,14 @@ Copyright: IBM Corp. 2016, 2025
 Repository: https://github.com/hashicorp/vault/tree/main/shamir
 Full license text: internal/shamir/LICENSE
 
-The files in internal/shamir/ are redistributed under MPL-2.0 and retain
-their original license headers. They are NOT relicensed under this
-project's MIT license. Under MPL-2.0 these files may be combined with the
-rest of Riven (a "Larger Work") licensed under MIT, provided the MPL-2.0
-files remain under MPL-2.0 and their source stays available, as it does
-here. No modifications were made to the vendored source.
+The vendored files in internal/shamir/ (shamir.go, shamir_test.go and
+LICENSE) are redistributed under MPL-2.0 and retain their original license
+headers. They are NOT relicensed under this project's MIT license. Under
+MPL-2.0 these files may be combined with the rest of Riven (a "Larger
+Work") licensed under MIT, provided the MPL-2.0 files remain under MPL-2.0
+and their source stays available, as it does here. No modifications were
+made to the vendored source. properties_test.go in the same folder is
+Riven's own, under MIT.
 
 The package has no go.mod of its own, so it belongs to the
 github.com/hashicorp/vault module, whose repository LICENSE is BUSL-1.1

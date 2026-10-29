@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -425,6 +426,13 @@ func recipientForLayer(plan *splitPlan, opts *cliOptions) (*kem.PublicKey, error
 	// must not be written beside them. The prompt takes a path when the user
 	// wants the pair somewhere else.
 	pubPath, privPath := keyPaths("", base, "", "")
+	// The default base name is keygen's too, so this aims at an existing pair as
+	// readily as a second keygen does, and is refused the same way.
+	for _, p := range []string{pubPath, privPath} {
+		if err := refuseKeyOverwrite(opts, p); err != nil {
+			return nil, err
+		}
+	}
 	if err := writePublicKey(pubPath, priv.Public()); err != nil {
 		return nil, err
 	}
@@ -454,13 +462,11 @@ func planAdvancedTail(plan *splitPlan, opts *cliOptions, interactive bool) error
 	if err := planRecording(plan, opts); err != nil {
 		return err
 	}
-	// The cost only matters when a password is stretched into a key, and padding
-	// only bites when the manifest is sealed with one.
-	if len(plan.verifyPasswords) == 0 {
-		return nil
-	}
-	if err := planCost(plan, opts); err != nil {
-		return err
+	// The cost only matters when a password is stretched into a key.
+	if len(plan.verifyPasswords) > 0 {
+		if err := planCost(plan, opts); err != nil {
+			return err
+		}
 	}
 	return planPadding(plan, opts)
 }
@@ -513,7 +519,7 @@ func planPadding(plan *splitPlan, opts *cliOptions) error {
 	fmt.Println()
 	writeWrapped(os.Stdout, "", "Pieces are padded up to a size class, so their size gives only a range "+
 		"for the content. A wider class hides more and costs more storage.")
-	pct, err := readInt("Padding percent (0 disables padding)", core.DefaultPadPercent, 0, maxWizardPad)
+	pct, err := readInt("Padding percent (0 for no size class)", core.DefaultPadPercent, 0, maxWizardPad)
 	if err != nil {
 		return err
 	}
@@ -605,14 +611,7 @@ func generateAndRecord(plan *splitPlan, label string) ([]byte, error) {
 // is the previous layer's algorithm, which may not be reused.
 func chooseScheme(def, forbid uint8) (uint8, error) {
 	all := ciphers.All()
-	if def == forbid {
-		for _, s := range all {
-			if s.ID != forbid {
-				def = s.ID
-				break
-			}
-		}
-	}
+	def = ciphers.Avoiding(def, forbid)
 	for {
 		fmt.Println("Encryption algorithm:")
 		defIdx := 1
@@ -692,11 +691,8 @@ func resolveKeyScheme(opts *cliOptions) (kem.Scheme, error) {
 // is interactive and nothing settled it. The listing states the per-piece cost,
 // which is what the choice turns on.
 func chooseKeyScheme(opts *cliOptions) (kem.Scheme, error) {
-	if opts.keyType != "" {
-		return kem.Parse(opts.keyType)
-	}
-	if !isInteractive() || opts.yes {
-		return kem.Default(), nil
+	if opts.keyType != "" || !isInteractive() || opts.yes {
+		return resolveKeyScheme(opts)
 	}
 	all := kem.All()
 	fmt.Println("Recipient key type:")
@@ -830,32 +826,23 @@ func checkFormatsFit(plan *splitPlan, formats []pieceio.Format, pieceSize, count
 // checkSheetFeasible refuses a sheet export for pieces that would run to more
 // pages than anyone would print and file.
 func checkSheetFeasible(formats []pieceio.Format, pieceSize, count int) error {
-	for _, f := range formats {
-		if f != pieceio.Sheet || pieceSize <= pieceio.SheetMaxPiece {
-			continue
-		}
-		return fmt.Errorf("cannot export as a sheet: each of the %d pieces is %d bytes, "+
-			"about %d printed pages. The limit is %d pages; use base32 or binary",
-			count, pieceSize, pieceio.SheetPages(pieceSize), pieceio.SheetMaxPages)
+	if !slices.Contains(formats, pieceio.Sheet) || pieceSize <= pieceio.SheetMaxPiece {
+		return nil
 	}
-	return nil
+	return fmt.Errorf("cannot export as a sheet: each of the %d pieces is %d bytes, "+
+		"about %d printed pages. The limit is %d pages; use base32 or binary",
+		count, pieceSize, pieceio.SheetPages(pieceSize), pieceio.SheetMaxPages)
 }
 
 // checkWordsFeasible refuses a word export for pieces past the size a person
 // could reasonably transcribe.
 func checkWordsFeasible(formats []pieceio.Format, pieceSize, count int) error {
-	for _, f := range formats {
-		if f != pieceio.Words {
-			continue
-		}
-		if pieceSize <= pieceio.Bip39MaxPiece {
-			return nil
-		}
-		return fmt.Errorf("cannot export as words: each of the %d pieces is %d bytes, which is %d words. "+
-			"The limit is %d bytes; use base32, or split into more pieces",
-			count, pieceSize, pieceio.Bip39Words(pieceSize), pieceio.Bip39MaxPiece)
+	if !slices.Contains(formats, pieceio.Words) || pieceSize <= pieceio.Bip39MaxPiece {
+		return nil
 	}
-	return nil
+	return fmt.Errorf("cannot export as words: each of the %d pieces is %d bytes, which is %d words. "+
+		"The limit is %d bytes; use base32, or split into more pieces",
+		count, pieceSize, pieceio.Bip39Words(pieceSize), pieceio.Bip39MaxPiece)
 }
 
 // checkQRFeasible refuses a QR export when any piece is too large. It is all or
@@ -865,26 +852,19 @@ func checkWordsFeasible(formats []pieceio.Format, pieceSize, count int) error {
 // The message says so when that is possible, since turning padding off is the
 // fix and compressing the input is not.
 func checkQRFeasible(plan *splitPlan, formats []pieceio.Format, pieceSize, count int) error {
-	wantQR := false
-	for _, f := range formats {
-		if f == pieceio.QR {
-			wantQR = true
-		}
-	}
-	if !wantQR {
-		return nil
-	}
-
-	if pieceio.QRFits(pieceSize) {
+	if !slices.Contains(formats, pieceio.QR) || pieceio.QRFits(pieceSize) {
 		return nil
 	}
 	// Every piece of a set is the same size, so one is enough to decide.
 	msg := fmt.Sprintf("cannot export as QR: none of the %d pieces fits. %s",
 		count, pieceio.QRTooLargeMessage(pieceSize))
-	if core.PaddingApplies(plan.opts) {
+	if !plan.opts.Padding.Off {
+		width := plan.opts.Padding.Width()
 		msg += fmt.Sprintf(". Pieces are padded up to a %d percent size class, so try "+
-			"--pad none, which leaves them at their natural size, or a narrower class",
-			plan.opts.Padding.Width())
+			"--pad none, which drops the size class", width)
+		if width > core.MinPadPercent {
+			msg += ", or a narrower class"
+		}
 	}
 	return errors.New(msg)
 }
@@ -900,13 +880,9 @@ func resolveOpenParams(opts *cliOptions) (*kdf.Params, []uint8, error) {
 		}
 		params = &p
 	}
-	var schemes []uint8
-	if opts.algoSet {
-		ids, err := ciphers.ParseList(opts.algo)
-		if err != nil {
-			return nil, nil, err
-		}
-		schemes = ids
+	schemes, err := requestedAlgos(opts)
+	if err != nil {
+		return nil, nil, err
 	}
 	return params, schemes, nil
 }

@@ -110,8 +110,8 @@ riven FILE                     # same thing via the wizard
 | `--record-algo true\|false` | write the algorithms into each piece | `true` |
 | `--record-kdf true\|false` | write the Argon2id cost into each piece | `true` |
 | `--identity FILE` | your private key, so the split can be fully verified | none |
-| `--pad PCT` | class width in percent; `0` or `none` disables padding | `5` |
-| `-v, --verify true\|false` | re-read the pieces and rebuild the original before reporting success (`--no-verify` also turns it off) | `true` |
+| `--pad PCT` | class width in whole percent; `0` or `none` drops the size class | `1` |
+| `--verify true\|false` | re-read the pieces and rebuild the original before reporting success (`-v` alone turns it on, `--no-verify` off) | `true` |
 | `--generate` | generate strong password(s) instead of prompting | off |
 | `-t, --text STRING` | split this string instead of a file | none |
 | `--text-env NAME` | split the contents of an environment variable | none |
@@ -122,6 +122,8 @@ riven FILE                     # same thing via the wizard
 
 Pieces are written as `FILE.01`, `FILE.02`, ... (numbers zero-padded to the width
 of N), plus the extension for each format (see [Export formats](#export-formats)).
+If files with those names already exist, Riven asks before replacing them, since
+they are probably an earlier set; under `-y` they are replaced.
 
 By default Riven re-reads K pieces and reconstructs to confirm the split is
 recoverable before reporting success; `--no-verify` skips this.
@@ -177,6 +179,9 @@ riven combine ./pieces --password-env PW --out recovered.pdf -y
 Keyless sets need no password and are opened without asking for anything. Private
 keys can be given in any order: Riven works out which layer each one belongs to.
 
+A damaged piece is skipped with a warning when enough intact pieces remain, so a
+spare piece is worth keeping.
+
 When a set omitted its algorithms or cost, an interactive run asks for them; with
 `-y` it fails and names the flag instead.
 
@@ -196,6 +201,10 @@ recorded, and asks before replacing an existing file. Pieces split with
 `--record-name false`, or from text or standard input, carry no name, and it asks
 for one. Under `-y` the result always goes to standard output whatever was
 recorded, so the scripting contract does not change.
+
+Only you can read the recovered file, even when it replaces a file others could
+read. On Windows it takes the folder's permissions instead. If recovery fails,
+nothing is written and an existing file is left as it was.
 
 When it goes to standard output, the bytes are written exactly as they were, with
 nothing added and no trailing newline, and every message goes to standard error
@@ -278,16 +287,17 @@ unless you have a reason not to. The `ml-kem-*` types are post-quantum only;
 small pieces.
 
 Size matters because the encapsulated key rides in **every** piece. Largest
-content that still fits one QR code, measured with `--pad none`:
+content that still fits one QR code, measured with `--pad none` and no recorded
+file name (a recorded name takes its length off these):
 
 | Type | Weakest (L) | Strongest (H) |
 |------|-------------|---------------|
-| `x25519` | 2744 B | 1064 B |
-| `p256` | 2711 B | 1031 B |
-| `p384` | 2679 B | 999 B |
-| `ml-kem-768` | 1688 B | 8 B |
-| `x-wing` | 1656 B | does not fit |
-| `ml-kem-1024` | 1208 B | does not fit |
+| `x25519` | 2695 B | 1015 B |
+| `p256` | 2662 B | 982 B |
+| `p384` | 2630 B | 950 B |
+| `ml-kem-768` | 1639 B | does not fit |
+| `x-wing` | 1607 B | does not fit |
+| `ml-kem-1024` | 1159 B | does not fit |
 
 A post-quantum recipient set can still go on paper, but only with weak error
 correction and a small payload; `x25519` is the comfortable choice for print.
@@ -341,21 +351,24 @@ the next size class, so it tells an observer only which class the content falls 
 
 | `--pad` | What a piece size tells an observer | Cost |
 |---------|-------------------------------------|------|
-| `5` (default) | the content is within 5 percent of the piece size | up to 5 percent |
+| `1` (default) | the content is within 1 percent of the piece size | up to 1 percent |
+| `2` | within 2 percent | up to 2 percent |
+| `5` | within 5 percent | up to 5 percent |
 | `10` | within 10 percent | up to 10 percent |
 | `100` | somewhere in a range of one doubling | up to twice the size |
 | `500` | somewhere in a range of six times | up to six times the size |
 | `none` | the exact content length | none |
 
-The wizard asks for a percent under the advanced security option (0 to 100, where
-0 disables padding); the recommended option uses the default. The flag accepts up
-to 500.
+The smallest class is 256 bytes, so anything that fits in it, a short password or a
+PIN, comes out at exactly 256 bytes whatever its length. `none` drops that too.
 
-**A split with no password is not padded.** The padding length lives in the
-encrypted metadata, which such a split seals with a key anyone can derive, so the
-content length is readable either way. This covers `--keyless` and recipient-only
-splits: `--pad` is refused there rather than charged for, and the summary says so.
-Adding a password layer restores it.
+Every piece also carries 32 random bytes on top of the content, whatever
+`--pad` says. They are what keeps a single piece from confirming a guess of the
+content.
+
+The wizard asks for a percent under the advanced security option (0 to 100, where
+0 drops the size class); the recommended option uses the default. The flag accepts
+up to 500. Padding works the same with or without a password.
 
 ## Large inputs
 
@@ -463,17 +476,20 @@ Padding still applies when exporting to QR, so a piece whose natural size fits c
 be rounded past 2952 bytes and refused. The input length alone decides this, so an
 input that fails will always fail.
 
-`--pad none` gives the smallest pieces and often clears the limit; a narrower class
-such as `--pad 5` may be enough. The error says which to try. The cost of `none` is
-that the piece length then follows the content length.
+`--pad none` gives the smallest pieces and clears the limit whenever the natural
+size fits. With a wider class than the default, a narrower one such as `--pad 1`
+may be enough. The error says which to try. The cost of `none` is that the piece
+length then follows the content length.
 
 ### sheet
 
 A recovery sheet is the one format that explains itself: it names the tool, says
 how many pieces are needed, and carries the piece as a QR code and as base32 text
 with instructions for reading either one back. That is deliberate, so someone who
-finds the page knows what to do with it. Do not print one if the pieces themselves
-have to stay unattributable. [sample-sheet.html](sample-sheet.html) is a real one.
+finds the page knows what to do with it. It prints the original file name only
+when the pieces record it (`--record-name false` leaves it off). Do not print one
+if the pieces themselves have to stay unattributable.
+[sample-sheet.html](sample-sheet.html) is a real one.
 
 It degrades rather than failing as pieces grow:
 

@@ -10,10 +10,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/secu-tools/riven/internal/ciphers"
 	"github.com/secu-tools/riven/internal/core"
 	"github.com/secu-tools/riven/internal/format"
 	"github.com/secu-tools/riven/internal/kdf"
@@ -57,7 +59,7 @@ func cmdSplit(opts *cliOptions) error {
 	if err != nil {
 		return err
 	}
-	defer wipeAll(plan.verifyPasswords)
+	defer memory.FreeAll(plan.verifyPasswords)
 	plan.opts.Name = recordedName(opts, in.origName)
 	plan.opts.CreatorVersion = creatorVersion()
 	plan.opts.CreatorCommit = creatorCommit()
@@ -182,20 +184,25 @@ func exportSplit(out io.Writer, plan *splitPlan, opts *cliOptions, input []byte,
 	var formats []pieceio.Format
 	var sizes []int
 
+	pieceName := func(serial int) string { return fmt.Sprintf("%s.%0*d", base, width, serial) }
+
 	err := core.SplitTo(input, plan.opts, func(serial int, piece []byte) error {
 		if formats == nil {
 			chosen, ferr := resolveFormats(opts, plan, len(piece))
 			if ferr != nil {
 				return ferr
 			}
+			if ferr := confirmReplacePieces(opts, plan, chosen, pieceName); ferr != nil {
+				return ferr
+			}
 			formats = chosen
 		}
 		sizes = append(sizes, len(piece))
 
-		name := fmt.Sprintf("%s.%0*d", base, width, serial)
+		name := pieceName(serial)
 		for _, f := range formats {
 			path := pieceio.Path(plan.outDir, name, f)
-			data, _, err := encodeOne(piece, f, plan, base, serial)
+			data, _, err := encodeOne(piece, f, plan, serial)
 			if err != nil {
 				return fmt.Errorf("%s export: %w", f, err)
 			}
@@ -216,6 +223,42 @@ func exportSplit(out io.Writer, plan *splitPlan, opts *cliOptions, input []byte,
 	return written, formats, nil
 }
 
+// confirmReplacePieces asks before a split writes over files that have the
+// names its pieces take. They are most likely an earlier set's pieces, and
+// replacing some of them destroys that set. Like confirmOverwrite, a run that
+// cannot ask goes ahead: a script that names where its pieces go means it.
+func confirmReplacePieces(opts *cliOptions, plan *splitPlan, formats []pieceio.Format, pieceName func(int) string) error {
+	if opts.yes || !isInteractive() {
+		return nil
+	}
+	var existing []string
+	for serial := 1; serial <= plan.opts.N; serial++ {
+		for _, f := range formats {
+			if p := pieceio.Path(plan.outDir, pieceName(serial), f); fileExists(p) {
+				existing = append(existing, p)
+			}
+		}
+	}
+	if len(existing) == 0 {
+		return nil
+	}
+	ok, err := confirm(fmt.Sprintf("%d file(s) with the names these pieces take already exist, %q among them. "+
+		"Replacing them destroys the set they belong to. Replace them?", len(existing), existing[0]), false)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("not replacing existing files; use --out or --name to write the pieces elsewhere")
+	}
+	return nil
+}
+
+// fileExists reports whether anything is at path.
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
 // reportSizeNotes says what the chosen formats cost at the size the pieces came
 // out. Both QR and sheet carry a code, but the report is about the pieces rather
 // than the formats, so it is made once.
@@ -223,16 +266,8 @@ func reportSizeNotes(out io.Writer, formats []pieceio.Format, sizes []int) {
 	if len(sizes) == 0 {
 		return
 	}
-	wantQR, wantSheet := false, false
-	for _, f := range formats {
-		switch f {
-		case pieceio.QR:
-			wantQR = true
-		case pieceio.Sheet:
-			wantSheet = true
-		}
-	}
-	if wantQR || wantSheet {
+	wantSheet := slices.Contains(formats, pieceio.Sheet)
+	if wantSheet || slices.Contains(formats, pieceio.QR) {
 		reportQRSizes(out, sizes)
 	}
 	if wantSheet {
@@ -255,11 +290,13 @@ func noteLargeSplit(out io.Writer, inputLen, n int) {
 }
 
 // encodeOne renders one piece in one format. A recovery sheet needs to say which
-// piece it is, so it takes the extra arguments the other formats do not.
-func encodeOne(piece []byte, f pieceio.Format, plan *splitPlan, base string, serial int) ([]byte, string, error) {
+// piece it is, so it takes the extra arguments the other formats do not. It
+// names the file only when the pieces record it: a sheet is printed and left
+// where others can read it, so --record-name false must reach it too.
+func encodeOne(piece []byte, f pieceio.Format, plan *splitPlan, serial int) ([]byte, string, error) {
 	if f == pieceio.Sheet {
 		return pieceio.EncodeSheet(piece, pieceio.SheetInfo{
-			Serial: serial, Total: plan.opts.N, Needed: plan.opts.K, Name: base,
+			Serial: serial, Total: plan.opts.N, Needed: plan.opts.K, Name: plan.opts.Name,
 		}, plan.qrScale)
 	}
 	return pieceio.Encode(piece, f, plan.qrScale)
@@ -333,7 +370,7 @@ func verifySplit(out io.Writer, input []byte, paths []string, plan *splitPlan) e
 		}
 		reRead = append(reRead, piece)
 	}
-	defer wipeAll(reRead)
+	defer memory.FreeAll(reRead)
 
 	open := core.OpenOptions{
 		Passwords:   plan.verifyPasswords,
@@ -380,7 +417,7 @@ func printSplitSummary(out io.Writer, plan *splitPlan, formats []pieceio.Format,
 	} else {
 		fmt.Fprintln(out, "Layers (outer to inner):")
 		for i, l := range plan.opts.Layers {
-			algo := core.SchemeName(plan.schemeIDs[i])
+			algo := ciphers.Name(plan.schemeIDs[i])
 			if l.Kind == core.RecipientLayer {
 				fmt.Fprintf(out, "  %d. %-18s recipient key (%s)\n", i+1, algo, l.Recipient.Scheme().Name())
 			} else {
@@ -427,22 +464,15 @@ func printSplitSummary(out io.Writer, plan *splitPlan, formats []pieceio.Format,
 	}
 }
 
-// printPaddingLine states what the piece size does and does not reveal. When a
-// split has no password the manifest is sealed with the public keyless key, so
-// the length is readable by anyone holding this tool and padding is skipped;
-// saying so is better than leaving the user to assume the size is covered.
+// printPaddingLine states what the piece size does and does not reveal.
 func printPaddingLine(out io.Writer, plan *splitPlan) {
-	switch {
-	case core.PaddingApplies(plan.opts):
-		writeWrapped(out, "", fmt.Sprintf("Piece size: padded to a %d percent size "+
-			"class, so it gives only a range.", plan.opts.Padding.Width()))
-	case plan.opts.Padding.Off:
-		writeWrapped(out, "", "Piece size: not padded, "+
+	if plan.opts.Padding.Off {
+		writeWrapped(out, "", "Piece size: not padded to a size class, "+
 			"so it reveals the length of the content.")
-	default:
-		writeWrapped(out, "", "Piece size: not padded. Without a password the piece "+
-			"metadata is readable, so padding could not hide the content length anyway.")
+		return
 	}
+	writeWrapped(out, "", fmt.Sprintf("Piece size: padded to a %d percent size "+
+		"class, so it gives only a range.", plan.opts.Padding.Width()))
 }
 
 // reportGeneratedPasswords delivers a password Riven invented, which is the only
@@ -490,16 +520,16 @@ func resolveOpenCredentials(opts *cliOptions, pieces [][]byte) (core.OpenOptions
 	}
 	params, schemes, err := resolveOpenParams(opts)
 	if err != nil {
-		wipeAll(pws)
+		memory.FreeAll(pws)
 		return core.OpenOptions{}, nil, err
 	}
 	keys, err := resolveOpenKeys(opts)
 	if err != nil {
-		wipeAll(pws)
+		memory.FreeAll(pws)
 		return core.OpenOptions{}, nil, err
 	}
 	open := core.OpenOptions{Passwords: pws, PrivateKeys: keys, Params: params, Schemes: schemes}
-	return open, func() { wipeAll(pws) }, nil
+	return open, func() { memory.FreeAll(pws) }, nil
 }
 
 func cmdInfo(opts *cliOptions) error {
@@ -516,7 +546,7 @@ func cmdInfo(opts *cliOptions) error {
 		return err
 	}
 	raw := pieceBytes(items)
-	defer wipeAll(raw)
+	defer memory.FreeAll(raw)
 
 	open, wipe, err := resolveOpenCredentials(opts, raw)
 	if err != nil {
@@ -563,7 +593,7 @@ func retryWithKDF(opts *cliOptions, piece []byte, open core.OpenOptions, cause e
 }
 
 func printPieceInfo(path string, det pieceio.Detected, info *core.PieceInfo) {
-	fmt.Printf("\n%s\n", path)
+	fmt.Printf("\n%q\n", path)
 	fmt.Printf("  input form : %s\n", det.Format)
 	fmt.Printf("  set id     : %s\n", info.SetID)
 	fmt.Printf("  piece      : %d of %d (need any %d to reconstruct)\n", info.Serial, info.N, info.K)
@@ -576,7 +606,7 @@ func printPieceInfo(path string, det pieceio.Detected, info *core.PieceInfo) {
 	if !info.Encrypted {
 		payloadKind = "payload"
 	}
-	fmt.Printf("  content    : %d bytes (%s)\n", info.PayloadLen, payloadKind)
+	fmt.Printf("  content    : %s, size hidden until combined\n", payloadKind)
 	fmt.Printf("  payload id : %s...\n", info.PayloadHashHex[:16])
 	if info.Name != "" {
 		fmt.Printf("  file name  : %s\n", info.Name)
@@ -623,13 +653,25 @@ func cmdCombine(opts *cliOptions) error {
 		warnUnverified(msgWriter(opts), it.det)
 	}
 	pieces := pieceBytes(items)
-	defer wipeAll(pieces)
+	defer memory.FreeAll(pieces)
 
 	open, wipe, err := resolveOpenCredentials(opts, pieces)
 	if err != nil {
 		return err
 	}
 	defer wipe()
+
+	// A retry for a missing cost or algorithm opens the pieces again, so each
+	// damaged one is reported once however many attempts meet it.
+	reported := map[int]bool{}
+	open.Damaged = func(i int, err error) {
+		if reported[i] {
+			return
+		}
+		reported[i] = true
+		writeWrapped(msgWriter(opts), "  ", fmt.Sprintf("warning: %q did not open although other pieces did, "+
+			"so that file is damaged; rebuilding from the rest (%v)", items[i].det.Path, err))
+	}
 
 	noteExpensiveOpen(pieces, open.Params)
 	recovered, name, err := combineWithRecovery(opts, pieces, open)
@@ -683,7 +725,9 @@ func writeRecovered(opts *cliOptions, recovered []byte, name string) error {
 	if err := confirmOverwrite(opts, outPath); err != nil {
 		return err
 	}
-	if err := os.WriteFile(outPath, recovered, 0o600); err != nil {
+	// The recovered data is the secret itself, so it gets the same treatment as a
+	// private key: private even when it replaces an existing, readable file.
+	if err := pieceio.Write(outPath, recovered); err != nil {
 		return err
 	}
 	fmt.Fprintf(msgWriter(opts), "Recovered %d bytes -> %s\n", len(recovered), outPath)
@@ -737,10 +781,22 @@ func confirmOverwrite(opts *cliOptions, path string) error {
 // combineWithRecovery attempts reconstruction and, when a set omitted its
 // algorithms or cost, asks for them (interactive) or explains the flag (not). It
 // returns the recovered bytes and the file name the pieces recorded, if any.
+//
+// A set can have withheld both, so the questions follow one another: the cost
+// comes first because the pieces do not open without it, and only once they open
+// can the missing algorithms be noticed.
 func combineWithRecovery(opts *cliOptions, pieces [][]byte, open core.OpenOptions) ([]byte, string, error) {
 	out, name, err := core.CombineFile(pieces, open)
-	if err == nil {
-		return out, name, nil
+
+	// Only a failure to open a piece can be explained by unrecorded cost
+	// parameters. Threshold and consistency errors must not send the user there.
+	if open.Params == nil && errors.Is(err, format.ErrWrongPassword) {
+		p, kerr := askMissingKDF(opts)
+		if kerr != nil || p == nil {
+			return nil, "", err
+		}
+		open.Params = p
+		out, name, err = core.CombineFile(pieces, open)
 	}
 
 	if errors.Is(err, core.ErrSchemesRequired) {
@@ -755,19 +811,7 @@ func combineWithRecovery(opts *cliOptions, pieces [][]byte, open core.OpenOption
 		open.Schemes = ids
 		return core.CombineFile(pieces, open)
 	}
-
-	// Only a failure to open a piece can be explained by unrecorded cost
-	// parameters. Threshold and consistency errors must not send the user there.
-	if open.Params == nil && errors.Is(err, format.ErrWrongPassword) {
-		p, kerr := askMissingKDF(opts)
-		if kerr == nil && p != nil {
-			open.Params = p
-			if out2, name2, err2 := core.CombineFile(pieces, open); err2 == nil {
-				return out2, name2, nil
-			}
-		}
-	}
-	return nil, "", err
+	return out, name, err
 }
 
 // layerCount reads the cascade layer count from the first piece that opens.
@@ -961,10 +1005,6 @@ func resolveOpenKeys(opts *cliOptions) ([]*kem.PrivateKey, error) {
 	return keys, nil
 }
 
-func wipeAll(bufs [][]byte) {
-	memory.FreeAll(bufs)
-}
-
 // costWarnThreshold is the declared memory size, in KiB, above which opening is
 // slow enough to be worth announcing.
 const costWarnThreshold = 256 * 1024
@@ -998,22 +1038,7 @@ func noteExpensiveOpen(pieces [][]byte, override *kdf.Params) {
 // splitFields splits an answer on spaces, tabs and commas, dropping empties, so
 // "a,b", "a b" and "a, b" all read the same.
 func splitFields(s string) []string {
-	var out []string
-	cur := ""
-	for _, r := range s {
-		if r == ' ' || r == '	' || r == ',' {
-			if cur != "" {
-				out = append(out, cur)
-				cur = ""
-			}
-			continue
-		}
-		cur += string(r)
-	}
-	if cur != "" {
-		out = append(out, cur)
-	}
-	return out
+	return strings.FieldsFunc(s, func(r rune) bool { return r == ' ' || r == '\t' || r == ',' })
 }
 
 // warnUnverified reports text that did not carry a matching checksum. The piece
@@ -1023,6 +1048,6 @@ func warnUnverified(out io.Writer, det pieceio.Detected) {
 	if det.Verified {
 		return
 	}
-	writeWrapped(out, "  ", fmt.Sprintf("warning: %s carries no matching checksum, "+
+	writeWrapped(out, "  ", fmt.Sprintf("warning: %q carries no matching checksum, "+
 		"so the text may have been mistyped or damaged", filepath.Base(det.Path)))
 }

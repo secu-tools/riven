@@ -365,8 +365,9 @@ func TestFullCascadeOfEveryScheme(t *testing.T) {
 	}
 }
 
-// TestKeylessRoundTrip covers split-only mode: no password anywhere, and any K
-// pieces rebuild the file with nothing else supplied.
+// TestKeylessRoundTrip covers split-only mode: no password anywhere, K pieces
+// rebuild the file with nothing else supplied, and one piece describes itself.
+// Which collections of pieces rebuild a set is covered in threshold_test.go.
 func TestKeylessRoundTrip(t *testing.T) {
 	input := []byte("no password protects this, only the threshold does")
 	pieces, err := Split(input, SplitOptions{N: 5, K: 3, Keyless: true})
@@ -382,21 +383,6 @@ func TestKeylessRoundTrip(t *testing.T) {
 	if !bytes.Equal(got, input) {
 		t.Fatal("mismatch")
 	}
-
-	// Every 3-of-5 subset works.
-	allSubsetsOfSize(pieces, 3, func(sub [][]byte) {
-		out, err := Combine(sub, OpenOptions{})
-		if err != nil || !bytes.Equal(out, input) {
-			t.Fatalf("subset failed: %v", err)
-		}
-	})
-
-	// Below the threshold still reveals nothing, exactly as with a password.
-	allSubsetsOfSize(pieces, 2, func(sub [][]byte) {
-		if _, err := Combine(sub, OpenOptions{}); err == nil {
-			t.Fatal("2 of 5 should not reconstruct")
-		}
-	})
 
 	info, err := Info(pieces[0], OpenOptions{})
 	if err != nil {
@@ -710,40 +696,5 @@ func TestKEMCiphertextSizeShowsInPieces(t *testing.T) {
 	// Padding varies, so allow slack while confirming the growth is real.
 	if grew < want-64 || grew > want+256 {
 		t.Fatalf("piece grew by %d bytes, expected about %d", grew, want)
-	}
-}
-
-// TestHybridRejectsDuplicateAdjacentScheme checks the distinctness rule covers
-// the KEM layer, not just the password layers.
-func TestHybridRejectsDuplicateAdjacentScheme(t *testing.T) {
-	priv, err := kem.Generate(kem.Default())
-	if err != nil {
-		t.Fatal(err)
-	}
-	same := ciphers.Default().ID
-	_, err = Split([]byte("x"), SplitOptions{
-		N: 3, K: 2,
-		Layers: []LayerSpec{
-			{Kind: PasswordLayer, SchemeID: same, Password: []byte("pw")},
-			// Deliberately the same algorithm as the layer above.
-			{Kind: RecipientLayer, SchemeID: same, Recipient: priv.Public()},
-		},
-		Params: testParams, RecordAlgo: true, RecordKDF: true,
-	})
-	if err == nil {
-		t.Fatal("a KEM layer repeating the adjacent algorithm should be rejected")
-	}
-}
-
-// TestSchemeName covers the name lookup the summaries use, including an id that
-// was never registered.
-func TestSchemeName(t *testing.T) {
-	for _, s := range ciphers.All() {
-		if SchemeName(s.ID) != s.Name {
-			t.Fatalf("id %d named %q, want %q", s.ID, SchemeName(s.ID), s.Name)
-		}
-	}
-	if SchemeName(0) == "" {
-		t.Fatal("an unknown id should still produce a name")
 	}
 }

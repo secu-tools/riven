@@ -170,6 +170,30 @@ func TestChunkCountMatchesSplit(t *testing.T) {
 	}
 }
 
+// TestShareLenMatchesSplit checks the size helpers padding is computed from
+// against real shares, across the chunk boundaries, and that SecretLen undoes
+// ShareLen. A drift would put pieces off their size class.
+func TestShareLenMatchesSplit(t *testing.T) {
+	for _, size := range []int{1, 2, 255, chunkBytes - 1, chunkBytes, chunkBytes + 1, 2*chunkBytes + 1} {
+		for _, k := range []int{1, 2} {
+			shares, err := Split(make([]byte, size), 2, k)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := ShareLen(size, k); got != len(shares[0]) {
+				t.Fatalf("k=%d secret %d bytes: ShareLen says %d, the share is %d", k, size, got, len(shares[0]))
+			}
+			if got := SecretLen(len(shares[0]), k); got != size {
+				t.Fatalf("k=%d share %d bytes: SecretLen says %d, want %d", k, len(shares[0]), got, size)
+			}
+		}
+	}
+	// No secret has shares one byte past a full chunk's, so the answer falls short.
+	if got := SecretLen(chunkBytes+2, 2); ShareLen(got, 2) != chunkBytes+1 {
+		t.Fatalf("SecretLen(%d) = %d, whose shares are %d bytes", chunkBytes+2, got, ShareLen(got, 2))
+	}
+}
+
 // TestChunkedSharesMustAgreeInLength checks that shares of different lengths are
 // refused, since the chunk layout is read from the length.
 func TestChunkedSharesMustAgreeInLength(t *testing.T) {

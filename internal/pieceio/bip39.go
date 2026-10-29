@@ -5,6 +5,7 @@ package pieceio
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -146,19 +147,7 @@ func isNumber(s string) bool {
 
 // bip39Index looks a word up in the sorted list.
 func bip39Index(word string) (int, bool) {
-	lo, hi := 0, len(bip39Words)-1
-	for lo <= hi {
-		mid := (lo + hi) / 2
-		switch {
-		case bip39Words[mid] == word:
-			return mid, true
-		case bip39Words[mid] < word:
-			lo = mid + 1
-		default:
-			hi = mid - 1
-		}
-	}
-	return 0, false
+	return slices.BinarySearch(bip39Words[:], word)
 }
 
 // errBip39TooLarge guards against producing a word list nobody could use.

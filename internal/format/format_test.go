@@ -16,7 +16,7 @@ import (
 
 var fast = kdf.Params{Memory: 8 * 1024, Time: 1, Par: 1}
 
-func buildInput(share []byte, pad int) EncodeInput {
+func buildInput(share []byte) EncodeInput {
 	setID := make([]byte, setIDLen)
 	rand.Read(setID)
 	return EncodeInput{
@@ -27,11 +27,9 @@ func buildInput(share []byte, pad int) EncodeInput {
 		Encrypted:   true,
 		RecordAlgo:  true,
 		RecordKDF:   true,
-		PayloadLen:  uint64(len(share)),
 		PayloadHash: Hash(share),
 		Layers:      []cascade.Descriptor{{Kind: cascade.Password, SchemeID: 1, Recorded: true}},
 		Share:       share,
-		PadLen:      pad,
 		Passwords:   [][]byte{[]byte("password")},
 		Params:      fast,
 	}
@@ -39,7 +37,7 @@ func buildInput(share []byte, pad int) EncodeInput {
 
 func TestEncodeDecodeRoundTrip(t *testing.T) {
 	share := []byte("this is a shamir share of some payload")
-	piece, err := Encode(buildInput(share, 40))
+	piece, err := Encode(buildInput(share))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +68,7 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 // TestCreatorFieldsRoundTrip checks the build identity written into a piece comes
 // back unchanged, and that omitting it yields empty strings rather than an error.
 func TestCreatorFieldsRoundTrip(t *testing.T) {
-	in := buildInput([]byte("share bytes for creator test"), 16)
+	in := buildInput([]byte("share bytes for creator test"))
 	in.CreatorVersion = "1.2.3.45"
 	in.CreatorCommit = "0badc0de"
 	piece, err := Encode(in)
@@ -86,7 +84,7 @@ func TestCreatorFieldsRoundTrip(t *testing.T) {
 	}
 
 	// Unset creator fields round-trip as empty.
-	bare := buildInput([]byte("no creator recorded"), 0)
+	bare := buildInput([]byte("no creator recorded"))
 	piece, err = Encode(bare)
 	if err != nil {
 		t.Fatal(err)
@@ -103,7 +101,7 @@ func TestCreatorFieldsRoundTrip(t *testing.T) {
 // TestCreatorFieldsBounded checks an over-long creator string is refused rather
 // than silently truncated or overflowing the field.
 func TestCreatorFieldsBounded(t *testing.T) {
-	in := buildInput([]byte("share"), 0)
+	in := buildInput([]byte("share"))
 	in.CreatorVersion = strings.Repeat("v", MaxCreatorLen+1)
 	if _, err := Encode(in); err == nil {
 		t.Fatal("a creator version over the limit must be refused")
@@ -118,7 +116,7 @@ func TestKDFRecoveredFromPiece(t *testing.T) {
 		{Memory: 16 * 1024, Time: 8, Par: 8},
 		{Memory: 32 * 1024, Time: 3, Par: 2},
 	} {
-		in := buildInput([]byte("share"), 0)
+		in := buildInput([]byte("share"))
 		in.Params = p
 		piece, err := Encode(in)
 		if err != nil {
@@ -137,7 +135,7 @@ func TestKDFRecoveredFromPiece(t *testing.T) {
 // TestHiddenKDFNeedsOverride checks that a piece with an unrecorded cost cannot
 // be opened without being told the parameters.
 func TestHiddenKDFNeedsOverride(t *testing.T) {
-	in := buildInput([]byte("share bytes"), 8)
+	in := buildInput([]byte("share bytes"))
 	in.RecordKDF = false
 	// Use a non-default cost so a lucky mask cannot coincide with it.
 	in.Params = kdf.Params{Memory: 16 * 1024, Time: 5, Par: 2}
@@ -163,7 +161,7 @@ func TestHiddenKDFNeedsOverride(t *testing.T) {
 }
 
 func TestHiddenAlgoNotRecorded(t *testing.T) {
-	in := buildInput([]byte("share"), 0)
+	in := buildInput([]byte("share"))
 	in.RecordAlgo = false
 	piece, err := Encode(in)
 	if err != nil {
@@ -185,14 +183,14 @@ func TestHiddenAlgoNotRecorded(t *testing.T) {
 }
 
 func TestWrongPassword(t *testing.T) {
-	piece, _ := Encode(buildInput([]byte("share"), 10))
+	piece, _ := Encode(buildInput([]byte("share")))
 	if _, _, err := Decode(piece, [][]byte{[]byte("WRONG")}, nil); err != ErrWrongPassword {
 		t.Fatalf("expected ErrWrongPassword, got %v", err)
 	}
 }
 
 func TestTamperDetected(t *testing.T) {
-	piece, _ := Encode(buildInput([]byte("share bytes here"), 20))
+	piece, _ := Encode(buildInput([]byte("share bytes here")))
 	// Every region matters: salt, cost byte, nonce, body, and tag.
 	for _, pos := range []int{0, saltLen, saltLen + 1, headerLen + 2, len(piece) - 1} {
 		bad := append([]byte(nil), piece...)
@@ -204,7 +202,7 @@ func TestTamperDetected(t *testing.T) {
 }
 
 func TestTruncationRejected(t *testing.T) {
-	piece, _ := Encode(buildInput([]byte("share"), 5))
+	piece, _ := Encode(buildInput([]byte("share")))
 	for _, n := range []int{0, 1, MinPieceLen - 1, MinPieceLen, len(piece) - 1} {
 		if n > len(piece) {
 			continue
@@ -216,7 +214,7 @@ func TestTruncationRejected(t *testing.T) {
 }
 
 func TestPureSSSManifest(t *testing.T) {
-	in := buildInput([]byte("plainshare"), 0)
+	in := buildInput([]byte("plainshare"))
 	in.Encrypted = false
 	in.Layers = nil
 	piece, _ := Encode(in)
@@ -235,7 +233,7 @@ func TestPureSSSManifest(t *testing.T) {
 // TestKeylessEnvelope covers the no-password envelope: it opens with no
 // passwords, refuses a password, and does not pretend to record a cost.
 func TestKeylessEnvelope(t *testing.T) {
-	in := buildInput([]byte("keyless share"), 12)
+	in := buildInput([]byte("keyless share"))
 	in.Keyless = true
 	in.Encrypted = false
 	in.Layers = nil
@@ -272,7 +270,7 @@ func TestKeylessEnvelope(t *testing.T) {
 }
 
 func TestKeylessRejectsPasswords(t *testing.T) {
-	in := buildInput([]byte("s"), 0)
+	in := buildInput([]byte("s"))
 	in.Keyless = true
 	// Passwords are still set by buildInput, which is a contradiction.
 	if _, err := Encode(in); err == nil {
@@ -281,7 +279,7 @@ func TestKeylessRejectsPasswords(t *testing.T) {
 }
 
 func TestPasswordPieceRequiresPassword(t *testing.T) {
-	in := buildInput([]byte("s"), 0)
+	in := buildInput([]byte("s"))
 	in.Passwords = nil
 	if _, err := Encode(in); err == nil {
 		t.Fatal("a non-keyless piece with no password should be rejected")
@@ -291,7 +289,7 @@ func TestPasswordPieceRequiresPassword(t *testing.T) {
 // TestKeylessIsCheap checks the keyless path performs no password hashing, which
 // is what lets combine open such a set without asking anything.
 func TestKeylessIsCheap(t *testing.T) {
-	in := buildInput([]byte("share"), 0)
+	in := buildInput([]byte("share"))
 	in.Keyless = true
 	in.Passwords = nil
 	// A cost that would take a noticeable amount of time if it were ever used.
@@ -310,22 +308,22 @@ func TestKeylessIsCheap(t *testing.T) {
 }
 
 func TestRejectsBadInput(t *testing.T) {
-	in := buildInput([]byte("s"), 0)
+	in := buildInput([]byte("s"))
 	in.SetID = []byte{1, 2, 3}
 	if _, err := Encode(in); err == nil {
 		t.Fatal("short set id should fail")
 	}
-	in = buildInput([]byte("s"), 0)
+	in = buildInput([]byte("s"))
 	in.PayloadHash = []byte{1}
 	if _, err := Encode(in); err == nil {
 		t.Fatal("short hash should fail")
 	}
-	in = buildInput([]byte("s"), 0)
+	in = buildInput([]byte("s"))
 	in.Serial = 9
 	if _, err := Encode(in); err == nil {
 		t.Fatal("serial past N should fail")
 	}
-	in = buildInput([]byte("s"), 0)
+	in = buildInput([]byte("s"))
 	in.Params = kdf.Params{Memory: 19 * 1024, Time: 1, Par: 1}
 	if _, err := Encode(in); err == nil {
 		t.Fatal("unencodable params should fail")
@@ -336,11 +334,11 @@ func TestRejectsBadInput(t *testing.T) {
 // not share bytes at any fixed offset, since that would link them.
 func TestNoPlaintextStructure(t *testing.T) {
 	share := bytes.Repeat([]byte{0x41}, 200)
-	a, err := Encode(buildInput(share, 0))
+	a, err := Encode(buildInput(share))
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := Encode(buildInput(share, 0))
+	b, err := Encode(buildInput(share))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -370,7 +368,7 @@ func TestNoPlaintextStructure(t *testing.T) {
 // parser. PeekParams and the exhaustive cost round-trip in the kdf tests cover the
 // recorded-cost path.
 func FuzzDecode(f *testing.F) {
-	piece, _ := Encode(buildInput([]byte("seed share"), 8))
+	piece, _ := Encode(buildInput([]byte("seed share")))
 	f.Add(piece, []byte("password"))
 	f.Add([]byte{}, []byte{})
 	f.Add(bytes.Repeat([]byte{0}, 100), []byte("x"))
@@ -384,7 +382,7 @@ func FuzzDecode(f *testing.F) {
 // callers can warn before an expensive open.
 func TestPeekParams(t *testing.T) {
 	want := kdf.Params{Memory: 32 * 1024, Time: 4, Par: 2}
-	in := buildInput([]byte("share"), 0)
+	in := buildInput([]byte("share"))
 	in.Params = want
 	piece, err := Encode(in)
 	if err != nil {
@@ -422,22 +420,20 @@ func TestPieceLenMatchesAnEncodedPiece(t *testing.T) {
 			descs[i] = cascade.Descriptor{Kind: cascade.Password, SchemeID: 1, Recorded: true}
 		}
 		for _, shareLen := range []int{1, 64, 1000} {
-			for _, padLen := range []int{0, 7, 500} {
-				for _, name := range []string{"", "secret.pdf"} {
-					piece, err := Encode(EncodeInput{
-						SetID: make([]byte, SetIDLen), K: 1, N: 1, Serial: 1,
-						PayloadHash: make([]byte, 32), PayloadLen: uint64(shareLen),
-						Share: make([]byte, shareLen), PadLen: padLen, Name: name,
-						Passwords: [][]byte{[]byte("p")}, Params: fast,
-						Layers: descs,
-					})
-					if err != nil {
-						t.Fatal(err)
-					}
-					if want := PieceLen(shareLen, padLen, layers, len(name)); len(piece) != want {
-						t.Fatalf("layers=%d share=%d pad=%d name=%q: piece is %d bytes, PieceLen says %d",
-							layers, shareLen, padLen, name, len(piece), want)
-					}
+			for _, name := range []string{"", "secret.pdf"} {
+				piece, err := Encode(EncodeInput{
+					SetID: make([]byte, SetIDLen), K: 1, N: 1, Serial: 1,
+					PayloadHash: make([]byte, 32),
+					Share:       make([]byte, shareLen), Name: name,
+					Passwords: [][]byte{[]byte("p")}, Params: fast,
+					Layers: descs,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if want := PieceLen(shareLen, layers, len(name)); len(piece) != want {
+					t.Fatalf("layers=%d share=%d name=%q: piece is %d bytes, PieceLen says %d",
+						layers, shareLen, name, len(piece), want)
 				}
 			}
 		}

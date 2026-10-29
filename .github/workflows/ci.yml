@@ -238,8 +238,9 @@ jobs:
       - name: Format check
         shell: bash
         run: |
-          # internal/shamir is vendored third-party source and is left as-is.
-          unformatted=$(gofmt -l . | grep -v '^internal/shamir/' || true)
+          # The two vendored shamir files are third-party source and are left
+          # as-is. Riven's own files beside them are checked like any other.
+          unformatted=$(gofmt -l . | grep -v '^internal/shamir/shamir\(_test\)\?\.go$' || true)
           if [ -n "$unformatted" ]; then
             echo "::error::These files need gofmt:"
             echo "$unformatted"
@@ -274,13 +275,14 @@ jobs:
         shell: bash
         run: |
           # Comments, docs and messages stay ASCII so they render the same in
-          # every console and editor. Two exceptions carry non-ASCII on purpose:
-          # the vendored shamir copy, and the tests whose subject is Unicode
-          # password handling (composition, scripts, legacy encodings).
+          # every console and editor. Two exceptions are allowed non-ASCII: the
+          # two vendored shamir files, left as upstream wrote them, and the tests
+          # whose subject is Unicode password handling (composition, scripts,
+          # legacy encodings).
           files=$(grep -rlP '[^\x00-\x7F]' \
             --include='*.go' --include='*.md' --include='*.yml' \
             --include='*.sh' --include='*.ps1' --include='*.cmd' . \
-            | grep -v '^./internal/shamir/' \
+            | grep -v '^./internal/shamir/shamir\(_test\)\?\.go$' \
             | grep -v '^./internal/password/password_test\.go$' \
             | grep -v '^./internal/core/i18n_test\.go$' \
             | grep -v '^./internal/app/split_output_test\.go$' || true)

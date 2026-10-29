@@ -14,13 +14,15 @@
 //   - Encoding. A password entered as UTF-8 at split time and pasted as GB18030
 //     (a common Chinese encoding) at combine time is different bytes for the same
 //     characters. Input that is not valid UTF-8 is transcoded from GB18030 to
-//     UTF-8 first, so both reduce to the same canonical bytes.
+//     UTF-8 first, so both reduce to the same canonical bytes. Only input that
+//     really is GB18030 is transcoded; other bytes are kept as they are.
 //
 // Pure ASCII passwords are unaffected: they are already valid UTF-8 and already
 // normalized, so generated passwords pass through unchanged.
 package password
 
 import (
+	"bytes"
 	"unicode/utf8"
 
 	"golang.org/x/text/encoding/simplifiedchinese"
@@ -39,7 +41,7 @@ import (
 func Canonical(raw []byte) []byte {
 	src := raw
 	if !utf8.Valid(src) {
-		if conv, err := simplifiedchinese.GB18030.NewDecoder().Bytes(src); err == nil && utf8.Valid(conv) {
+		if conv, ok := fromGB18030(src); ok {
 			defer memory.Zero(conv)
 			src = conv
 		}
@@ -59,6 +61,26 @@ func Canonical(raw []byte) []byte {
 	copy(out, nfc)
 	memory.Zero(nfc)
 	return out
+}
+
+// fromGB18030 transcodes b to UTF-8 when b really is GB18030. The decoder
+// replaces a byte it cannot read with U+FFFD rather than failing, which would
+// turn different passwords into one key, so the result is used only when encoding
+// it again gives back b exactly: then nothing was lost on the way.
+func fromGB18030(b []byte) ([]byte, bool) {
+	conv, err := simplifiedchinese.GB18030.NewDecoder().Bytes(b)
+	if err != nil || !utf8.Valid(conv) {
+		memory.Zero(conv)
+		return nil, false
+	}
+	back, err := simplifiedchinese.GB18030.NewEncoder().Bytes(conv)
+	lossless := err == nil && bytes.Equal(back, b)
+	memory.Zero(back)
+	if !lossless {
+		memory.Zero(conv)
+		return nil, false
+	}
+	return conv, true
 }
 
 // CanonicalAll canonicalizes every password in place order, returning a new

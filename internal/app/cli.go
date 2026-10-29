@@ -404,15 +404,13 @@ SPLIT OPTIONS
                                combine restores it (default true). Only the name
                                is kept, never the path or any other attribute, and
                                it sits inside the encrypted metadata
-  --pad PCT                    size-class width in percent (default 5, maximum
+  --pad PCT                    size-class width in percent (default 1, maximum
                                500). Every piece is rounded up to the next class,
-                               so its size gives only a range. 0 or "none" leaves
-                               the natural size, which reveals the content length.
-                               A split with no password cannot hide its length, so
-                               padding is skipped there
-  -v, --verify true|false      after writing, re-read the pieces and rebuild the
+                               so its size gives only a range. 0 or "none" drops
+                               the class, which reveals the content length
+  --verify true|false          after writing, re-read the pieces and rebuild the
                                original to confirm they work (default true).
-                               --no-verify skips it
+                               -v alone turns it on, --no-verify skips it
   --generate                   generate strong password(s) instead of prompting
   -o, --out DIR                output directory for pieces
 

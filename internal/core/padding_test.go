@@ -264,11 +264,10 @@ func TestPaddingWidthValidated(t *testing.T) {
 	}
 }
 
-// TestPaddingSkippedWithoutAPassword covers the case where padding would be
-// theatre. A split with no password seals its metadata with the public keyless
-// key, so anyone holding this tool reads the content length out of any piece;
-// padding would cost storage and hide nothing, so it is not applied.
-func TestPaddingSkippedWithoutAPassword(t *testing.T) {
+// TestPaddingAppliesWithoutAPassword checks a set whose envelope anyone can open
+// is padded too. The fill is shared with the payload, so fewer than k pieces
+// cannot tell content from fill even when the metadata is readable.
+func TestPaddingAppliesWithoutAPassword(t *testing.T) {
 	priv, err := kem.Generate(kem.Default())
 	if err != nil {
 		t.Fatal(err)
@@ -290,53 +289,10 @@ func TestPaddingSkippedWithoutAPassword(t *testing.T) {
 			padded := mustSplit(t, input, so)
 			so.Padding = PadNone()
 			natural := mustSplit(t, input, so)
-			if len(padded[0]) != len(natural[0]) {
-				t.Fatalf("padding was applied without a password: %d bytes against a natural %d",
-					len(padded[0]), len(natural[0]))
+			if len(padded[0]) <= len(natural[0]) {
+				t.Fatalf("not padded: %d bytes against a natural %d", len(padded[0]), len(natural[0]))
 			}
 		})
-	}
-
-	// A password layer alongside a recipient layer does seal the metadata, so
-	// padding applies again.
-	so := SplitOptions{N: 4, K: 2, Layers: []LayerSpec{
-		{Kind: PasswordLayer, Password: []byte("pw")},
-		{Kind: RecipientLayer, Recipient: priv.Public()},
-	}}
-	so.Padding = PadPercent(500)
-	padded := mustSplit(t, input, so)
-	so.Padding = PadNone()
-	natural := mustSplit(t, input, so)
-	if len(padded[0]) <= len(natural[0]) {
-		t.Fatalf("a password layer should restore padding: %d bytes against a natural %d",
-			len(padded[0]), len(natural[0]))
-	}
-}
-
-// TestPaddingApplies states the rule directly, so a change to it is deliberate.
-func TestPaddingApplies(t *testing.T) {
-	priv, err := kem.Generate(kem.Default())
-	if err != nil {
-		t.Fatal(err)
-	}
-	pw := LayerSpec{Kind: PasswordLayer, Password: []byte("p")}
-	key := LayerSpec{Kind: RecipientLayer, Recipient: priv.Public()}
-
-	cases := []struct {
-		name string
-		so   SplitOptions
-		want bool
-	}{
-		{"password", SplitOptions{Layers: []LayerSpec{pw}}, true},
-		{"password and key", SplitOptions{Layers: []LayerSpec{pw, key}}, true},
-		{"password, padding off", SplitOptions{Layers: []LayerSpec{pw}, Padding: PadNone()}, false},
-		{"key only", SplitOptions{Layers: []LayerSpec{key}}, false},
-		{"keyless", SplitOptions{Keyless: true}, false},
-	}
-	for _, c := range cases {
-		if got := PaddingApplies(c.so); got != c.want {
-			t.Fatalf("%s: PaddingApplies = %v, want %v", c.name, got, c.want)
-		}
 	}
 }
 
@@ -366,7 +322,7 @@ func TestPaddingNeverBreaksRecovery(t *testing.T) {
 }
 
 // TestPaddingSurvivesInfo checks a padded piece still describes itself, since
-// the padding sits inside the same authenticated manifest as the metadata.
+// the padding sits inside the share it carries.
 func TestPaddingSurvivesInfo(t *testing.T) {
 	specs, pws := pwLayers(1)
 	for _, w := range widths {

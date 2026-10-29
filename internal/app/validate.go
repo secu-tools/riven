@@ -108,30 +108,13 @@ func validateSplitValues(opts *cliOptions) error {
 	return nil
 }
 
-// validatePaddingChoice checks the padding value, and refuses padding for a
-// split that cannot benefit from it.
-//
-// Padding hides the length inside the encrypted metadata. Without a password
-// that metadata is sealed with a public key, so the length is readable either
-// way and asking for padding would be answered by silently doing nothing.
+// validatePaddingChoice checks the padding value.
 func validatePaddingChoice(opts *cliOptions) error {
 	if !opts.padSet {
 		return nil
 	}
-	pad, err := parsePadding(opts.pad)
-	if err != nil {
-		return err
-	}
-	if pad.Off {
-		return nil
-	}
-	if opts.keyless {
-		return fmt.Errorf("--keyless uses no password, so the piece metadata is public and padding cannot hide the content length: drop --pad")
-	}
-	if n := countRecipientSources(opts); n > 0 && n == len(opts.layerSources) {
-		return fmt.Errorf("a split addressed only to recipient keys uses no password, so the piece metadata is public and padding cannot hide the content length: add a password layer with --password-env, or drop --pad")
-	}
-	return nil
+	_, err := parsePadding(opts.pad)
+	return err
 }
 
 // validateCounts checks the piece count, threshold and QR scale.

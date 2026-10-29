@@ -56,10 +56,9 @@ ciphertext. Two exceptions, both deliberate:
 <summary><b>What does the piece size reveal?</b></summary>
 
 A range, not a length. Every piece is rounded up to a size class `--pad` percent
-wide (5 by default), so the size says only which class the content falls in. With
-`--pad none` the size follows the content length exactly. A split with no password
-is not padded at all, because its metadata is readable and the length would leak
-either way.
+wide (1 by default), so the size says only which class the content falls in. With
+`--pad none` the size follows the content length exactly. This holds with or
+without a password.
 
 </details>
 
@@ -114,7 +113,8 @@ makes fewer than K pieces reveal nothing.
 | qr | n/a | 2952 bytes per piece |
 | sheet | n/a | about 17 KB per piece, 16 printed pages |
 
-Padding adds up to `--pad` percent on top (5 by default).
+Every piece also carries 32 random bytes, and padding adds up to `--pad` percent
+on top (1 by default).
 
 </details>
 

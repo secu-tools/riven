@@ -12,6 +12,7 @@ import (
 
 	"github.com/secu-tools/riven/internal/kem"
 	"github.com/secu-tools/riven/internal/memory"
+	"github.com/secu-tools/riven/internal/pieceio"
 )
 
 // Key files name their scheme in the first line. Key lengths happen to be
@@ -38,26 +39,7 @@ func writePrivateKey(path string, priv *kem.PrivateKey) error {
 		base64.StdEncoding.EncodeToString(raw) + "\n" +
 		"# keep this file secret; anyone with it can decrypt pieces sent to you\n"
 	memory.Zero(raw)
-	return writeSecret(path, []byte(body))
-}
-
-// writeSecret writes a file that must not be readable by other users.
-//
-// os.WriteFile applies its mode only when it creates the file, so writing over
-// an existing world-readable file would silently keep that mode. The mode is set
-// explicitly instead. Windows has no POSIX modes and governs access by inherited
-// ACLs, so the Chmod is best effort there.
-func writeSecret(path string, body []byte) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
-	}
-	_ = f.Chmod(0o600)
-	if _, err := f.Write(body); err != nil {
-		f.Close()
-		return err
-	}
-	return f.Close()
+	return pieceio.Write(path, []byte(body))
 }
 
 // keyKind distinguishes the two file roles.

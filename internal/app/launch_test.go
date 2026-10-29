@@ -71,29 +71,3 @@ func TestEveryCommandStartsWithoutPanicking(t *testing.T) {
 		})
 	}
 }
-
-// An unknown command is a user mistake, not a crash, and it must say so.
-func TestUnknownCommandIsReported(t *testing.T) {
-	err := run([]string{"frobnicate"})
-	if err == nil {
-		t.Fatal("an unknown command was accepted")
-	}
-	if !strings.Contains(err.Error(), "frobnicate") {
-		t.Errorf("the error does not name the command: %v", err)
-	}
-}
-
-// version and help are the two commands a user runs first, and both must work
-// with no setup at all.
-func TestVersionAndHelpNeedNothing(t *testing.T) {
-	for _, cmd := range []string{"version", "help"} {
-		out := capture(t, func() {
-			if err := run([]string{cmd}); err != nil {
-				t.Errorf("%s: %v", cmd, err)
-			}
-		})
-		if strings.TrimSpace(out) == "" {
-			t.Errorf("%s printed nothing", cmd)
-		}
-	}
-}

@@ -132,7 +132,7 @@ func completionKeyTypes() []string {
 
 // completionPads are the padding answers worth suggesting. Any percent is legal,
 // so this is a starting point rather than the set of valid values.
-func completionPads() []string { return []string{"none", "0", "5", "10", "25", "50"} }
+func completionPads() []string { return []string{"none", "0", "1", "2", "5", "10", "25", "50"} }
 
 // cmdCompletion prints a completion script for one shell.
 func cmdCompletion(opts *cliOptions) error {

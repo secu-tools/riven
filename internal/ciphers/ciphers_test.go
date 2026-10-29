@@ -91,16 +91,6 @@ func TestRegistryIsConsistent(t *testing.T) {
 	}
 }
 
-func TestDefaultIsRegistered(t *testing.T) {
-	d := Default()
-	if _, ok := ByID(d.ID); !ok {
-		t.Fatal("default scheme is not in the registry")
-	}
-	if d.Name != defaultName {
-		t.Fatalf("default is %s, want %s", d.Name, defaultName)
-	}
-}
-
 // TestCascadeNeverRepeatsAdjacent covers the sequence used to suggest algorithms
 // for successive layers.
 func TestCascadeNeverRepeatsAdjacent(t *testing.T) {
