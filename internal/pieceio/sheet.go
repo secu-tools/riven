@@ -21,6 +21,10 @@ type SheetInfo struct {
 	Total  int    // pieces in the set
 	Needed int    // pieces required to rebuild
 	Name   string // base name of the original input, for the reader's reference
+
+	// Hidden leaves out the serial, the counts and the name, for a set whose
+	// pieces hide their details: the page must not print what the piece hides.
+	Hidden bool
 }
 
 // sheetMarker delimits the piece text inside the page, so a saved sheet can be
@@ -31,7 +35,7 @@ const sheetMarker = "piece-text"
 // They only have to be close: they drive an estimate and a limit, not the layout
 // itself, which the browser does.
 const (
-	sheetCharsPerLine = 39 // 8 groups of 4, separated by spaces
+	sheetCharsPerLine = base32GroupLen * base32GroupsPerLine // 32, printed as 8 groups of 4
 	sheetLinesPerPage = 44
 
 	// SheetMaxPages is the most pages one piece may take. Past this it is not a
@@ -85,8 +89,8 @@ func EncodeSheet(piece []byte, info SheetInfo, qrScale int) ([]byte, string, err
 		if err != nil {
 			return nil, "", err
 		}
-		qrTag = fmt.Sprintf(`<img alt="piece %d" src="data:image/png;base64,%s">`,
-			info.Serial, base64.StdEncoding.EncodeToString(png))
+		qrTag = fmt.Sprintf(`<img alt="%s" src="data:image/png;base64,%s">`,
+			info.which(), base64.StdEncoding.EncodeToString(png))
 		note = fmt.Sprintf("error correction %s (~%d%% recoverable)", level.Name, level.Recovery)
 	} else {
 		qrTag = fmt.Sprintf(`<p class="none">This piece is %d bytes, too large for a QR code. `+
@@ -105,14 +109,24 @@ func EncodeSheet(piece []byte, info SheetInfo, qrScale int) ([]byte, string, err
 	}
 
 	name := info.Name
-	if name == "" {
+	lead := fmt.Sprintf("Any %d of the %d pieces rebuild the file.", info.Needed, info.Total)
+	gather := fmt.Sprintf("%d different pieces of this set", info.Needed)
+	enough := fmt.Sprintf("%d pieces", info.Needed)
+	switch {
+	case info.Hidden:
+		name = "(not shown)"
+		lead = "Enough pieces of this set rebuild the file; how many is not shown here."
+		gather = "different pieces of this set; how many are needed is not shown here"
+		enough = "enough pieces"
+	case name == "":
 		name = "(not recorded)"
 	}
 
 	page := strings.NewReplacer(
-		"{{SERIAL}}", fmt.Sprint(info.Serial),
-		"{{TOTAL}}", fmt.Sprint(info.Total),
-		"{{NEEDED}}", fmt.Sprint(info.Needed),
+		"{{WHICH}}", info.which(),
+		"{{LEAD}}", lead,
+		"{{GATHER}}", gather,
+		"{{ENOUGH}}", enough,
 		"{{NAME}}", html.EscapeString(name),
 		"{{QR}}", qrTag,
 		"{{PAGENOTE}}", pageNote,
@@ -121,6 +135,15 @@ func EncodeSheet(piece []byte, info SheetInfo, qrScale int) ([]byte, string, err
 	).Replace(sheetTemplate)
 
 	return []byte(page), note, nil
+}
+
+// which names the piece as the page does: "piece 2 of 5", or just "piece" when
+// the set hides its details.
+func (info SheetInfo) which() string {
+	if info.Hidden {
+		return "piece"
+	}
+	return fmt.Sprintf("piece %d of %d", info.Serial, info.Total)
 }
 
 // sheetBody extracts the piece text from a saved sheet. It returns false when
@@ -151,7 +174,7 @@ const sheetTemplate = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Riven recovery piece {{SERIAL}} of {{TOTAL}}</title>
+<title>Riven recovery {{WHICH}}</title>
 <style>
   body { font-family: sans-serif; margin: 2em; max-width: 40em; color: #000; }
   h1 { font-size: 1.4em; margin-bottom: 0.2em; }
@@ -179,9 +202,9 @@ const sheetTemplate = `<!doctype html>
 </style>
 </head>
 <body>
-<header>Riven recovery piece {{SERIAL}} of {{TOTAL}} - {{NAME}}</header>
-<h1>Recovery piece {{SERIAL}} of {{TOTAL}}</h1>
-<p class="lead">Any {{NEEDED}} of the {{TOTAL}} pieces rebuild the file. Fewer reveal nothing.</p>
+<header>Riven recovery {{WHICH}} - {{NAME}}</header>
+<h1>Recovery {{WHICH}}</h1>
+<p class="lead">{{LEAD}} Fewer reveal nothing.</p>
 {{PAGENOTE}}
 <div class="box">
 {{QR}}
@@ -193,7 +216,7 @@ const sheetTemplate = `<!doctype html>
 
 <h2>How to use this</h2>
 <ol>
-  <li>Gather {{NEEDED}} different pieces of this set.</li>
+  <li>Gather {{GATHER}}.</li>
   <li>Get the tool: <code>go install github.com/secu-tools/riven@latest</code></li>
   <li>Get each piece back into a file. Scanning the QR code with any QR reader is
       easiest. Otherwise photograph or scan this page and run it through OCR: the
@@ -204,7 +227,7 @@ const sheetTemplate = `<!doctype html>
       is reported rather than silently accepted.</li>
 </ol>
 <p>The password is not on this sheet and never will be. Without it, and without
-{{NEEDED}} pieces, this page reveals nothing about the contents.</p>
+{{ENOUGH}}, this page reveals nothing about the contents.</p>
 
 <footer>
 <p>Original file: {{NAME}}</p>

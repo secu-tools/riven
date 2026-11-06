@@ -12,7 +12,6 @@ import (
 
 	"github.com/secu-tools/riven/internal/ciphers"
 	"github.com/secu-tools/riven/internal/core"
-	"github.com/secu-tools/riven/internal/format"
 	"github.com/secu-tools/riven/internal/kdf"
 	"github.com/secu-tools/riven/internal/kem"
 )
@@ -151,26 +150,28 @@ func TestChooseSchemeNeverDefaultsToTheForbiddenOne(t *testing.T) {
 	if len(all) < 2 {
 		t.Skip("needs at least two algorithms")
 	}
-	forbid := all[0].ID
-
-	var got uint8
-	out := withInput(t, "\n", func() { // Enter takes the default
-		id, err := chooseScheme(forbid, forbid)
-		if err != nil {
-			t.Fatal(err)
+	for i := 0; i < 3; i++ {
+		for _, forbid := range all {
+			var got uint8
+			out := withInput(t, "\n", func() { // Enter takes the default
+				id, err := chooseScheme(i, forbid.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got = id
+			})
+			if got == forbid.ID {
+				t.Fatalf("layer %d defaulted to %s, the forbidden algorithm", i+1, forbid.Name)
+			}
+			if !strings.Contains(out, all[0].Name) {
+				t.Errorf("the menu did not list the algorithms:\n%s", out)
+			}
 		}
-		got = id
-	})
-	if got == forbid {
-		t.Fatalf("the default was the forbidden algorithm %d", forbid)
-	}
-	if !strings.Contains(out, all[0].Name) {
-		t.Errorf("the menu did not list the algorithms:\n%s", out)
 	}
 
 	// A typed name is taken as given.
 	withInput(t, all[1].Name+"\n", func() {
-		id, err := chooseScheme(all[0].ID, 0)
+		id, err := chooseScheme(0, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -186,7 +187,7 @@ func TestChoosePasswordGeneratesOnAnEmptyAnswer(t *testing.T) {
 	plan := &splitPlan{}
 	var pw []byte
 	withInput(t, "\n", func() { // Enter asks for a generated one
-		got, err := choosePassword("Password", nil, plan)
+		got, err := choosePassword(1, nil, plan)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -301,26 +302,47 @@ func TestRecipientForLayerReadsANamedKey(t *testing.T) {
 	}
 }
 
-// The cost retry only applies where it can help: a piece that failed for any
-// other reason, or a run that already named a cost, must not be asked again.
-func TestRetryWithKDFOnlyOffersItselfWhenItCouldWork(t *testing.T) {
-	params := kdf.Default()
-
-	// An explicit cost was already supplied: nothing to retry with.
-	got, err := retryWithKDF(&cliOptions{}, nil, core.OpenOptions{Params: &params}, format.ErrWrongPassword)
+// The cost question only applies where it can help. When a piece merely failed
+// to open, automation declines quietly so the wrong-password error stands; when
+// the set says it recorded no cost, automation names the flag. An answer is
+// kept, so it is asked for once.
+func TestAskParamsOnlyAsksWhenItCouldHelp(t *testing.T) {
+	got, err := (&prompter{opts: &cliOptions{yes: true}}).askParams(false)
 	if got != nil || err != nil {
-		t.Errorf("retried despite an explicit cost: %v %v", got, err)
+		t.Errorf("prompted under -y for a piece that did not open: %v %v", got, err)
+	}
+	_, err = (&prompter{opts: &cliOptions{yes: true}}).askParams(true)
+	if !errors.Is(err, core.ErrParamsRequired) || !strings.Contains(err.Error(), "--kdf") {
+		t.Errorf("an unrecorded cost under -y should name --kdf: %v", err)
 	}
 
-	// The failure was not a wrong-password/parameters one.
-	got, err = retryWithKDF(&cliOptions{}, nil, core.OpenOptions{}, errors.New("some other failure"))
-	if got != nil || err != nil {
-		t.Errorf("retried on an unrelated failure: %v %v", got, err)
+	p := &prompter{opts: &cliOptions{}}
+	withTerminal(t, "m=8,t=1,p=1\n", func() { got, err = p.askParams(true) })
+	if err != nil || got == nil || got.Memory != 8*1024 {
+		t.Fatalf("a typed cost was not used: %v %v", got, err)
 	}
+	again := withTerminal(t, "", func() { got, err = p.askParams(false) })
+	if err != nil || got == nil || got.Memory != 8*1024 || again != "" {
+		t.Fatalf("the cost was asked for twice (%q): %v %v", again, got, err)
+	}
+}
 
-	// Automation cannot be asked, so it declines rather than prompting.
-	got, err = retryWithKDF(&cliOptions{yes: true}, nil, core.OpenOptions{}, format.ErrWrongPassword)
-	if got != nil || err != nil {
-		t.Errorf("prompted under -y: %v %v", got, err)
+// TestAGivenPasswordIsNotDroppedForNoEncryption checks a split given a password
+// on the command line is not offered "no encryption": taking it would split with
+// no password and quietly ignore the one given.
+func TestAGivenPasswordIsNotDroppedForNoEncryption(t *testing.T) {
+	t.Setenv("RIVEN_UNIT_KEEP", "kept password")
+	opts, err := parseArgs([]string{"split", "f", "-n", "3", "-k", "2", "--password-env", "RIVEN_UNIT_KEEP"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plan *splitPlan
+	out := withTerminal(t, "3\n1\n\n", func() { plan, err = planSplit(opts, t.TempDir()) })
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if plan.opts.Keyless || len(plan.opts.Layers) != 1 || strings.Contains(out, "no encryption") {
+		t.Fatalf("a given password was dropped for no encryption (keyless %v, %d layers):\n%s",
+			plan.opts.Keyless, len(plan.opts.Layers), out)
 	}
 }

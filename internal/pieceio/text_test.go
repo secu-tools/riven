@@ -6,6 +6,7 @@ package pieceio
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/base32"
 	"strings"
 	"testing"
 
@@ -256,6 +257,32 @@ func TestSheetRoundTrip(t *testing.T) {
 	}
 }
 
+// TestSheetForHiddenDetails checks a sheet of a set that hides its details prints
+// none of them: not which piece it is, not how many there are or are needed, not
+// the file name. It still explains itself and still reads back.
+func TestSheetForHiddenDetails(t *testing.T) {
+	piece := samplePiece(t, 300)
+	data, _, err := EncodeSheet(piece, SheetInfo{Serial: 2, Total: 5, Needed: 3, Name: "secret.pdf", Hidden: true}, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(data)
+	for _, bad := range []string{"secret.pdf", " 2 of 5", "Any 3", "Gather 3", `alt="piece 2"`} {
+		if strings.Contains(page, bad) {
+			t.Fatalf("a hidden-details sheet shows %q", bad)
+		}
+	}
+	for _, want := range []string{"Recovery piece", "riven combine", `id="piece-text"`, "not shown"} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("a hidden-details sheet is missing %q", want)
+		}
+	}
+	got, _, err := decodeDetail(data)
+	if err != nil || !bytes.Equal(got, piece) {
+		t.Fatalf("a hidden-details sheet did not read back: %v", err)
+	}
+}
+
 // TestSheetWithoutAQRCode checks the page still works for a piece too large to
 // scan: the text is there and the page says so.
 func TestSheetWithoutAQRCode(t *testing.T) {
@@ -277,6 +304,23 @@ func TestSheetWithoutAQRCode(t *testing.T) {
 	}
 	if f != Sheet || !bytes.Equal(got, piece) {
 		t.Fatal("the text-only sheet did not read back")
+	}
+}
+
+// TestSheetPagesCountsPrintedLines checks the page estimate counts the lines the
+// sheet prints: eight groups of four characters each. It once divided by the
+// printed width of a line, spaces included, and so called a two-page piece one.
+func TestSheetPagesCountsPrintedLines(t *testing.T) {
+	for _, n := range []int{100, 1000, 5000, SheetMaxPiece} {
+		text := groupBase32(base32.StdEncoding.EncodeToString(make([]byte, n+checksumLen)))
+		lines := strings.Count(text, "\n")
+		want := (lines + sheetLinesPerPage - 1) / sheetLinesPerPage
+		if got := SheetPages(n); got != want {
+			t.Fatalf("%d bytes print on %d lines, %d pages; SheetPages says %d", n, lines, want, got)
+		}
+	}
+	if pages := SheetPages(SheetMaxPiece); pages != SheetMaxPages {
+		t.Fatalf("the largest sheet piece takes %d pages, want %d", pages, SheetMaxPages)
 	}
 }
 

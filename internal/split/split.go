@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/secu-tools/riven/internal/memory"
 	"github.com/secu-tools/riven/internal/parallel"
 	"github.com/secu-tools/riven/internal/shamir"
 )
@@ -182,8 +183,10 @@ func Combine(shares [][]byte, k int) ([]byte, error) {
 		return shamir.Combine(shares)
 	}
 
-	// Recover each chunk from the matching chunk share of every supplied share.
-	recovered := make([][]byte, chunks)
+	// Recover each chunk from the matching chunk share of every supplied share,
+	// straight into its place in the secret, so the secret is held once rather
+	// than once in chunks and again joined.
+	out := make([]byte, len(shares[0])-chunks)
 	last := len(shares[0]) - (chunks-1)*(chunkBytes+1)
 	err := parallel.Do(chunks, parallel.Workers(chunks), func(c int) error {
 		size := chunkBytes + 1
@@ -195,20 +198,17 @@ func Combine(shares [][]byte, k int) ([]byte, error) {
 		for i, s := range shares {
 			part[i] = s[lo : lo+size]
 		}
-		out, cerr := shamir.Combine(part)
+		chunk, cerr := shamir.Combine(part)
 		if cerr != nil {
 			return cerr
 		}
-		recovered[c] = out
+		copy(out[c*chunkBytes:], chunk)
+		memory.Zero(chunk)
 		return nil
 	})
 	if err != nil {
+		memory.Zero(out)
 		return nil, err
-	}
-
-	out := make([]byte, 0, len(shares[0])-chunks)
-	for _, r := range recovered {
-		out = append(out, r...)
 	}
 	return out, nil
 }

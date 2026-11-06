@@ -62,9 +62,9 @@ func TestSplitVerifyReporting(t *testing.T) {
 		want    string
 		notWant string
 	}{
-		{"default verifies", nil, "Verification: PASSED", ""},
-		{"--no-verify skips", []string{"--no-verify"}, "Verification: SKIPPED", "Verification: PASSED"},
-		{"--verify false skips", []string{"--verify", "false"}, "Verification: SKIPPED", ""},
+		{"default verifies", nil, verifiedYes, ""},
+		{"--no-verify skips", []string{"--no-verify"}, verifiedSkipped, verifiedYes},
+		{"--verify false skips", []string{"--verify", "false"}, verifiedSkipped, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

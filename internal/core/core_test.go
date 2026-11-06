@@ -13,6 +13,7 @@ import (
 	"github.com/secu-tools/riven/internal/ciphers"
 	"github.com/secu-tools/riven/internal/kdf"
 	"github.com/secu-tools/riven/internal/kem"
+	"github.com/secu-tools/riven/internal/testkit"
 )
 
 var testParams = kdf.Params{Memory: 8 * 1024, Time: 1, Par: 1}
@@ -31,24 +32,13 @@ func mustSplit(t *testing.T, input []byte, opts SplitOptions) [][]byte {
 
 // allSubsetsOfSize invokes fn with every k-sized subset of pieces.
 func allSubsetsOfSize(pieces [][]byte, k int, fn func(subset [][]byte)) {
-	n := len(pieces)
-	idx := make([]int, k)
-	var rec func(start, depth int)
-	rec = func(start, depth int) {
-		if depth == k {
-			sub := make([][]byte, k)
-			for i, j := range idx {
-				sub[i] = pieces[j]
-			}
-			fn(sub)
-			return
+	testkit.Subsets(len(pieces), k, func(idx []int) {
+		sub := make([][]byte, k)
+		for i, j := range idx {
+			sub[i] = pieces[j]
 		}
-		for i := start; i < n; i++ {
-			idx[depth] = i
-			rec(i+1, depth+1)
-		}
-	}
-	rec(0, 0)
+		fn(sub)
+	})
 }
 
 func TestSplitCombine_PureSSS(t *testing.T) {
@@ -528,13 +518,16 @@ func TestRecipientOnly(t *testing.T) {
 		t.Fatal("one piece should not reconstruct")
 	}
 
-	// Metadata is readable without the key, and reports the situation.
-	info, err := Info(pieces[0], OpenOptions{})
-	if err != nil {
-		t.Fatalf("info without a password: %v", err)
+	// The details are protected by default, so they take the key as well.
+	if _, err := Info(pieces[0], OpenOptions{}); err == nil {
+		t.Fatal("info without the key read a protected piece")
 	}
-	if !info.Encrypted || !info.Hybrid || !info.Keyless {
-		t.Fatalf("expected an encrypted, hybrid, password-free piece: %+v", info)
+	info, err := Info(pieces[0], OpenOptions{PrivateKeys: []*kem.PrivateKey{priv}})
+	if err != nil {
+		t.Fatalf("info with the key: %v", err)
+	}
+	if !info.Encrypted || !info.Hybrid || info.Keyless || !info.SealedToKeys {
+		t.Fatalf("expected an encrypted, hybrid piece sealed to the key: %+v", info)
 	}
 }
 
@@ -692,7 +685,9 @@ func TestKEMCiphertextSizeShowsInPieces(t *testing.T) {
 	}
 	small, large := size(kem.MLKEM768), size(kem.MLKEM1024)
 	grew := large - small
-	want := kem.MLKEM1024.CiphertextSize() - kem.MLKEM768.CiphertextSize()
+	// The details are protected, so the envelope carries an encapsulated key of
+	// its own beside the layer's.
+	want := 2 * (kem.MLKEM1024.CiphertextSize() - kem.MLKEM768.CiphertextSize())
 	// Padding varies, so allow slack while confirming the growth is real.
 	if grew < want-64 || grew > want+256 {
 		t.Fatalf("piece grew by %d bytes, expected about %d", grew, want)

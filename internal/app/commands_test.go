@@ -273,14 +273,10 @@ func TestResolveFormatsRefusesWhatWillNotFit(t *testing.T) {
 	}
 }
 
-func TestNoteExpensiveOpenIsQuietInAutomation(t *testing.T) {
-	pieces := makePieces(t, core.SplitOptions{N: 2, K: 2,
-		Layers: []core.LayerSpec{{Kind: core.PasswordLayer, Password: []byte("p")}}}, []byte("cost"))
+func TestNoteCostIsQuietInAutomation(t *testing.T) {
 	out := capture(t, func() {
 		// Not a terminal in tests, so this must print nothing whatever the cost.
-		noteExpensiveOpen(pieces, nil)
-		expensive := kdf.Params{Memory: 1024 * 1024, Time: 4, Par: 4}
-		noteExpensiveOpen(pieces, &expensive)
+		noteCost(kdf.Params{Memory: 1024 * 1024, Time: 4, Par: 4})
 	})
 	if out != "" {
 		t.Fatalf("nothing should be printed without a terminal, got %q", out)

@@ -96,15 +96,24 @@ func TestPaddingIsIndependentOfContent(t *testing.T) {
 // TestZeroValuePadsAtTheDefault checks the zero value of SplitOptions pads, and
 // pads at the documented default, so forgetting the field cannot expose a length.
 func TestZeroValuePadsAtTheDefault(t *testing.T) {
-	input := bytes.Repeat([]byte("d"), 1000)
-	zero := pieceSize(t, input, Padding{}, 1)
-	explicit := pieceSize(t, input, PadPercent(DefaultPadPercent), 1)
-	natural := pieceSize(t, input, PadNone(), 1)
-	if zero != explicit {
-		t.Fatalf("the zero value gave %d bytes, the default width gives %d", zero, explicit)
+	// A natural size can land exactly on a class, so several lengths are tried and
+	// at least one must grow.
+	padded := false
+	for n := 1000; n < 1010; n++ {
+		input := bytes.Repeat([]byte("d"), n)
+		zero := pieceSize(t, input, Padding{}, 1)
+		explicit := pieceSize(t, input, PadPercent(DefaultPadPercent), 1)
+		natural := pieceSize(t, input, PadNone(), 1)
+		if zero != explicit {
+			t.Fatalf("%d bytes: the zero value gave %d bytes, the default width gives %d", n, zero, explicit)
+		}
+		if zero < natural {
+			t.Fatalf("%d bytes: padding shrank the piece from %d to %d", n, natural, zero)
+		}
+		padded = padded || zero > natural
 	}
-	if zero <= natural {
-		t.Fatalf("the zero value did not pad: %d bytes against a natural %d", zero, natural)
+	if !padded {
+		t.Fatal("the zero value never padded")
 	}
 }
 

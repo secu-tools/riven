@@ -221,22 +221,3 @@ func TestReadPasswordFromNonTerminal(t *testing.T) {
 		t.Fatalf("the password must not be echoed: %q", out)
 	}
 }
-
-// TestReadPasswordConfirmedRequiresAMatch checks a mistyped confirmation is
-// re-asked rather than accepted.
-func TestReadPasswordConfirmedRequiresAMatch(t *testing.T) {
-	var got []byte
-	out := withInput(t, "first\nsecond\nagain\nagain\n", func() {
-		v, err := readPasswordConfirmed("Password")
-		if err != nil {
-			t.Fatal(err)
-		}
-		got = v
-	})
-	if string(got) != "again" {
-		t.Fatalf("got %q, want the confirmed password", got)
-	}
-	if !strings.Contains(strings.ToLower(out), "match") {
-		t.Fatalf("the mismatch should be reported: %q", out)
-	}
-}

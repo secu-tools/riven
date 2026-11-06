@@ -29,6 +29,69 @@ type splitPlan struct {
 	outDir          string
 	generated       [][]byte
 	qrScale         int
+	pieceSizes      []int // each piece's length once written, for the summary's notes
+}
+
+// secrets names what reads a protected set's details: every password and every
+// private key the set takes.
+func (p *splitPlan) secrets() string {
+	passwords, keys := p.layerCounts()
+	var parts []string
+	switch {
+	case passwords == 1:
+		parts = append(parts, "the password")
+	case passwords > 1:
+		parts = append(parts, "every password")
+	}
+	switch {
+	case keys == 1:
+		parts = append(parts, "the private key")
+	case keys > 1:
+		parts = append(parts, "every private key")
+	}
+	return strings.Join(parts, " and ")
+}
+
+// firstSecret names what reads a protected set's details, the first layer's
+// password or private key, and reports whether it is a password.
+func (p *splitPlan) firstSecret() (name string, isPassword bool) {
+	if len(p.opts.Layers) == 0 {
+		return "", false
+	}
+	isPassword = p.opts.Layers[0].Kind != core.RecipientLayer
+	what := "private key"
+	if isPassword {
+		what = "password"
+	}
+	if len(p.opts.Layers) == 1 {
+		return "the " + what, isPassword
+	}
+	return "the layer 1 " + what, isPassword
+}
+
+// layerCounts counts the password and recipient key layers.
+func (p *splitPlan) layerCounts() (passwords, keys int) {
+	for _, l := range p.opts.Layers {
+		if l.Kind == core.RecipientLayer {
+			keys++
+		} else {
+			passwords++
+		}
+	}
+	return passwords, keys
+}
+
+// strictGuessing says what one strict piece offers someone guessing passwords:
+// nothing when a key is needed too, or only every password at once.
+func (p *splitPlan) strictGuessing() string {
+	switch passwords, keys := p.layerCounts(); {
+	case keys > 0 || passwords == 0:
+		return ""
+	case passwords == 1:
+		return "one piece can test guesses"
+	default:
+		return "one piece tests them only together"
+	}
 }
 
 // hasRecipient reports whether any layer is keyed to a recipient key.
@@ -64,6 +127,14 @@ func planSplit(opts *cliOptions, defaultDir string) (*splitPlan, error) {
 	}
 	if err := planProtection(plan, opts, interactive); err != nil {
 		return nil, err
+	}
+	if plan.opts.Info == core.InfoHidden && plan.opts.K == 1 {
+		return nil, errors.New("--info none needs -k 2 or more: with -k 1 every piece is the whole set, " +
+			"so its details cannot be hidden from whoever holds one")
+	}
+	if _, err := core.EffectiveInfo(plan.opts); err != nil {
+		return nil, fmt.Errorf("--info %s needs a password or a recipient key: add --password-env or "+
+			"--recipient, or use --info public or --info none", plan.opts.Info)
 	}
 
 	// Resolve the algorithms once, so the summary and the verification step agree
@@ -148,6 +219,20 @@ func planDefaults(plan *splitPlan, opts *cliOptions) error {
 	if opts.recordKDFSet {
 		plan.opts.RecordKDF = opts.recordKDF
 	}
+	if opts.methodSet {
+		m, err := parseMethod(opts.method)
+		if err != nil {
+			return err
+		}
+		plan.opts.Method = m
+	}
+	if opts.infoSet {
+		info, err := parseInfo(opts.info)
+		if err != nil {
+			return err
+		}
+		plan.opts.Info = info
+	}
 	return nil
 }
 
@@ -176,9 +261,6 @@ func planProtection(plan *splitPlan, opts *cliOptions, interactive bool) error {
 		plan.opts.Keyless = true
 		if plan.opts.K < 2 {
 			return errors.New("split-only mode needs a threshold (K) of at least 2, otherwise one piece is the whole file")
-		}
-		if interactive {
-			fmt.Println("  no encryption: any " + strconv.Itoa(plan.opts.K) + " pieces rebuild the file, no password")
 		}
 		return nil
 
@@ -225,7 +307,7 @@ func resolveMode(opts *cliOptions, interactive bool) (securityMode, error) {
 		return modeKeyless, nil
 	}
 	advancedFromFlags := opts.algoSet || opts.kdfSpec != "" || opts.recordAlgoSet ||
-		opts.recordKDFSet || opts.recordNameSet || opts.padSet ||
+		opts.recordKDFSet || opts.recordNameSet || opts.padSet || opts.methodSet || opts.infoSet ||
 		len(opts.layerSources) > 1 || countRecipientSources(opts) > 0
 	if advancedFromFlags {
 		return modeAdvanced, nil
@@ -234,11 +316,17 @@ func resolveMode(opts *cliOptions, interactive bool) (securityMode, error) {
 		return modeRecommended, nil
 	}
 
-	fmt.Println("Security:")
+	heading(os.Stdout, "Security:")
 	writeWrapped(os.Stdout, "  1) ", "recommended: encrypt with one password ("+ciphers.Default().Name+")")
 	writeWrapped(os.Stdout, "  2) ", "advanced: several layers, each a password or a recipient key")
-	writeWrapped(os.Stdout, "  3) ", "no encryption: split only, no password, any K pieces rebuild the file")
-	choice, err := readInt("Choose", 1, 1, 3)
+	// A password given as a flag has already settled that the split is
+	// encrypted. Offering no encryption then would drop it without a word.
+	choices := 2
+	if len(opts.layerSources) == 0 {
+		writeWrapped(os.Stdout, "  3) ", "no encryption: split only, no password, any K pieces rebuild the file")
+		choices = 3
+	}
+	choice, err := readInt("Choose", 1, 1, choices)
 	if err != nil {
 		return modeRecommended, err
 	}
@@ -246,9 +334,7 @@ func resolveMode(opts *cliOptions, interactive bool) (securityMode, error) {
 	case 2:
 		return modeAdvanced, nil
 	case 3:
-		writeWrapped(os.Stdout, "  warning: ", "anyone with K pieces can rebuild the file. "+
-			"A piece's metadata (file name, length, set) is readable to anyone with "+
-			"this tool, and nothing authenticates the set against substitution.")
+		warn(os.Stdout, "anyone with K pieces can rebuild the file, and nothing proves a piece is genuine.")
 		return modeKeyless, nil
 	default:
 		return modeRecommended, nil
@@ -309,8 +395,8 @@ func planLayers(plan *splitPlan, opts *cliOptions, interactive, advanced bool) e
 		}}
 		plan.verifyPasswords = [][]byte{pw}
 		if interactive {
-			fmt.Printf("  one password layer, %s, key stretched with %s\n",
-				ciphers.Default().Name, plan.opts.Params.Describe())
+			writeWrapped(os.Stdout, "  ", fmt.Sprintf("one password layer: %s, %s",
+				ciphers.Default().Name, plan.opts.Params.Describe()))
 		}
 		return nil
 	}
@@ -355,7 +441,8 @@ func layersFromSources(plan *splitPlan, opts *cliOptions, algos []uint8) error {
 func layersInteractive(plan *splitPlan, opts *cliOptions) error {
 	var prev uint8
 	for i := 0; ; i++ {
-		fmt.Printf("\nLayer %d:\n", i+1)
+		fmt.Println()
+		heading(os.Stdout, fmt.Sprintf("Layer %d:", i+1))
 		writeWrapped(os.Stdout, "  1) ", "password")
 		writeWrapped(os.Stdout, "  2) ", "recipient key (only the holder of the private key can peel it)")
 		kind, err := readInt("Keyed by", 1, 1, 2)
@@ -363,7 +450,7 @@ func layersInteractive(plan *splitPlan, opts *cliOptions) error {
 			return err
 		}
 
-		sid, err := chooseScheme(ciphers.Nth(i), prev)
+		sid, err := chooseScheme(i, prev)
 		if err != nil {
 			return err
 		}
@@ -378,8 +465,7 @@ func layersInteractive(plan *splitPlan, opts *cliOptions) error {
 				Kind: core.RecipientLayer, SchemeID: sid, Recipient: pub,
 			})
 		} else {
-			pw, err := choosePassword(fmt.Sprintf("Password for layer %d (press Enter to generate)", i+1),
-				plan.verifyPasswords, plan)
+			pw, err := choosePassword(i+1, plan.verifyPasswords, plan)
 			if err != nil {
 				return err
 			}
@@ -459,6 +545,12 @@ func planAdvancedTail(plan *splitPlan, opts *cliOptions, interactive bool) error
 	if !interactive {
 		return nil
 	}
+	if err := planMethod(plan, opts); err != nil {
+		return err
+	}
+	if err := planInfo(plan, opts); err != nil {
+		return err
+	}
 	if err := planRecording(plan, opts); err != nil {
 		return err
 	}
@@ -471,10 +563,97 @@ func planAdvancedTail(plan *splitPlan, opts *cliOptions, interactive bool) error
 	return planPadding(plan, opts)
 }
 
+// planMethod asks how the content is spread over the pieces.
+func planMethod(plan *splitPlan, opts *cliOptions) error {
+	if opts.methodSet {
+		return nil
+	}
+	fmt.Println()
+	heading(os.Stdout, "Split method:")
+	for i, m := range splitMethods {
+		writeWrapped(os.Stdout, fmt.Sprintf("  %d) ", i+1), m.String()+": "+methodChoice(m))
+	}
+	choice, err := readInt("Choose", 1, 1, len(splitMethods))
+	if err != nil {
+		return err
+	}
+	plan.opts.Method = splitMethods[choice-1]
+	return nil
+}
+
+// methodChoice describes one answer to the method question.
+func methodChoice(m core.Method) string {
+	if m == core.MethodCompact {
+		return "pieces about 1/K of the file; fewer than K are safe while AES-256 and " +
+			"ChaCha20 hold. For large files and QR codes."
+	}
+	return "pieces as large as the file; fewer than K reveal nothing, proven. The safer choice."
+}
+
+// planInfo asks what one piece shows. With a password or a key the default keeps
+// the details behind the first layer's; strict, offered when there is more than
+// one layer, keeps them behind every one. With a password, public and none
+// trade that for not letting one piece be used to try passwords.
+func planInfo(plan *splitPlan, opts *cliOptions) error {
+	if opts.infoSet {
+		return nil
+	}
+	fmt.Println()
+	heading(os.Stdout, "What one piece shows (pieces needed, layers, file name):")
+	var modes []core.InfoMode
+	if len(plan.opts.Layers) > 0 {
+		modes = append(modes, core.InfoProtected)
+	}
+	if len(plan.opts.Layers) > 1 {
+		modes = append(modes, core.InfoStrict)
+	}
+	modes = append(modes, core.InfoPublic)
+	// At K 1 every piece is the whole set, so nothing can be hidden from one.
+	if plan.opts.K > 1 {
+		modes = append(modes, core.InfoHidden)
+	}
+	for i, m := range modes {
+		writeWrapped(os.Stdout, fmt.Sprintf("  %d) ", i+1), infoChoice(m, plan))
+	}
+	choice, err := readInt("Choose", 1, 1, len(modes))
+	if err != nil {
+		return err
+	}
+	plan.opts.Info = modes[choice-1]
+	return nil
+}
+
+// infoChoice describes one answer to the info question. Guessing comes into it
+// only when the set has a password to guess.
+func infoChoice(m core.InfoMode, plan *splitPlan) string {
+	hasPassword := len(plan.verifyPasswords) > 0
+	guess := ""
+	if hasPassword {
+		guess = " Trying passwords needs K pieces."
+	}
+	switch m {
+	case core.InfoProtected:
+		first, isPassword := plan.firstSecret()
+		if isPassword {
+			return "with " + first + ". One piece is enough to try guesses of it."
+		}
+		return "with " + first + "."
+	case core.InfoStrict:
+		if g := plan.strictGuessing(); g != "" {
+			return "with " + plan.secrets() + "; " + g + "."
+		}
+		return "with " + plan.secrets() + "."
+	case core.InfoPublic:
+		return "to anyone, nothing needed." + guess
+	default:
+		return "nothing." + guess
+	}
+}
+
 // planRecording asks what each piece carries about how it was made.
 func planRecording(plan *splitPlan, opts *cliOptions) error {
 	if !opts.recordAlgoSet {
-		yes, err := confirm("Record the algorithms inside each piece (No means you must supply --algo to decrypt)?", true)
+		yes, err := confirm("Record the algorithms? (else --algo is needed later)", true)
 		if err != nil {
 			return err
 		}
@@ -483,7 +662,7 @@ func planRecording(plan *splitPlan, opts *cliOptions) error {
 	// Whether there is a name to record depends on the input, which cmdSplit
 	// resolves after planning, so the answer is kept rather than applied here.
 	if !opts.recordNameSet {
-		yes, err := confirm("Record the original file name inside each piece, so combine restores it?", true)
+		yes, err := confirm("Record the file name? (combine then restores it)", true)
 		if err != nil {
 			return err
 		}
@@ -502,7 +681,7 @@ func planCost(plan *splitPlan, opts *cliOptions) error {
 		plan.opts.Params = p
 	}
 	if !opts.recordKDFSet {
-		yes, err := confirm("Record the Argon2 cost inside each piece (No means you must supply --kdf to decrypt)?", true)
+		yes, err := confirm("Record the Argon2 cost? (else --kdf is needed later)", true)
 		if err != nil {
 			return err
 		}
@@ -517,8 +696,7 @@ func planPadding(plan *splitPlan, opts *cliOptions) error {
 		return nil
 	}
 	fmt.Println()
-	writeWrapped(os.Stdout, "", "Pieces are padded up to a size class, so their size gives only a range "+
-		"for the content. A wider class hides more and costs more storage.")
+	writeWrapped(os.Stdout, "", "Padding rounds each piece up to a size class, so its size gives only a range.")
 	pct, err := readInt("Padding percent (0 for no size class)", core.DefaultPadPercent, 0, maxWizardPad)
 	if err != nil {
 		return err
@@ -561,23 +739,74 @@ func parsePadding(spec string) (core.Padding, error) {
 	return p, nil
 }
 
+// splitMethods and infoModes are the values --method and --info take, in the
+// order the wizard numbers them. Each is spelled as its String method says, so
+// parsing, the wizard and shell completion all read from these.
+var (
+	splitMethods = []core.Method{core.MethodFull, core.MethodCompact}
+	infoModes    = []core.InfoMode{core.InfoProtected, core.InfoStrict, core.InfoPublic, core.InfoHidden}
+)
+
+// names spells each value as the command line does.
+func names[T fmt.Stringer](values []T) []string {
+	out := make([]string, len(values))
+	for i, v := range values {
+		out[i] = v.String()
+	}
+	return out
+}
+
+// oneOf lists names for an error message: "a, b or c".
+func oneOf(names []string) string {
+	if len(names) < 2 {
+		return strings.Join(names, "")
+	}
+	return strings.Join(names[:len(names)-1], ", ") + " or " + names[len(names)-1]
+}
+
+// parseMethod resolves the --method value. The numbers are the wizard's.
+func parseMethod(spec string) (core.Method, error) {
+	s := strings.ToLower(strings.TrimSpace(spec))
+	for i, m := range splitMethods {
+		if s == m.String() || s == strconv.Itoa(i+1) {
+			return m, nil
+		}
+	}
+	return 0, fmt.Errorf("invalid --method %q: use %s", spec, oneOf(names(splitMethods)))
+}
+
+// parseInfo resolves the --info value; "hidden" is taken for none.
+func parseInfo(spec string) (core.InfoMode, error) {
+	s := strings.ToLower(strings.TrimSpace(spec))
+	if s == "hidden" {
+		return core.InfoHidden, nil
+	}
+	for _, m := range infoModes {
+		if s == m.String() {
+			return m, nil
+		}
+	}
+	return 0, fmt.Errorf("invalid --info %q: use %s", spec, oneOf(names(infoModes)))
+}
+
 // passwordForLayer resolves the password for a layer that has no explicit source.
 func passwordForLayer(plan *splitPlan, opts *cliOptions, interactive bool, i int, prior [][]byte) ([]byte, error) {
 	if opts.generate || !interactive {
 		return generateAndRecord(plan, fmt.Sprintf("layer %d", i+1))
 	}
-	return choosePassword(fmt.Sprintf("Password for layer %d (press Enter to generate)", i+1), prior, plan)
+	return choosePassword(i+1, prior, plan)
 }
 
-// choosePassword prompts for a password; empty input generates a strong one.
-func choosePassword(prompt string, prior [][]byte, plan *splitPlan) ([]byte, error) {
+// choosePassword prompts for the password of a layer, counted from 1; empty
+// input generates a strong one.
+func choosePassword(layer int, prior [][]byte, plan *splitPlan) ([]byte, error) {
 	for {
-		pw, err := readPasswordMasked(prompt + ": ")
+		pw, err := readPasswordMasked(fmt.Sprintf("Password for layer %d (press Enter to generate): ", layer))
 		if err != nil {
 			return nil, err
 		}
 		if len(pw) == 0 {
-			return generateAndRecord(plan, "auto")
+			return generateAndRecord(plan, fmt.Sprintf("layer %d", layer))
 		}
 		if !isDistinct(pw, prior) {
 			fmt.Println("  that password was already used; choose a different one")
@@ -607,23 +836,24 @@ func generateAndRecord(plan *splitPlan, label string) ([]byte, error) {
 	return pw, nil
 }
 
-// chooseScheme lists the registered algorithms and returns the chosen id. forbid
-// is the previous layer's algorithm, which may not be reused.
-func chooseScheme(def, forbid uint8) (uint8, error) {
+// chooseScheme lists the registered algorithms and returns the one chosen for
+// layer i, counting from zero. forbid is the previous layer's algorithm, which
+// may not be reused.
+func chooseScheme(i int, forbid uint8) (uint8, error) {
 	all := ciphers.All()
-	def = ciphers.Avoiding(def, forbid)
+	def := ciphers.Suggested(i, forbid)
 	for {
-		fmt.Println("Encryption algorithm:")
+		heading(os.Stdout, "Encryption algorithm:")
 		defIdx := 1
 		for i, sc := range all {
 			if sc.ID == def {
 				defIdx = i + 1
 			}
-			mark := ""
+			line := fmt.Sprintf("  %d) %s", i+1, sc.Name)
 			if sc.ID == forbid {
-				mark = "  (used by the layer above)"
+				line = fmt.Sprintf("  %d) %-20s  (used by the layer above)", i+1, sc.Name)
 			}
-			fmt.Printf("  %d) %-20s%s\n", i+1, sc.Name, mark)
+			fmt.Println(line)
 		}
 		answer, err := readLine("Number or name", all[defIdx-1].Name)
 		if err != nil {
@@ -695,10 +925,10 @@ func chooseKeyScheme(opts *cliOptions) (kem.Scheme, error) {
 		return resolveKeyScheme(opts)
 	}
 	all := kem.All()
-	fmt.Println("Recipient key type:")
+	heading(os.Stdout, "Recipient key type, with the bytes it adds to every piece:")
 	for i, s := range all {
-		writeItem(os.Stdout, fmt.Sprintf("  %d) %-12s ", i+1, s.Name()), s.Summary(),
-			fmt.Sprintf("%d bytes added to every piece", s.CiphertextSize()))
+		writeWrapped(os.Stdout, fmt.Sprintf("  %d) %-11s %-7s ", i+1, s.Name(),
+			fmt.Sprintf("+%d B", s.CiphertextSize())), s.Summary())
 	}
 	choice, err := readInt("Choose", 1, 1, len(all))
 	if err != nil {
@@ -710,7 +940,7 @@ func chooseKeyScheme(opts *cliOptions) (kem.Scheme, error) {
 // chooseKDF offers the cost presets plus a custom option.
 func chooseKDF(def kdf.Params) (kdf.Params, error) {
 	names := kdf.PresetNames()
-	fmt.Println("Argon2id cost (higher is slower to attack, and slower per piece):")
+	heading(os.Stdout, "Argon2id cost (higher is slower to attack, and slower per piece):")
 	defIdx := 1
 	for i, n := range names {
 		p, _ := kdf.Parse(n)
@@ -761,7 +991,8 @@ func resolveFormats(opts *cliOptions, plan *splitPlan, pieceSize int) ([]pieceio
 
 	all := pieceio.All()
 
-	fmt.Println("\nExport format:")
+	fmt.Println()
+	heading(os.Stdout, "Export format:")
 	for i, f := range all {
 		writeItem(os.Stdout, fmt.Sprintf("  %d) %-7s ", i+1, f), f.Describe(), formatNote(f, pieceSize))
 	}
@@ -866,6 +1097,9 @@ func checkQRFeasible(plan *splitPlan, formats []pieceio.Format, pieceSize, count
 			msg += ", or a narrower class"
 		}
 	}
+	if plan.opts.Method == core.MethodFull && plan.opts.K > 1 {
+		msg += fmt.Sprintf(". --method compact makes each piece about 1/%d of the file", plan.opts.K)
+	}
 	return errors.New(msg)
 }
 
@@ -890,10 +1124,15 @@ func resolveOpenParams(opts *cliOptions) (*kdf.Params, []uint8, error) {
 // askMissingKDF prompts for cost parameters after a failed open, or explains the
 // flag to use when running non-interactively.
 func askMissingKDF(opts *cliOptions) (*kdf.Params, error) {
+	return askMissingKDFFor(opts, "The piece did not open. If its Argon2 cost was not recorded, enter it now.")
+}
+
+// askMissingKDFFor is askMissingKDF with the reason it is asking.
+func askMissingKDFFor(opts *cliOptions, why string) (*kdf.Params, error) {
 	if !isInteractive() || opts.yes {
 		return nil, nil
 	}
-	fmt.Println("\nThe piece did not open. If its Argon2 cost was not recorded, enter it now.")
+	fmt.Println("\n" + why)
 	spec, err := readLine("Argon2 cost (Enter to give up)", "")
 	if err != nil {
 		return nil, err

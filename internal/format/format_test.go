@@ -20,18 +20,20 @@ func buildInput(share []byte) EncodeInput {
 	setID := make([]byte, setIDLen)
 	rand.Read(setID)
 	return EncodeInput{
+		Details: Details{
+			K:          3,
+			N:          5,
+			Encrypted:  true,
+			AlgoStored: true,
+			KDFStored:  true,
+			Layers:     []cascade.Descriptor{{Kind: cascade.Password, SchemeID: 1, Recorded: true}},
+			Params:     fast,
+		},
 		SetID:       setID,
-		K:           3,
-		N:           5,
 		Serial:      2,
-		Encrypted:   true,
-		RecordAlgo:  true,
-		RecordKDF:   true,
 		PayloadHash: Hash(share),
-		Layers:      []cascade.Descriptor{{Kind: cascade.Password, SchemeID: 1, Recorded: true}},
 		Share:       share,
 		Passwords:   [][]byte{[]byte("password")},
-		Params:      fast,
 	}
 }
 
@@ -136,7 +138,7 @@ func TestKDFRecoveredFromPiece(t *testing.T) {
 // be opened without being told the parameters.
 func TestHiddenKDFNeedsOverride(t *testing.T) {
 	in := buildInput([]byte("share bytes"))
-	in.RecordKDF = false
+	in.KDFStored = false
 	// Use a non-default cost so a lucky mask cannot coincide with it.
 	in.Params = kdf.Params{Memory: 16 * 1024, Time: 5, Par: 2}
 	piece, err := Encode(in)
@@ -162,7 +164,7 @@ func TestHiddenKDFNeedsOverride(t *testing.T) {
 
 func TestHiddenAlgoNotRecorded(t *testing.T) {
 	in := buildInput([]byte("share"))
-	in.RecordAlgo = false
+	in.AlgoStored = false
 	piece, err := Encode(in)
 	if err != nil {
 		t.Fatal(err)
@@ -254,9 +256,11 @@ func TestKeylessEnvelope(t *testing.T) {
 		t.Fatal("share mismatch")
 	}
 
-	// Offering a password must not open a keyless piece.
-	if _, _, err := Decode(piece, [][]byte{[]byte("anything")}, nil); err != ErrWrongPassword {
-		t.Fatalf("expected ErrWrongPassword, got %v", err)
+	// Passwords may be meant for the cascade behind a keyless envelope, so
+	// offering one still opens the piece, and with the same manifest.
+	again, _, err := Decode(piece, [][]byte{[]byte("anything")}, nil)
+	if err != nil || !again.Keyless {
+		t.Fatalf("a keyless piece did not open with a password offered: %v", err)
 	}
 
 	// Tampering is still detected without a password.
@@ -412,7 +416,8 @@ func TestPeekParams(t *testing.T) {
 
 // TestPieceLenMatchesAnEncodedPiece checks the length formula the padding is
 // computed from against a real piece, for a range of share lengths and layer
-// counts. A drift here would misplace every piece in the wrong size class.
+// counts, with and without a fragment and hidden details. A drift here would
+// misplace every piece in the wrong size class.
 func TestPieceLenMatchesAnEncodedPiece(t *testing.T) {
 	for _, layers := range []int{0, 1, 3} {
 		descs := make([]cascade.Descriptor, layers)
@@ -421,21 +426,205 @@ func TestPieceLenMatchesAnEncodedPiece(t *testing.T) {
 		}
 		for _, shareLen := range []int{1, 64, 1000} {
 			for _, name := range []string{"", "secret.pdf"} {
-				piece, err := Encode(EncodeInput{
-					SetID: make([]byte, SetIDLen), K: 1, N: 1, Serial: 1,
-					PayloadHash: make([]byte, 32),
-					Share:       make([]byte, shareLen), Name: name,
-					Passwords: [][]byte{[]byte("p")}, Params: fast,
-					Layers: descs,
-				})
-				if err != nil {
-					t.Fatal(err)
-				}
-				if want := PieceLen(shareLen, layers, len(name)); len(piece) != want {
-					t.Fatalf("layers=%d share=%d name=%q: piece is %d bytes, PieceLen says %d",
-						layers, shareLen, name, len(piece), want)
+				for _, fragLen := range []int{0, 1, 300} {
+					for _, detailsLen := range []int{0, 90} {
+						in := EncodeInput{
+							Details: Details{
+								K:      1,
+								N:      1,
+								Name:   name,
+								Params: fast,
+								Layers: descs,
+							},
+							SetID:        make([]byte, SetIDLen),
+							Serial:       1,
+							PayloadHash:  make([]byte, 32),
+							Share:        make([]byte, shareLen),
+							Passwords:    [][]byte{[]byte("p")},
+							Fragment:     make([]byte, fragLen),
+							DetailsShare: make([]byte, detailsLen),
+						}
+						shape := Shape{Share: shareLen, Layers: layers, Meta: len(name), Fragment: fragLen}
+						if detailsLen > 0 {
+							in.Keyless, in.Passwords = true, nil
+							shape = Shape{Share: shareLen, Fragment: fragLen, Details: detailsLen}
+						}
+						piece, err := Encode(in)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if want := PieceLen(shape); len(piece) != want {
+							t.Fatalf("layers=%d share=%d name=%q fragment=%d details=%d: piece is %d bytes, PieceLen says %d",
+								layers, shareLen, name, fragLen, detailsLen, len(piece), want)
+						}
+					}
 				}
 			}
 		}
+	}
+}
+
+// TestHiddenDetailsShowNothing checks a manifest with hidden details carries none
+// of them: whatever the input says about the set, the piece opens with the public
+// key to a set id, a hash, and the shares, and nothing that names the set.
+func TestHiddenDetailsShowNothing(t *testing.T) {
+	in := buildInput([]byte("a share"))
+	in.Keyless, in.Passwords, in.Stretched = true, nil, true
+	in.Name, in.CreatorVersion, in.CreatorCommit = "wallet-seed.txt", "9.9.9", "feedface"
+	in.DetailsShare = []byte("the details share")
+	piece, err := Encode(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, params, err := Decode(piece, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !m.Hidden || !m.Keyless || m.K != 0 || m.N != 0 || m.Serial != 0 || len(m.Layers) != 0 ||
+		m.Name != "" || m.CreatorVersion != "" || m.CreatorCommit != "" ||
+		m.Encrypted || m.Hybrid || m.AlgoStored || m.KDFStored || params != (kdf.Params{}) {
+		t.Fatalf("a hidden manifest shows details: %+v, params %+v", m, params)
+	}
+	if !bytes.Equal(m.DetailsShare, in.DetailsShare) || !bytes.Equal(m.Share, in.Share) {
+		t.Fatal("the shares did not survive")
+	}
+	if p, _ := PeekParams(piece); p == fast {
+		// The byte is random, so this is a one in 256 coincidence at worst.
+		t.Log("the cost byte happens to decode to the real cost")
+	}
+}
+
+// TestHiddenDetailsNeedTheKeylessEnvelope refuses hidden details behind a
+// password, which would bring back the guessing they exist to prevent.
+func TestHiddenDetailsNeedTheKeylessEnvelope(t *testing.T) {
+	in := buildInput([]byte("s"))
+	in.DetailsShare = []byte("details")
+	if _, err := Encode(in); err == nil {
+		t.Fatal("hidden details behind a password envelope were accepted")
+	}
+}
+
+// TestPublicDetailsWithAPassword covers a password set sealed with the keyless
+// envelope: it opens with no password at all, still says it is encrypted, and
+// keeps its recorded cost readable, since the cascade needs it.
+func TestPublicDetailsWithAPassword(t *testing.T) {
+	in := buildInput([]byte("share"))
+	in.Keyless, in.Passwords, in.Stretched = true, nil, true
+	in.Params = kdf.Params{Memory: 32 * 1024, Time: 2, Par: 2}
+	piece, err := Encode(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, params, err := Decode(piece, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !m.Keyless || !m.Encrypted || !m.KDFStored || m.K != 3 || len(m.Layers) != 1 {
+		t.Fatalf("public details lost: %+v", m)
+	}
+	if params != in.Params {
+		t.Fatalf("recorded cost %+v, want %+v", params, in.Params)
+	}
+	override := fast
+	if _, got, _ := Decode(piece, nil, &override); got != fast {
+		t.Fatalf("an override was not used: %+v", got)
+	}
+}
+
+func TestFragmentRoundTrip(t *testing.T) {
+	in := buildInput([]byte("share"))
+	in.Fragment = []byte{7, 1, 2, 3}
+	piece, err := Encode(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _, err := Decode(piece, [][]byte{[]byte("password")}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !m.Compact || !bytes.Equal(m.Fragment, in.Fragment) {
+		t.Fatalf("fragment lost: %+v", m)
+	}
+	// The flag follows the fragment, so a piece without one is not compact.
+	in.Fragment = nil
+	if piece, err = Encode(in); err != nil {
+		t.Fatal(err)
+	}
+	if m, _, err = Decode(piece, [][]byte{[]byte("password")}, nil); err != nil || m.Compact {
+		t.Fatalf("a piece without a fragment: %v, compact %v", err, m != nil && m.Compact)
+	}
+}
+
+// TestManifestChecks feeds parseManifest bodies that contradict themselves, the
+// way a crafted keyless piece could: each must be refused rather than read.
+func TestManifestChecks(t *testing.T) {
+	base := buildInput([]byte("share"))
+	base.Keyless, base.Passwords = true, nil
+	good := base.manifest()
+	if _, err := parseManifest(good); err != nil {
+		t.Fatalf("a good manifest was refused: %v", err)
+	}
+	flagsAt := 2 + setIDLen + 3
+	mutate := func(f func(b []byte)) []byte {
+		b := append([]byte(nil), good...)
+		f(b)
+		return b
+	}
+	cases := map[string][]byte{
+		"keyless and sealed":    mutate(func(b []byte) { b[flagsAt] |= flagSealed }),
+		"compact, no fragment":  mutate(func(b []byte) { b[flagsAt] |= flagCompact }),
+		"hidden, details shown": mutate(func(b []byte) { b[flagsAt] |= flagHidden }),
+		"serial past n":         mutate(func(b []byte) { b[flagsAt-1] = 9 }),
+		"trailing bytes":        append(append([]byte(nil), good...), 0),
+		"wrong version":         mutate(func(b []byte) { b[1] = 9 }),
+	}
+	for name, body := range cases {
+		if _, err := parseManifest(body); err == nil {
+			t.Fatalf("%s: accepted", name)
+		}
+	}
+}
+
+// TestWrapInPlace checks Wrap finishes shared bytes around a payload already in
+// place, matching WrapPayload, and refuses a buffer that leaves too little fill.
+func TestWrapInPlace(t *testing.T) {
+	payload := []byte("already in place")
+	shared := make([]byte, SharedLen(len(payload), MinFill+5))
+	copy(shared[PayloadAt:], payload)
+	hash, err := Wrap(shared, len(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := UnwrapPayload(shared, hash)
+	if !ok || !bytes.Equal(got, payload) {
+		t.Fatalf("unwrapped %q, %v", got, ok)
+	}
+	if _, err := Wrap(make([]byte, SharedLen(len(payload), MinFill-1)), len(payload)); err == nil {
+		t.Fatal("a buffer with too little fill was wrapped")
+	}
+	if _, err := Wrap(make([]byte, 64), -1); err == nil {
+		t.Fatal("a negative payload length was wrapped")
+	}
+}
+
+// TestWipeClearsTheShare checks the share a decoded manifest carries is cleared
+// by Wipe, and that what describes the piece stays readable.
+func TestWipeClearsTheShare(t *testing.T) {
+	share := []byte("a share that must not linger")
+	piece, err := Encode(buildInput(share))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _, err := Decode(piece, [][]byte{[]byte("password")}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := m.Share
+	m.Wipe()
+	if m.Share != nil || !bytes.Equal(held, make([]byte, len(held))) {
+		t.Fatal("the share survived Wipe")
+	}
+	if m.K != 3 || len(m.SetID) != SetIDLen {
+		t.Fatalf("Wipe cleared the details: %+v", m)
 	}
 }

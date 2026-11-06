@@ -42,12 +42,6 @@ func (w *Writer) U32(v uint32) {
 	w.buf = append(w.buf, b[:]...)
 }
 
-func (w *Writer) U64(v uint64) {
-	var b [8]byte
-	binary.BigEndian.PutUint64(b[:], v)
-	w.buf = append(w.buf, b[:]...)
-}
-
 // Raw appends bytes with no length prefix.
 func (w *Writer) Raw(b []byte) { w.buf = append(w.buf, b...) }
 
@@ -99,15 +93,6 @@ func (r *Reader) U32() (uint32, error) {
 	return v, nil
 }
 
-func (r *Reader) U64() (uint64, error) {
-	if r.Remaining() < 8 {
-		return 0, ErrShort
-	}
-	v := binary.BigEndian.Uint64(r.data[r.pos:])
-	r.pos += 8
-	return v, nil
-}
-
 // Raw reads exactly n bytes and returns a copy.
 func (r *Reader) Raw(n int) ([]byte, error) {
 	if n < 0 {
@@ -125,6 +110,17 @@ func (r *Reader) Raw(n int) ([]byte, error) {
 // Bytes reads a uint32-length-prefixed slice, rejecting lengths above max or
 // beyond the remaining buffer. max <= 0 means "only bounded by the buffer".
 func (r *Reader) Bytes(max int) ([]byte, error) {
+	v, err := r.View(max)
+	if err != nil {
+		return nil, err
+	}
+	return append(make([]byte, 0, len(v)), v...), nil
+}
+
+// View is Bytes without the copy: it returns the field as a sub-slice of the
+// buffer, for a field as large as the input. Its capacity ends with the field,
+// so appending to it cannot overwrite what follows.
+func (r *Reader) View(max int) ([]byte, error) {
 	n, err := r.U32()
 	if err != nil {
 		return nil, err
@@ -135,13 +131,16 @@ func (r *Reader) Bytes(max int) ([]byte, error) {
 	if int64(n) > int64(r.Remaining()) {
 		return nil, ErrTooLarge
 	}
-	return r.Raw(int(n))
+	end := r.pos + int(n)
+	v := r.data[r.pos:end:end]
+	r.pos = end
+	return v, nil
 }
 
-// Rest returns and consumes all remaining bytes (a copy).
-func (r *Reader) Rest() []byte {
-	out := make([]byte, r.Remaining())
-	copy(out, r.data[r.pos:])
+// RestView returns and consumes all remaining bytes, as a sub-slice of the
+// buffer rather than a copy.
+func (r *Reader) RestView() []byte {
+	v := r.data[r.pos:]
 	r.pos = len(r.data)
-	return out
+	return v
 }

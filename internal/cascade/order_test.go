@@ -69,7 +69,7 @@ func TestEveryLayerOfEveryOrderIsLoadBearing(t *testing.T) {
 		}
 
 		for _, record := range []bool{true, false} {
-			payload, err := Encrypt(plaintext, layers, fastProfile, record)
+			payload, err := encrypt(plaintext, layers, fastProfile, record)
 			if err != nil {
 				t.Fatalf("%v: %v", order, err)
 			}
@@ -77,13 +77,13 @@ func TestEveryLayerOfEveryOrderIsLoadBearing(t *testing.T) {
 			if !record {
 				named = order
 			}
-			got, err := Decrypt(payload, nil, []Decapsulator{keyFor(-1)}, fastProfile, named)
+			got, err := decrypt(payload, nil, []Decapsulator{keyFor(-1)}, fastProfile, named)
 			if err != nil || !bytes.Equal(got, plaintext) {
 				t.Fatalf("%v recorded=%v: did not open with every key: %v", order, record, err)
 			}
 
 			for i := range layers {
-				if _, err := Decrypt(payload, nil, []Decapsulator{keyFor(i)}, fastProfile, named); err == nil {
+				if _, err := decrypt(payload, nil, []Decapsulator{keyFor(i)}, fastProfile, named); err == nil {
 					t.Fatalf("%v recorded=%v: opened with a wrong key for layer %d", order, record, i+1)
 				}
 			}
@@ -92,7 +92,7 @@ func TestEveryLayerOfEveryOrderIsLoadBearing(t *testing.T) {
 				for i := 0; i+1 < len(order); i++ {
 					swapped := append([]uint8(nil), order...)
 					swapped[i], swapped[i+1] = swapped[i+1], swapped[i]
-					if _, err := Decrypt(payload, nil, []Decapsulator{keyFor(-1)}, fastProfile, swapped); err == nil {
+					if _, err := decrypt(payload, nil, []Decapsulator{keyFor(-1)}, fastProfile, swapped); err == nil {
 						t.Fatalf("%v: opened with layers %d and %d named the wrong way round", order, i+1, i+2)
 					}
 				}

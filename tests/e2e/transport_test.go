@@ -47,7 +47,7 @@ func TestEveryTransportRoundTripsThroughTheBinary(t *testing.T) {
 			out := filepath.Join(dir, "o")
 
 			if o, err := riven(t, env1, "split", in, "-n", "3", "-k", "2",
-				"--password-env", flagPw1, "--kdf", "m=8,t=1,p=1",
+				"--password-env", flagPw1, "--kdf", cheapKDF,
 				"--format", f, "--out", out, "-y"); err != nil {
 				t.Fatalf("split: %v\n%s", err, o)
 			}
@@ -81,7 +81,7 @@ func TestMixedTransportsInOneCommand(t *testing.T) {
 	out := filepath.Join(dir, "o")
 
 	if o, err := riven(t, env1, "split", in, "-n", "5", "-k", "5",
-		"--password-env", flagPw1, "--kdf", "m=8,t=1,p=1",
+		"--password-env", flagPw1, "--kdf", cheapKDF,
 		"--format", "all", "--out", out, "-y"); err != nil {
 		t.Fatalf("split: %v\n%s", err, o)
 	}
@@ -111,7 +111,7 @@ func TestBase32TypedByHand(t *testing.T) {
 	out := filepath.Join(dir, "o")
 
 	if o, err := riven(t, env1, "split", in, "-n", "2", "-k", "2",
-		"--password-env", flagPw1, "--kdf", "m=8,t=1,p=1",
+		"--password-env", flagPw1, "--kdf", cheapKDF,
 		"--format", "base32", "--out", out, "-y"); err != nil {
 		t.Fatalf("split: %v\n%s", err, o)
 	}
@@ -151,7 +151,7 @@ func TestTypoInTextIsReported(t *testing.T) {
 			in := writeFile(t, dir, "t.bin", []byte("typo detection"))
 			out := filepath.Join(dir, "o")
 			if o, err := riven(t, env1, "split", in, "-n", "2", "-k", "2",
-				"--password-env", flagPw1, "--kdf", "m=8,t=1,p=1",
+				"--password-env", flagPw1, "--kdf", cheapKDF,
 				"--format", f, "--out", out, "-y"); err != nil {
 				t.Fatalf("split: %v\n%s", err, o)
 			}
@@ -195,7 +195,7 @@ func TestRecoverySheetIsPrintableAndReadable(t *testing.T) {
 	out := filepath.Join(dir, "o")
 
 	if o, err := riven(t, env1, "split", in, "-n", "4", "-k", "2",
-		"--password-env", flagPw1, "--kdf", "m=8,t=1,p=1",
+		"--password-env", flagPw1, "--kdf", cheapKDF,
 		"--format", "sheet", "--out", out, "-y"); err != nil {
 		t.Fatalf("split: %v\n%s", err, o)
 	}
@@ -231,7 +231,7 @@ func TestVerifyCommand(t *testing.T) {
 	in := writeFile(t, dir, "v.bin", data)
 	out := filepath.Join(dir, "o")
 	if o, err := riven(t, env1, "split", in, "-n", "4", "-k", "3",
-		"--password-env", flagPw1, "--kdf", "m=8,t=1,p=1", "--out", out, "-y"); err != nil {
+		"--password-env", flagPw1, "--kdf", cheapKDF, "--out", out, "-y"); err != nil {
 		t.Fatalf("split: %v\n%s", err, o)
 	}
 	p := func(n int) string { return pieceFile(out, "v.bin", "binary", n) }

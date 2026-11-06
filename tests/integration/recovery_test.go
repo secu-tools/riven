@@ -68,33 +68,56 @@ func TestRecoveryContentMatrix(t *testing.T) {
 	ids := ciphers.Cascade(2)
 
 	for name, input := range contentCases() {
-		t.Run(name, func(t *testing.T) {
-			pieces, err := core.Split(input, splitOpts(core.SplitOptions{
-				N: 4, K: 2,
-				Layers: []core.LayerSpec{
-					{Kind: core.PasswordLayer, SchemeID: ids[0], Password: pws[0]},
-					{Kind: core.PasswordLayer, SchemeID: ids[1], Password: pws[1]},
-				},
-			}))
-			if err != nil {
-				t.Fatalf("split: %v", err)
-			}
-			open := core.OpenOptions{Passwords: pws}
+		for _, shape := range shapes() {
+			t.Run(name+"/"+shape.name, func(t *testing.T) {
+				pieces, err := core.Split(input, splitOpts(core.SplitOptions{
+					N: 4, K: 2, Method: shape.method, Info: shape.info,
+					Layers: []core.LayerSpec{
+						{Kind: core.PasswordLayer, SchemeID: ids[0], Password: pws[0]},
+						{Kind: core.PasswordLayer, SchemeID: ids[1], Password: pws[1]},
+					},
+				}))
+				if err != nil {
+					t.Fatalf("split: %v", err)
+				}
+				open := core.OpenOptions{Passwords: pws}
 
-			// Every 2-of-4 subset must rebuild it exactly.
-			for i := 0; i < len(pieces); i++ {
-				for j := i + 1; j < len(pieces); j++ {
-					got, err := core.Combine([][]byte{pieces[i], pieces[j]}, open)
-					if err != nil {
-						t.Fatalf("combine pieces %d,%d: %v", i+1, j+1, err)
-					}
-					if !bytes.Equal(got, input) {
-						t.Fatalf("pieces %d,%d: recovered %d bytes, want %d", i+1, j+1, len(got), len(input))
+				// Every 2-of-4 subset must rebuild it exactly.
+				for i := 0; i < len(pieces); i++ {
+					for j := i + 1; j < len(pieces); j++ {
+						got, err := core.Combine([][]byte{pieces[i], pieces[j]}, open)
+						if err != nil {
+							t.Fatalf("combine pieces %d,%d: %v", i+1, j+1, err)
+						}
+						if !bytes.Equal(got, input) {
+							t.Fatalf("pieces %d,%d: recovered %d bytes, want %d", i+1, j+1, len(got), len(input))
+						}
 					}
 				}
-			}
-		})
+			})
+		}
 	}
+}
+
+// shape is one way the pieces of a set can be laid out: the method, and what one
+// piece shows.
+type shape struct {
+	name   string
+	method core.Method
+	info   core.InfoMode
+}
+
+// shapes lists every method with every info mode. InfoAuto stands for the
+// password mode on a set that has a password and the public mode otherwise, so a
+// case without a password can run every shape unchanged.
+func shapes() []shape {
+	var out []shape
+	for _, m := range []core.Method{core.MethodFull, core.MethodCompact} {
+		for _, info := range []core.InfoMode{core.InfoAuto, core.InfoPublic, core.InfoHidden} {
+			out = append(out, shape{name: m.String() + "-" + info.String(), method: m, info: info})
+		}
+	}
+	return out
 }
 
 // skipIfOverCapacity skips when the format has a size ceiling the piece exceeds,
@@ -119,9 +142,13 @@ func TestRecoveryThroughEveryTransport(t *testing.T) {
 	for name, input := range contentCases() {
 		// Keep the QR pass to inputs that can fit one.
 		for _, f := range pieceio.Encodable() {
-			t.Run(name+"/"+f.String(), func(t *testing.T) {
+			method := core.MethodFull
+			if len(input)%2 == 1 {
+				method = core.MethodCompact
+			}
+			t.Run(name+"/"+f.String()+"/"+method.String(), func(t *testing.T) {
 				pieces, err := core.Split(input, splitOpts(core.SplitOptions{
-					N: 3, K: 2,
+					N: 3, K: 2, Method: method,
 					Layers: []core.LayerSpec{{Kind: core.PasswordLayer, Password: pw[0]}},
 				}))
 				if err != nil {
@@ -169,22 +196,27 @@ func TestRecoveryRandomSizes(t *testing.T) {
 		size := randInt(t, 5000)
 		n := 2 + randInt(t, 6)
 		k := 1 + randInt(t, n)
+		sh := shapes()[randInt(t, len(shapes()))]
+		// Hidden details need a threshold of two: at one a piece is the whole set.
+		if sh.info == core.InfoHidden && k == 1 {
+			k = 2
+		}
 		input := make([]byte, size)
 		rand.Read(input)
 
 		pieces, err := core.Split(input, splitOpts(core.SplitOptions{
-			N: n, K: k,
+			N: n, K: k, Method: sh.method, Info: sh.info,
 			Layers: []core.LayerSpec{{Kind: core.PasswordLayer, Password: pw[0]}},
 		}))
 		if err != nil {
-			t.Fatalf("size=%d n=%d k=%d: split: %v", size, n, k, err)
+			t.Fatalf("size=%d n=%d k=%d %s: split: %v", size, n, k, sh.name, err)
 		}
-		got, err := core.Combine(pieces[:k], core.OpenOptions{Passwords: pw})
+		got, err := core.Combine(pieces[n-k:], core.OpenOptions{Passwords: pw})
 		if err != nil {
-			t.Fatalf("size=%d n=%d k=%d: combine: %v", size, n, k, err)
+			t.Fatalf("size=%d n=%d k=%d %s: combine: %v", size, n, k, sh.name, err)
 		}
 		if !bytes.Equal(got, input) {
-			t.Fatalf("size=%d n=%d k=%d: content changed", size, n, k)
+			t.Fatalf("size=%d n=%d k=%d %s: content changed", size, n, k, sh.name)
 		}
 	}
 }
@@ -253,25 +285,28 @@ func TestRecoveryEveryMode(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			so := c.so
-			if !so.Keyless {
-				so = splitOpts(so)
-			} else {
-				so.RecordAlgo = true
-			}
-			pieces, err := core.Split(input, so)
-			if err != nil {
-				t.Fatalf("split: %v", err)
-			}
-			got, err := core.Combine(pieces[:so.K], c.oo)
-			if err != nil {
-				t.Fatalf("combine: %v", err)
-			}
-			if !bytes.Equal(got, input) {
-				t.Fatal("content changed")
-			}
-		})
+		for _, sh := range shapes() {
+			t.Run(c.name+"/"+sh.name, func(t *testing.T) {
+				so := c.so
+				so.Method, so.Info = sh.method, sh.info
+				if !so.Keyless {
+					so = splitOpts(so)
+				} else {
+					so.RecordAlgo = true
+				}
+				pieces, err := core.Split(input, so)
+				if err != nil {
+					t.Fatalf("split: %v", err)
+				}
+				got, err := core.Combine(pieces[:so.K], c.oo)
+				if err != nil {
+					t.Fatalf("combine: %v", err)
+				}
+				if !bytes.Equal(got, input) {
+					t.Fatal("content changed")
+				}
+			})
+		}
 	}
 }
 

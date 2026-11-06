@@ -17,7 +17,6 @@ import (
 
 	"github.com/secu-tools/riven/internal/ciphers"
 	"github.com/secu-tools/riven/internal/core"
-	"github.com/secu-tools/riven/internal/format"
 	"github.com/secu-tools/riven/internal/kdf"
 	"github.com/secu-tools/riven/internal/kem"
 	"github.com/secu-tools/riven/internal/memory"
@@ -64,8 +63,7 @@ func cmdSplit(opts *cliOptions) error {
 	plan.opts.CreatorVersion = creatorVersion()
 	plan.opts.CreatorCommit = creatorCommit()
 
-	fmt.Fprintln(out, "\nSplitting...")
-	noteLargeSplit(out, len(input), plan.opts.N)
+	noteLargeSplit(out, len(input), plan.opts)
 
 	if err := ensureDir(plan.outDir); err != nil {
 		return err
@@ -76,20 +74,20 @@ func cmdSplit(opts *cliOptions) error {
 		return err
 	}
 
+	verified := verifiedSkipped
 	if opts.verifyEnabled() {
 		verifyPaths := written[pieceio.Binary]
 		if len(verifyPaths) == 0 {
 			verifyPaths = written[formats[0]]
 		}
-		if err := verifySplit(out, input, verifyPaths, plan); err != nil {
-			fmt.Fprintf(out, "\nWARNING: verification failed: %v\n", err)
-			writeWrapped(out, "", "The pieces were written but could NOT be verified. "+
-				"Do not rely on them.")
+		if verified, err = verifySplit(input, verifyPaths, plan); err != nil {
+			fmt.Fprintln(out)
+			warn(out, "the pieces were written but did not rebuild the original. Do not rely on them.")
 			return err
 		}
 	}
 
-	printSplitSummary(out, plan, formats, written, opts.verifyEnabled())
+	printSplitSummary(out, plan, formats, written, verified)
 	return reportGeneratedPasswords(opts, plan)
 }
 
@@ -219,7 +217,7 @@ func exportSplit(out io.Writer, plan *splitPlan, opts *cliOptions, input []byte,
 		return nil, nil, err
 	}
 
-	reportSizeNotes(out, formats, sizes)
+	plan.pieceSizes = sizes
 	return written, formats, nil
 }
 
@@ -242,8 +240,8 @@ func confirmReplacePieces(opts *cliOptions, plan *splitPlan, formats []pieceio.F
 	if len(existing) == 0 {
 		return nil
 	}
-	ok, err := confirm(fmt.Sprintf("%d file(s) with the names these pieces take already exist, %q among them. "+
-		"Replacing them destroys the set they belong to. Replace them?", len(existing), existing[0]), false)
+	ok, err := confirm(fmt.Sprintf("%d file(s) already have these names, such as %q. "+
+		"Replacing them destroys that set. Replace them?", len(existing), existing[0]), false)
 	if err != nil {
 		return err
 	}
@@ -272,31 +270,36 @@ func reportSizeNotes(out io.Writer, formats []pieceio.Format, sizes []int) {
 	}
 	if wantSheet {
 		if pages := pieceio.SheetPages(sizes[0]); pages > 1 {
-			fmt.Fprintf(out, "  sheet: about %d printed pages per piece, %d in all\n",
-				pages, pages*len(sizes))
+			summaryRow(out, "sheet", fmt.Sprintf("about %d printed pages per piece, %d in all",
+				pages, pages*len(sizes)))
 		}
 	}
 }
 
-// noteLargeSplit warns before a split that will need a lot of memory. The shares
-// are N copies of the input, which is not obvious from the file size.
-func noteLargeSplit(out io.Writer, inputLen, n int) {
+// noteLargeSplit warns before a split that will need a lot of memory. With the
+// full method the shares are N copies of the input, which is not obvious from the
+// file size.
+func noteLargeSplit(out io.Writer, inputLen int, opts core.SplitOptions) {
 	const quiet = 64 << 20
 	if inputLen < quiet {
 		return
 	}
-	fmt.Fprintf(out, "  %d MiB into %d pieces needs about %d MiB of memory.\n",
-		inputLen>>20, n, core.MemoryEstimate(inputLen, n)>>20)
+	writeWrapped(out, "", fmt.Sprintf("Splitting %d MiB into %d pieces, which needs about %d MiB of memory...",
+		inputLen>>20, opts.N, core.MemoryEstimate(inputLen, opts.N, opts.K, opts.Method)>>20))
 }
 
 // encodeOne renders one piece in one format. A recovery sheet needs to say which
 // piece it is, so it takes the extra arguments the other formats do not. It
 // names the file only when the pieces record it: a sheet is printed and left
-// where others can read it, so --record-name false must reach it too.
+// where others can read it, so --record-name false and --info none must reach
+// it too.
 func encodeOne(piece []byte, f pieceio.Format, plan *splitPlan, serial int) ([]byte, string, error) {
 	if f == pieceio.Sheet {
+		// A set that hides its details must not print them either.
+		info, _ := core.EffectiveInfo(plan.opts)
 		return pieceio.EncodeSheet(piece, pieceio.SheetInfo{
 			Serial: serial, Total: plan.opts.N, Needed: plan.opts.K, Name: plan.opts.Name,
+			Hidden: info == core.InfoHidden,
 		}, plan.qrScale)
 	}
 	return pieceio.Encode(piece, f, plan.qrScale)
@@ -342,35 +345,39 @@ func reportQRSizes(out io.Writer, sizes []int) {
 	for _, n := range names {
 		parts = append(parts, fmt.Sprintf("%s for %d piece(s), ~%d%% recoverable", n, counts[n], recovery[n]))
 	}
-	writeWrapped(out, "  ", "qr: error correction "+strings.Join(parts, "; "))
+	summaryRow(out, "qr", "error correction "+strings.Join(parts, "; "))
 	if weakest {
-		writeWrapped(out, "  ", "qr: pieces are near capacity and use the weakest correction; print at high quality")
+		warn(out, "the QR codes are near capacity and use the weakest correction; print them at high quality.")
 	}
 	// A large symbol has small modules, which a photograph may not resolve. Say so
 	// while the user can still choose more, smaller pieces.
 	if largest > pieceio.QRPhotoFriendlyBytes {
-		fmt.Fprintf(out, "  qr: pieces are %d bytes; a code over %d needs a flat, sharp photo\n",
-			largest, pieceio.QRPhotoFriendlyBytes)
+		warn(out, fmt.Sprintf("the QR codes hold %d bytes each; a code over %d needs a flat, sharp photo "+
+			"to scan.", largest, pieceio.QRPhotoFriendlyBytes))
 	}
 }
 
 // verifySplit re-reads K pieces from disk and reconstructs, confirming the result
-// matches the original. When a recipient private key is missing the payload cannot
-// be decrypted, so it verifies as far as it can instead.
-func verifySplit(out io.Writer, input []byte, paths []string, plan *splitPlan) error {
+// matches the original, and returns how far that got. When a recipient private
+// key is missing the payload cannot be decrypted, so it verifies as far as it
+// can instead.
+func verifySplit(input []byte, paths []string, plan *splitPlan) (string, error) {
 	k := plan.opts.K
 	if len(paths) < k {
-		return fmt.Errorf("only %d pieces available to verify, need %d", len(paths), k)
+		return "", fmt.Errorf("only %d pieces available to verify, need %d", len(paths), k)
 	}
 	reRead := make([][]byte, 0, k)
 	for i := 0; i < k; i++ {
 		piece, _, err := pieceio.Load(paths[i])
 		if err != nil {
-			return err
+			return "", err
 		}
 		reRead = append(reRead, piece)
 	}
 	defer memory.FreeAll(reRead)
+	if sealedWithoutKey(plan) {
+		return verifiedSealed, nil
+	}
 
 	open := core.OpenOptions{
 		Passwords:   plan.verifyPasswords,
@@ -383,96 +390,186 @@ func verifySplit(out io.Writer, input []byte, paths []string, plan *splitPlan) e
 
 	recovered, err := core.Combine(reRead, open)
 	if err != nil {
+		// The key is asked for only after the K pieces have all opened, agreed
+		// about the set and rebuilt to the recorded hash, so that much is checked.
 		if errors.Is(err, core.ErrKeyRequired) {
-			// Every piece must still open and agree about the set.
-			for _, piece := range reRead {
-				if _, ierr := core.Info(piece, open); ierr != nil {
-					return ierr
-				}
-			}
-			writeWrapped(out, "", "Verification: pieces open and are consistent "+
-				"(full decrypt needs the recipient key).")
-			return nil
+			return verifiedPartly, nil
 		}
-		return err
+		return "", err
 	}
 	defer memory.Zero(recovered)
 	if !bytes.Equal(recovered, input) {
-		return errors.New("reconstructed data does not match the original")
+		return "", errors.New("reconstructed data does not match the original")
 	}
-	return nil
+	return verifiedYes, nil
 }
 
-func printSplitSummary(out io.Writer, plan *splitPlan, formats []pieceio.Format, written map[pieceio.Format][]string, verified bool) {
+// sealedWithoutKey reports a set whose pieces open only with a private key the
+// split was not given with --identity, so they can be read back but not opened.
+func sealedWithoutKey(plan *splitPlan) bool {
+	recipients, err := core.EnvelopeRecipients(plan.opts)
+	if err != nil {
+		return false
+	}
+	have := make(map[string]bool, len(plan.privateKeys))
+	for _, k := range plan.privateKeys {
+		have[string(k.Public().Bytes())] = true
+	}
+	for _, r := range recipients {
+		if !have[string(r.Bytes())] {
+			return true
+		}
+	}
+	return false
+}
+
+// Verification outcomes, as the summary states them.
+const (
+	verifiedYes     = "yes, the pieces read back rebuild the original"
+	verifiedPartly  = "partly: the pieces open and agree; a full rebuild needs the private key"
+	verifiedSealed  = "partly: the pieces read back; opening them needs the private key (--identity)"
+	verifiedSkipped = "skipped (--no-verify)"
+)
+
+// printSplitSummary reports a finished split in a few aligned lines: what
+// protects it, how it was spread, what one piece shows, whether it was checked,
+// and where the pieces are. Anything that needs the user's attention follows as a
+// warning; docs/usage.md explains each choice at length.
+func printSplitSummary(out io.Writer, plan *splitPlan, formats []pieceio.Format, written map[pieceio.Format][]string, verified string) {
 	fmt.Fprintln(out)
-	writeWrapped(out, "", fmt.Sprintf("Done. %d pieces written, any %d reconstruct "+
-		"the original.", plan.opts.N, plan.opts.K))
-
-	if plan.opts.Keyless {
-		writeWrapped(out, "", "Mode: split only, no encryption and no password.")
-		writeWrapped(out, "", fmt.Sprintf("Anyone holding any %d pieces can rebuild "+
-			"the file. Fewer reveal no content, but a piece's metadata is readable to "+
-			"anyone with this tool, and nothing authenticates the set. Add a password "+
-			"layer if either matters.", plan.opts.K))
-	} else {
-		fmt.Fprintln(out, "Layers (outer to inner):")
-		for i, l := range plan.opts.Layers {
-			algo := ciphers.Name(plan.schemeIDs[i])
-			if l.Kind == core.RecipientLayer {
-				fmt.Fprintf(out, "  %d. %-18s recipient key (%s)\n", i+1, algo, l.Recipient.Scheme().Name())
-			} else {
-				fmt.Fprintf(out, "  %d. %-18s password\n", i+1, algo)
-			}
-		}
-		if plan.hasRecipient() {
-			writeWrapped(out, "", "Every recipient private key listed above is "+
-				"required to decrypt.")
-		}
-		if len(plan.verifyPasswords) > 0 {
-			writeWrapped(out, "", "Key derivation: "+plan.opts.Params.Describe())
-		} else {
-			writeWrapped(out, "", "No password: the recipient private keys alone "+
-				"decrypt this.")
-		}
-		if !plan.opts.RecordAlgo {
-			writeWrapped(out, "", "Algorithms are NOT recorded: keep note of them, "+
-				"--algo is required to decrypt.")
-		}
-		if !plan.opts.RecordKDF && len(plan.verifyPasswords) > 0 {
-			writeWrapped(out, "", "Argon2 cost is NOT recorded: keep note of it, "+
-				"--kdf is required to decrypt.")
-		}
-	}
-
-	printPaddingLine(out, plan)
+	what := fmt.Sprintf("%d pieces written, any %d rebuild the original", plan.opts.N, plan.opts.K)
 	if plan.opts.Name != "" {
-		writeWrapped(out, "", fmt.Sprintf("File name: %q is recorded inside the "+
-			"pieces, so combine restores it.", plan.opts.Name))
+		what = fmt.Sprintf("%d pieces of %q written, any %d rebuild it", plan.opts.N, plan.opts.Name, plan.opts.K)
 	}
-	if verified {
-		writeWrapped(out, "", "Verification: PASSED "+
-			"(re-read pieces reconstruct the original).")
-	} else {
-		writeWrapped(out, "", "Verification: SKIPPED (--no-verify); "+
-			"the pieces were not checked.")
+	writeLabeled(out, "Done:", toneGood, what)
+	row := func(label, value string) { summaryRow(out, label, value) }
+	row("layers", layerSummary(plan))
+	row("method", methodSummary(plan))
+	if s := infoSummary(plan); s != "" {
+		row("details", s)
 	}
-	for _, f := range formats {
-		fmt.Fprintf(out, "Pieces (%s):\n", f)
-		for _, p := range written[f] {
-			fmt.Fprintln(out, "  "+p)
+	if plan.opts.Padding.Off {
+		row("size", "not padded, so the piece size gives the content length away")
+	}
+	row("verified", verified)
+	for i, f := range formats {
+		label := ""
+		if i == 0 {
+			label = "pieces"
 		}
+		row(label, pieceRange(written[f])+" ("+f.String()+")")
+	}
+	reportSizeNotes(out, formats, plan.pieceSizes)
+	splitWarnings(out, plan)
+}
+
+// summaryRow prints one aligned line of a report: a short label and its value,
+// folded under the value rather than the label.
+func summaryRow(out io.Writer, label, value string) {
+	writeWrapped(out, fmt.Sprintf("  %-9s ", label), value)
+}
+
+// layerSummary lists the layers outermost first, or says there are none.
+func layerSummary(plan *splitPlan) string {
+	if plan.opts.Keyless {
+		return "none: no password"
+	}
+	parts := make([]string, len(plan.opts.Layers))
+	for i, l := range plan.opts.Layers {
+		algo := ciphers.Name(plan.schemeIDs[i])
+		if l.Kind == core.RecipientLayer {
+			parts[i] = fmt.Sprintf("%s recipient key (%s)", l.Recipient.Scheme().Name(), algo)
+		} else {
+			parts[i] = "password (" + algo + ")"
+		}
+	}
+	s := strings.Join(parts, ", ")
+	if plan.hasRecipient() {
+		s += "; every private key is needed to rebuild"
+	}
+	return s
+}
+
+// methodSummary says how the content was spread and what keeps fewer than K
+// pieces from revealing it: a proof for the full method, the ciphers for the
+// compact one. At a threshold of one there is no such promise to make.
+func methodSummary(plan *splitPlan) string {
+	k := plan.opts.K
+	if plan.opts.Method == core.MethodCompact {
+		if k == 1 {
+			return "compact; any one piece rebuilds it"
+		}
+		return fmt.Sprintf("compact: pieces 1/%d of the file; fewer than %d are safe while "+
+			"AES-256 and ChaCha20 hold", k, k)
+	}
+	if k == 1 {
+		return "full; any one piece rebuilds it"
+	}
+	return fmt.Sprintf("full: fewer than %d pieces reveal nothing, proven", k)
+}
+
+// infoSummary says what one piece shows, and whether one piece is enough to try
+// passwords against.
+func infoSummary(plan *splitPlan) string {
+	mode, err := core.EffectiveInfo(plan.opts)
+	if err != nil {
+		return ""
+	}
+	guess := ""
+	if len(plan.verifyPasswords) > 0 {
+		guess = fmt.Sprintf("; trying passwords needs %d pieces", plan.opts.K)
+	}
+	switch mode {
+	case core.InfoProtected:
+		first, isPassword := plan.firstSecret()
+		if isPassword {
+			return "readable with " + first + "; one piece can test guesses"
+		}
+		return "readable with " + first
+	case core.InfoStrict:
+		if g := plan.strictGuessing(); g != "" {
+			return "readable with " + plan.secrets() + "; " + g
+		}
+		return "readable with " + plan.secrets()
+	case core.InfoPublic:
+		return "readable by anyone with riven" + guess
+	default:
+		return "hidden: one piece shows nothing" + guess
 	}
 }
 
-// printPaddingLine states what the piece size does and does not reveal.
-func printPaddingLine(out io.Writer, plan *splitPlan) {
-	if plan.opts.Padding.Off {
-		writeWrapped(out, "", "Piece size: not padded to a size class, "+
-			"so it reveals the length of the content.")
-		return
+// pieceRange names the first and last piece of a set, which says where all of
+// them are without a line each.
+func pieceRange(paths []string) string {
+	switch len(paths) {
+	case 0:
+		return ""
+	case 1:
+		return paths[0]
 	}
-	writeWrapped(out, "", fmt.Sprintf("Piece size: padded to a %d percent size "+
-		"class, so it gives only a range.", plan.opts.Padding.Width()))
+	return paths[0] + " ... " + paths[len(paths)-1]
+}
+
+// splitWarnings states what the user has to act on or keep in mind: anything
+// left out of the pieces that rebuilding will ask for, and a set no password
+// protects.
+func splitWarnings(out io.Writer, plan *splitPlan) {
+	if plan.opts.Keyless {
+		warn(out, fmt.Sprintf("no password: anyone with %d pieces can rebuild the file, "+
+			"and nothing proves a piece is genuine.", plan.opts.K))
+	}
+	if !plan.opts.RecordAlgo && len(plan.schemeIDs) > 0 {
+		names := make([]string, len(plan.schemeIDs))
+		for i, id := range plan.schemeIDs {
+			names[i] = ciphers.Name(id)
+		}
+		warn(out, "the algorithms are not recorded. Keep a note: rebuilding needs --algo "+
+			strings.Join(names, ","))
+	}
+	if !plan.opts.RecordKDF && len(plan.verifyPasswords) > 0 {
+		warn(out, "the Argon2id cost is not recorded. Keep a note: rebuilding needs --kdf "+
+			plan.opts.Params.String())
+	}
 }
 
 // reportGeneratedPasswords delivers a password Riven invented, which is the only
@@ -492,44 +589,19 @@ func reportGeneratedPasswords(opts *cliOptions, plan *splitPlan) error {
 				return err
 			}
 		}
-		fmt.Fprintf(os.Stderr,
-			"riven: %d password(s) were generated and printed to standard output, one per line.\n",
-			len(plan.generated))
-		fmt.Fprintln(os.Stderr, "riven: they are stored nowhere else. Capture them now or the data is lost.")
+		warn(os.Stderr, fmt.Sprintf("%d generated password(s) went to standard output, one per line. "+
+			"They are stored nowhere else: capture them now, or the data is lost.", len(plan.generated)))
 		return nil
 	}
 
 	w := secretOut()
-	fmt.Fprintln(w, "\n=== GENERATED PASSWORD(S) - THE ONLY WAY TO RECOVER THIS DATA ===")
+	fmt.Fprintln(w)
+	writeLabeled(w, "GENERATED PASSWORD(S):", toneWarning, "the only way to recover this data. "+
+		"Write them down now; they are stored nowhere.")
 	for i, pw := range plan.generated {
-		fmt.Fprintf(w, "  %d: %s\n", i+1, string(pw))
+		fmt.Fprintf(w, "  layer %d: %s\n", i+1, string(pw))
 	}
-	fmt.Fprintln(w, "Write these down now. They are not stored anywhere.")
 	return nil
-}
-
-// resolveOpenCredentials gathers everything an open needs from opts over the
-// given pieces: the passwords, the KDF parameters and schemes, and the recipient
-// private keys, assembled into a core.OpenOptions. The returned cleanup wipes the
-// passwords; the caller still owns the pieces. It deliberately does not call
-// noteExpensiveOpen, which each command places where its own output belongs.
-func resolveOpenCredentials(opts *cliOptions, pieces [][]byte) (core.OpenOptions, func(), error) {
-	pws, err := gatherOpenPasswords(opts, pieces)
-	if err != nil {
-		return core.OpenOptions{}, nil, err
-	}
-	params, schemes, err := resolveOpenParams(opts)
-	if err != nil {
-		memory.FreeAll(pws)
-		return core.OpenOptions{}, nil, err
-	}
-	keys, err := resolveOpenKeys(opts)
-	if err != nil {
-		memory.FreeAll(pws)
-		return core.OpenOptions{}, nil, err
-	}
-	open := core.OpenOptions{Passwords: pws, PrivateKeys: keys, Params: params, Schemes: schemes}
-	return open, func() { memory.FreeAll(pws) }, nil
 }
 
 func cmdInfo(opts *cliOptions) error {
@@ -537,10 +609,9 @@ func cmdInfo(opts *cliOptions) error {
 		return err
 	}
 	if len(opts.files) == 0 {
-		return errors.New("info needs at least one piece: riven info PIECE...")
+		return errors.New("info needs a piece: a piece file, or a folder of pieces")
 	}
 
-	// Load first, so a keyless set can be recognised before asking anything.
 	items, err := loadInputs(msgWriter(opts), opts.files, false)
 	if err != nil {
 		return err
@@ -556,15 +627,11 @@ func cmdInfo(opts *cliOptions) error {
 
 	seen := map[string][]int{}
 	for _, it := range items {
-		noteExpensiveOpen([][]byte{it.bytes}, open.Params)
 		info, err := core.Info(it.bytes, open)
 		if err != nil {
-			retried, rerr := retryWithKDF(opts, it.bytes, open, err)
-			if rerr != nil || retried == nil {
-				fmt.Printf("%q: cannot open (%v)\n", it.det.Path, err)
-				continue
-			}
-			info = retried
+			fmt.Println()
+			writeLabeled(os.Stdout, "error:", toneError, pieceFailure(it.det.Path, err))
+			continue
 		}
 		printPieceInfo(it.det.Path, it.det, info)
 		seen[info.SetID] = append(seen[info.SetID], info.Serial)
@@ -572,42 +639,41 @@ func cmdInfo(opts *cliOptions) error {
 	if len(items) > 1 && len(seen) > 0 {
 		fmt.Println("\nGrouping:")
 		for set, serials := range seen {
+			// A piece with hidden details has no serial to show.
+			if serials[0] == 0 {
+				fmt.Printf("  set %s...: %d piece(s), details hidden\n", set[:16], len(serials))
+				continue
+			}
 			fmt.Printf("  set %s...: pieces %v\n", set[:16], serials)
 		}
 	}
+	// Each failure was printed beside its piece; the exit status still has to
+	// say that nothing could be read, so a script can tell.
+	if len(seen) == 0 {
+		return errors.New("no piece could be opened; check the password, the key and the files")
+	}
 	return nil
-}
-
-// retryWithKDF gives an interactive user one chance to supply cost parameters
-// that the piece did not record.
-func retryWithKDF(opts *cliOptions, piece []byte, open core.OpenOptions, cause error) (*core.PieceInfo, error) {
-	if open.Params != nil || !errors.Is(cause, format.ErrWrongPassword) {
-		return nil, nil
-	}
-	p, err := askMissingKDF(opts)
-	if err != nil || p == nil {
-		return nil, err
-	}
-	open.Params = p
-	return core.Info(piece, open)
 }
 
 func printPieceInfo(path string, det pieceio.Detected, info *core.PieceInfo) {
 	fmt.Printf("\n%q\n", path)
 	fmt.Printf("  input form : %s\n", det.Format)
 	fmt.Printf("  set id     : %s\n", info.SetID)
+	if info.Hidden {
+		fmt.Printf("  intact     : %t\n", info.Intact)
+		fmt.Printf("  details    : hidden until the set is combined (--info none)\n")
+		return
+	}
 	fmt.Printf("  piece      : %d of %d (need any %d to reconstruct)\n", info.Serial, info.N, info.K)
 	if info.CreatorVersion != "" {
 		fmt.Printf("  created by : riven %s (%s)\n", info.CreatorVersion, info.CreatorCommit)
 	}
 	fmt.Printf("  intact     : %t\n", info.Intact)
-
-	payloadKind := "encrypted payload"
-	if !info.Encrypted {
-		payloadKind = "payload"
+	if info.Compact {
+		fmt.Printf("  method     : compact (this piece holds 1/%d of it)\n", info.K)
+	} else {
+		fmt.Printf("  method     : full (this piece holds a share of all of it)\n")
 	}
-	fmt.Printf("  content    : %s, size hidden until combined\n", payloadKind)
-	fmt.Printf("  payload id : %s...\n", info.PayloadHashHex[:16])
 	if info.Name != "" {
 		fmt.Printf("  file name  : %s\n", info.Name)
 	}
@@ -620,15 +686,20 @@ func printPieceInfo(path string, det pieceio.Detected, info *core.PieceInfo) {
 	default:
 		fmt.Printf("  layers     : %d, algorithms not recorded\n", info.LayerCount)
 	}
-	if info.Encrypted && info.Keyless {
+	switch {
+	case info.Encrypted && info.PasswordLayers() == 0:
 		fmt.Printf("  password   : none; a recipient private key is required\n")
+	case info.Encrypted && info.Keyless:
+		fmt.Printf("  password   : %d needed to combine; these details need none (--info public)\n", info.PasswordLayers())
 	}
-	if info.Encrypted && !info.Keyless {
-		if info.KDFStored {
-			fmt.Printf("  kdf        : %s\n", info.Params.Describe())
-		} else {
-			fmt.Printf("  kdf        : %s (not recorded; supplied)\n", info.Params.Describe())
-		}
+	switch {
+	case info.PasswordLayers() == 0:
+	case info.KDFStored:
+		fmt.Printf("  kdf        : %s\n", info.Params.Describe())
+	case info.Params != (kdf.Params{}):
+		fmt.Printf("  kdf        : %s (not recorded; supplied)\n", info.Params.Describe())
+	default:
+		fmt.Printf("  kdf        : not recorded; give it with --kdf to combine\n")
 	}
 	if info.Hybrid {
 		fmt.Printf("  recipients : %d layer(s) need a private key\n", info.KEMLayers)
@@ -640,43 +711,27 @@ func cmdCombine(opts *cliOptions) error {
 		return err
 	}
 	if len(opts.files) == 0 {
-		return errors.New("combine needs pieces: riven combine PIECE...")
+		return errors.New("combine needs pieces: the piece files, or a folder of them")
 	}
 	items, err := loadInputs(msgWriter(opts), opts.files, true)
 	if err != nil {
 		return err
 	}
+	if isInteractive() && !opts.yes {
+		fmt.Println(readSummary(items))
+	}
 	for _, it := range items {
-		if isInteractive() && !opts.yes {
-			fmt.Printf("  read %q as %s\n", filepath.Base(it.det.Path), it.det.Format)
-		}
 		warnUnverified(msgWriter(opts), it.det)
 	}
 	pieces := pieceBytes(items)
 	defer memory.FreeAll(pieces)
 
-	open, wipe, err := resolveOpenCredentials(opts, pieces)
+	recovered, name, err := combinePieces(opts, pieces, func(i int, _ error) {
+		warn(msgWriter(opts), fmt.Sprintf("%q is damaged: it did not open although other pieces did. "+
+			"Rebuilding from the rest.", items[i].det.Path))
+	})
 	if err != nil {
-		return err
-	}
-	defer wipe()
-
-	// A retry for a missing cost or algorithm opens the pieces again, so each
-	// damaged one is reported once however many attempts meet it.
-	reported := map[int]bool{}
-	open.Damaged = func(i int, err error) {
-		if reported[i] {
-			return
-		}
-		reported[i] = true
-		writeWrapped(msgWriter(opts), "  ", fmt.Sprintf("warning: %q did not open although other pieces did, "+
-			"so that file is damaged; rebuilding from the rest (%v)", items[i].det.Path, err))
-	}
-
-	noteExpensiveOpen(pieces, open.Params)
-	recovered, name, err := combineWithRecovery(opts, pieces, open)
-	if err != nil {
-		return err
+		return namePiece(err, itemPaths(items))
 	}
 	defer memory.Zero(recovered)
 
@@ -718,7 +773,7 @@ func writeRecovered(opts *cliOptions, recovered []byte, name string) error {
 		if _, err := os.Stdout.Write(recovered); err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "riven: recovered %d bytes\n", len(recovered))
+		writeLabeled(os.Stderr, "Done:", toneGood, fmt.Sprintf("%d bytes written to standard output", len(recovered)))
 		return nil
 	}
 
@@ -730,7 +785,7 @@ func writeRecovered(opts *cliOptions, recovered []byte, name string) error {
 	if err := pieceio.Write(outPath, recovered); err != nil {
 		return err
 	}
-	fmt.Fprintf(msgWriter(opts), "Recovered %d bytes -> %s\n", len(recovered), outPath)
+	writeLabeled(msgWriter(opts), "Done:", toneGood, fmt.Sprintf("%d bytes written to %s", len(recovered), outPath))
 	return nil
 }
 
@@ -778,52 +833,6 @@ func confirmOverwrite(opts *cliOptions, path string) error {
 	return nil
 }
 
-// combineWithRecovery attempts reconstruction and, when a set omitted its
-// algorithms or cost, asks for them (interactive) or explains the flag (not). It
-// returns the recovered bytes and the file name the pieces recorded, if any.
-//
-// A set can have withheld both, so the questions follow one another: the cost
-// comes first because the pieces do not open without it, and only once they open
-// can the missing algorithms be noticed.
-func combineWithRecovery(opts *cliOptions, pieces [][]byte, open core.OpenOptions) ([]byte, string, error) {
-	out, name, err := core.CombineFile(pieces, open)
-
-	// Only a failure to open a piece can be explained by unrecorded cost
-	// parameters. Threshold and consistency errors must not send the user there.
-	if open.Params == nil && errors.Is(err, format.ErrWrongPassword) {
-		p, kerr := askMissingKDF(opts)
-		if kerr != nil || p == nil {
-			return nil, "", err
-		}
-		open.Params = p
-		out, name, err = core.CombineFile(pieces, open)
-	}
-
-	if errors.Is(err, core.ErrSchemesRequired) {
-		layers, lerr := layerCount(pieces, open)
-		if lerr != nil {
-			return nil, "", err
-		}
-		ids, aerr := askMissingAlgos(opts, layers)
-		if aerr != nil {
-			return nil, "", aerr
-		}
-		open.Schemes = ids
-		return core.CombineFile(pieces, open)
-	}
-	return out, name, err
-}
-
-// layerCount reads the cascade layer count from the first piece that opens.
-func layerCount(pieces [][]byte, open core.OpenOptions) (int, error) {
-	for _, p := range pieces {
-		if info, err := core.Info(p, open); err == nil {
-			return info.LayerCount, nil
-		}
-	}
-	return 0, errors.New("no piece could be opened")
-}
-
 func cmdKeygen(opts *cliOptions) error {
 	if err := validateKeygenOptions(opts); err != nil {
 		return err
@@ -869,12 +878,14 @@ func cmdKeygen(opts *cliOptions) error {
 		return err
 	}
 	out := msgWriter(opts)
-	fmt.Fprintf(out, "Wrote %s keys:\n  %s  (public - share with senders)\n  %s  (private - keep secret)\n",
-		scheme.Name(), pubPath, privPath)
-	fmt.Fprintf(out, "Each piece sent to this key carries %d extra bytes.\n", scheme.CiphertextSize())
+	// The encapsulated key rides once for the layer, and once more when the
+	// envelope that keeps the details is sealed to the key as well.
+	writeLabeled(out, "Done:", toneGood, fmt.Sprintf("%s key pair written; a piece sealed to it grows by "+
+		"%d bytes (%d when the details are too)", scheme.Name(), scheme.CiphertextSize(), 2*scheme.CiphertextSize()))
+	fmt.Fprintf(out, "  public   %s  (give to whoever splits for you)\n", pubPath)
+	fmt.Fprintf(out, "  private  %s  (keep secret: it opens the pieces)\n", privPath)
 	if !scheme.PostQuantum() {
-		writeWrapped(out, "", "Note: this key type is not post-quantum. "+
-			"It is for compatibility and small pieces.")
+		warn(out, "this key type is not post-quantum; it is for existing keys and small pieces.")
 	}
 	return nil
 }
@@ -884,7 +895,7 @@ func cmdMenu(opts *cliOptions) error {
 		printUsage()
 		return nil
 	}
-	fmt.Println("riven " + Version())
+	heading(os.Stdout, "riven "+Version())
 	fmt.Println("1) Split a file into pieces")
 	fmt.Println("2) Split a piece of text into pieces")
 	fmt.Println("3) Inspect a piece")
@@ -926,8 +937,7 @@ func cmdMenu(opts *cliOptions) error {
 		opts.files = []string{path}
 		return cmdInfo(opts)
 	case 4:
-		fmt.Println("Enter piece paths separated by spaces:")
-		line, err := readLine("Pieces", "")
+		line, err := readLine("Pieces (paths separated by spaces)", "")
 		if err != nil {
 			return err
 		}
@@ -935,103 +945,6 @@ func cmdMenu(opts *cliOptions) error {
 		return cmdCombine(opts)
 	default:
 		return cmdKeygen(opts)
-	}
-}
-
-// looksKeyless reports whether the pieces open with no password at all. The check
-// costs one hash, so it is safe to try before asking the user for anything.
-func looksKeyless(pieces [][]byte) bool {
-	if len(pieces) == 0 {
-		return false
-	}
-	m, _, err := format.Decode(pieces[0], nil, nil)
-	return err == nil && m.Keyless
-}
-
-// gatherOpenPasswords collects passwords for info and combine: from the
-// environment in automation, otherwise prompting until an empty entry. A set with
-// no password envelope short-circuits this entirely.
-func gatherOpenPasswords(opts *cliOptions, pieces [][]byte) ([][]byte, error) {
-	envs := opts.passwordEnvs()
-	if len(envs) > 0 {
-		var out [][]byte
-		for _, name := range envs {
-			pw, err := passwordFromEnv(name)
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, pw)
-		}
-		return out, nil
-	}
-	if looksKeyless(pieces) {
-		return nil, nil
-	}
-	if opts.yes || !isInteractive() {
-		return nil, errors.New("no password given: set one with --password-env NAME")
-	}
-	fmt.Println("\nEnter the password for each layer, outermost first.")
-	var pws [][]byte
-	for i := 1; ; i++ {
-		prompt := fmt.Sprintf("Layer %d password: ", i)
-		if i > 1 {
-			prompt = fmt.Sprintf("Layer %d password (press Enter if there are no more layers): ", i)
-		}
-		p, err := readPasswordMasked(prompt)
-		if err != nil {
-			return nil, err
-		}
-		if len(p) == 0 {
-			break
-		}
-		pws = append(pws, p)
-	}
-	if len(pws) == 0 {
-		return nil, errors.New("no password entered")
-	}
-	return pws, nil
-}
-
-// resolveOpenKeys loads every private key named with --identity.
-func resolveOpenKeys(opts *cliOptions) ([]*kem.PrivateKey, error) {
-	var keys []*kem.PrivateKey
-	for _, path := range opts.identities {
-		k, err := readPrivateKey(path)
-		if err != nil {
-			return nil, err
-		}
-		keys = append(keys, k)
-	}
-	return keys, nil
-}
-
-// costWarnThreshold is the declared memory size, in KiB, above which opening is
-// slow enough to be worth announcing.
-const costWarnThreshold = 256 * 1024
-
-// noteExpensiveOpen warns when the pieces declare a costly derivation, so a slow
-// open does not read as a hang. The cost is not authenticated, so it also flags a
-// file of unknown origin asking for a lot of work.
-func noteExpensiveOpen(pieces [][]byte, override *kdf.Params) {
-	if !isInteractive() {
-		return
-	}
-	worst := kdf.Params{}
-	for _, p := range pieces {
-		params := override
-		if params == nil {
-			peeked, ok := format.PeekParams(p)
-			if !ok {
-				continue
-			}
-			params = &peeked
-		}
-		if params.Memory > worst.Memory {
-			worst = *params
-		}
-	}
-	if worst.Memory >= costWarnThreshold {
-		fmt.Printf("  these pieces ask for %s per piece, so this takes a moment.\n", worst.Describe())
 	}
 }
 
@@ -1048,6 +961,27 @@ func warnUnverified(out io.Writer, det pieceio.Detected) {
 	if det.Verified {
 		return
 	}
-	writeWrapped(out, "  ", fmt.Sprintf("warning: %q carries no matching checksum, "+
-		"so the text may have been mistyped or damaged", filepath.Base(det.Path)))
+	warn(out, fmt.Sprintf("%q has no matching checksum, so the text may be mistyped or damaged.",
+		filepath.Base(det.Path)))
+}
+
+// readSummary says how many pieces were read and in which forms, in one line
+// rather than one per piece.
+func readSummary(items []heldPiece) string {
+	var forms []string
+	for _, it := range items {
+		if f := it.det.Format.String(); !slices.Contains(forms, f) {
+			forms = append(forms, f)
+		}
+	}
+	return fmt.Sprintf("Read %d piece(s): %s.", len(items), strings.Join(forms, ", "))
+}
+
+// itemPaths is the path of each piece read, in order.
+func itemPaths(items []heldPiece) []string {
+	out := make([]string, len(items))
+	for i, it := range items {
+		out[i] = it.det.Path
+	}
+	return out
 }

@@ -363,16 +363,3 @@ func SchemeForPublicKeySize(n int) []Scheme {
 	}
 	return out
 }
-
-// SchemeForCiphertextSize reports which schemes produce an encapsulated key of
-// this length. It names the key type a piece was sealed to, which is otherwise
-// not recorded.
-func SchemeForCiphertextSize(n int) []Scheme {
-	var out []Scheme
-	for _, s := range All() {
-		if s.CiphertextSize() == n {
-			out = append(out, s)
-		}
-	}
-	return out
-}

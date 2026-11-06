@@ -201,7 +201,9 @@ func TestRegressionMissingKeyIsErrKeyRequired(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pieces := mustSplit(t, []byte("for the key holder"), SplitOptions{N: 2, K: 2,
+	// Protected details would need the key just to open a piece, so this is a
+	// set whose details are public.
+	pieces := mustSplit(t, []byte("for the key holder"), SplitOptions{N: 2, K: 2, Info: InfoPublic,
 		Layers: []LayerSpec{{Kind: RecipientLayer, Recipient: priv.Public()}}})
 	if _, err := Combine(pieces, OpenOptions{}); !errors.Is(err, ErrKeyRequired) {
 		t.Fatalf("a missing private key was reported as %v", err)

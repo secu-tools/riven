@@ -225,13 +225,14 @@ func TestSplitSummaryDescribesTheSet(t *testing.T) {
 
 	var buf bytes.Buffer
 	printSplitSummary(&buf, plan, []pieceio.Format{pieceio.Binary},
-		map[pieceio.Format][]string{pieceio.Binary: {"a.1", "a.2"}}, true)
-	out := buf.String()
+		map[pieceio.Format][]string{pieceio.Binary: {"a.1", "a.2"}}, verifiedYes)
+	// The summary wraps to the terminal, so compare it as one line.
+	out := strings.Join(strings.Fields(buf.String()), " ")
 	for _, want := range []string{
-		"1. ", "2. ", "password", "recipient key (x25519)",
-		"Every recipient private key listed above is required",
-		"Algorithms are NOT recorded", "Argon2 cost is NOT recorded",
-		"a.1", "a.2",
+		"password (", "x25519 recipient key (", "every private key is needed",
+		"algorithms are not recorded", "needs --algo ",
+		"Argon2id cost is not recorded", "needs --kdf m=8",
+		"a.1 ... a.2", verifiedYes,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("summary is missing %q:\n%s", want, out)
@@ -243,12 +244,12 @@ func TestSplitSummaryForKeylessSets(t *testing.T) {
 	plan := planFor(t, "--keyless", "-n", "3", "-k", "2")
 	var buf bytes.Buffer
 	printSplitSummary(&buf, plan, []pieceio.Format{pieceio.Binary},
-		map[pieceio.Format][]string{pieceio.Binary: {"a.1"}}, true)
-	out := buf.String()
-	if !strings.Contains(out, "no encryption and no password") {
+		map[pieceio.Format][]string{pieceio.Binary: {"a.1"}}, verifiedYes)
+	out := strings.Join(strings.Fields(buf.String()), " ")
+	if !strings.Contains(out, "none: no password") || !strings.Contains(out, "warning: no password") {
 		t.Fatalf("keyless summary should say so:\n%s", out)
 	}
-	if strings.Contains(out, "Key derivation") {
+	if strings.Contains(out, "Argon2") {
 		t.Fatalf("keyless summary should not mention key derivation:\n%s", out)
 	}
 }
@@ -267,7 +268,7 @@ func TestSplitSummaryFitsTheLineWidth(t *testing.T) {
 	var buf bytes.Buffer
 	withLineWidth(t, width, func() {
 		printSplitSummary(&buf, plan, []pieceio.Format{pieceio.Binary},
-			map[pieceio.Format][]string{pieceio.Binary: {"a.1"}}, true)
+			map[pieceio.Format][]string{pieceio.Binary: {"a.1"}}, verifiedYes)
 	})
 	for _, line := range strings.Split(buf.String(), "\n") {
 		if n := utf8.RuneCountInString(line); n > width && len(strings.Fields(line)) > 1 {
@@ -279,29 +280,26 @@ func TestSplitSummaryFitsTheLineWidth(t *testing.T) {
 	}
 }
 
-// TestPaddingLineStatesWhatTheSizeReveals covers padded, unpadded and a set with
-// no password, since this is the line that tells a user whether the piece size
-// is covered.
-func TestPaddingLineStatesWhatTheSizeReveals(t *testing.T) {
+// TestSummarySaysWhenTheSizeGivesTheLengthAway checks the one size case worth a
+// line: without padding the piece size reveals the content length, and that is
+// said, with or without a password. Padding, the default, needs no mention.
+func TestSummarySaysWhenTheSizeGivesTheLengthAway(t *testing.T) {
 	cases := []struct {
 		name string
 		args []string
-		want string
+		says bool
 	}{
-		{"padded", []string{"--pad", "10"}, "padded to a 10 percent size class"},
-		{"off", []string{"--pad", "none"}, "not padded to a size class"},
-		{"no password", []string{"--keyless", "-n", "3", "-k", "2", "--pad", "10"}, "padded to a 10 percent size class"},
+		{"padded", []string{"--pad", "10", "--kdf", "m=8,t=1,p=1"}, false},
+		{"off", []string{"--pad", "none", "--kdf", "m=8,t=1,p=1"}, true},
+		{"no password", []string{"--keyless", "-n", "3", "-k", "2", "--pad", "none"}, true},
 	}
 	for _, c := range cases {
-		args := c.args
-		if c.name != "no password" {
-			args = append(args, "--kdf", "m=8,t=1,p=1")
-		}
-		plan := planFor(t, args...)
+		plan := planFor(t, c.args...)
 		var buf bytes.Buffer
-		printPaddingLine(&buf, plan)
-		if !strings.Contains(buf.String(), c.want) {
-			t.Fatalf("%s: got %q, want it to mention %q", c.name, buf.String(), c.want)
+		printSplitSummary(&buf, plan, []pieceio.Format{pieceio.Binary},
+			map[pieceio.Format][]string{pieceio.Binary: {"a.1"}}, verifiedYes)
+		if got := strings.Contains(buf.String(), "not padded"); got != c.says {
+			t.Fatalf("%s: mentions the padding %v, want %v:\n%s", c.name, got, c.says, buf.String())
 		}
 	}
 }
@@ -333,12 +331,13 @@ func TestExportAndVerify(t *testing.T) {
 			}
 		}
 	}
+	reportSizeNotes(&buf, formats, plan.pieceSizes)
 	if !strings.Contains(buf.String(), "error correction") {
 		t.Fatalf("the QR export should report its level:\n%s", buf.String())
 	}
 
-	if err := verifySplit(&buf, input, written[pieceio.Binary], plan); err != nil {
-		t.Fatalf("verification should pass: %v", err)
+	if got, err := verifySplit(input, written[pieceio.Binary], plan); err != nil || got != verifiedYes {
+		t.Fatalf("verification should pass: %q, %v", got, err)
 	}
 
 	// Verification must fail loudly if a piece is not what it claims to be.
@@ -351,8 +350,45 @@ func TestExportAndVerify(t *testing.T) {
 	if err := os.WriteFile(damaged, body, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifySplit(&buf, input, written[pieceio.Binary], plan); err == nil {
+	if _, err := verifySplit(input, written[pieceio.Binary], plan); err == nil {
 		t.Fatal("a damaged piece must fail verification")
+	}
+}
+
+// TestVerifyASetSealedToAKey checks what verification can say of a recipient set:
+// everything with the private key, the shares with public details, and only that
+// the pieces read back when they are sealed to a key the split was not given.
+func TestVerifyASetSealedToAKey(t *testing.T) {
+	dir := t.TempDir()
+	priv, err := kem.Generate(kem.X25519)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, key := filepath.Join(dir, "r.pub"), filepath.Join(dir, "r.key")
+	if err := writePublicKey(pub, priv.Public()); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePrivateKey(key, priv); err != nil {
+		t.Fatal(err)
+	}
+	input := []byte("for the key holder")
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{nil, verifiedSealed},
+		{[]string{"--identity", key}, verifiedYes},
+		{[]string{"--info", "public"}, verifiedPartly},
+	} {
+		plan := planFor(t, append([]string{"--recipient", pub, "-n", "2", "-k", "2"}, c.args...)...)
+		plan.outDir = t.TempDir()
+		written, _, err := exportSplit(&bytes.Buffer{}, plan, &cliOptions{yes: true}, input, "doc")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := verifySplit(input, written[pieceio.Binary], plan); err != nil || got != c.want {
+			t.Fatalf("%v: verified %q, %v; want %q", c.args, got, err, c.want)
+		}
 	}
 }
 
@@ -361,7 +397,7 @@ func TestExportAndVerify(t *testing.T) {
 func TestReportQRSizesCountsEveryPiece(t *testing.T) {
 	var buf bytes.Buffer
 	reportQRSizes(&buf, []int{100, 100, 2900})
-	out := buf.String()
+	out := strings.Join(strings.Fields(buf.String()), " ")
 	if !strings.Contains(out, "2 piece(s)") || !strings.Contains(out, "1 piece(s)") {
 		t.Fatalf("mixed levels should be reported per piece:\n%s", out)
 	}

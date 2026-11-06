@@ -229,8 +229,8 @@ func TestSplitRefusesADirectory(t *testing.T) {
 // notice is built on stays honest: shares are one full copy of the input each.
 func TestMemoryEstimateGrowsWithThePieceCount(t *testing.T) {
 	const mb = 1 << 20
-	small := core.MemoryEstimate(mb, 3)
-	large := core.MemoryEstimate(mb, 10)
+	small := core.MemoryEstimate(mb, 3, 2, core.MethodFull)
+	large := core.MemoryEstimate(mb, 10, 2, core.MethodFull)
 	if small < mb*3 {
 		t.Fatalf("3 shares of 1 MiB cannot be under 3 MiB, got %d", small)
 	}
@@ -238,12 +238,12 @@ func TestMemoryEstimateGrowsWithThePieceCount(t *testing.T) {
 		t.Fatalf("more pieces must need more memory: %d then %d", small, large)
 	}
 	var report strings.Builder
-	noteLargeSplit(&report, 128<<20, 5)
+	noteLargeSplit(&report, 128<<20, core.SplitOptions{N: 5, K: 3})
 	if !strings.Contains(report.String(), "MiB of memory") {
 		t.Fatalf("a large split should say what it needs:\n%s", report.String())
 	}
 	report.Reset()
-	noteLargeSplit(&report, 1024, 5)
+	noteLargeSplit(&report, 1024, core.SplitOptions{N: 5, K: 3})
 	if report.Len() != 0 {
 		t.Fatalf("a small split should say nothing, got %q", report.String())
 	}

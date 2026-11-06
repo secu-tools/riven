@@ -15,6 +15,7 @@ import (
 
 	"github.com/secu-tools/riven/internal/ciphers"
 	"github.com/secu-tools/riven/internal/core"
+	"github.com/secu-tools/riven/internal/format"
 	"github.com/secu-tools/riven/internal/kdf"
 	"github.com/secu-tools/riven/internal/pieceio"
 )
@@ -67,16 +68,22 @@ func TestRecordingMatrix(t *testing.T) {
 		for _, recKDF := range []bool{true, false} {
 			name := fmt.Sprintf("algo=%v/kdf=%v", recAlgo, recKDF)
 			t.Run(name, func(t *testing.T) {
-				pieces, err := core.Split(input, core.SplitOptions{
-					N: 4, K: 2, Params: custom,
-					RecordAlgo: recAlgo, RecordKDF: recKDF,
-					Layers: []core.LayerSpec{
-						{SchemeID: ids[0], Password: pws[0]},
-						{SchemeID: ids[1], Password: pws[1]},
-					},
-				})
-				if err != nil {
-					t.Fatal(err)
+				// An unrecorded cost byte is noise, which is the cost one time in
+				// 256 and then opens without it, so such a set is split again.
+				var pieces [][]byte
+				for pieces == nil || !recKDF && noiseIsTheCost(pieces[:2], custom) {
+					var err error
+					pieces, err = core.Split(input, core.SplitOptions{
+						N: 4, K: 2, Params: custom,
+						RecordAlgo: recAlgo, RecordKDF: recKDF,
+						Layers: []core.LayerSpec{
+							{SchemeID: ids[0], Password: pws[0]},
+							{SchemeID: ids[1], Password: pws[1]},
+						},
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
 				}
 
 				open := core.OpenOptions{Passwords: pws}
@@ -113,6 +120,17 @@ func TestRecordingMatrix(t *testing.T) {
 			})
 		}
 	}
+}
+
+// noiseIsTheCost reports whether a cost byte among pieces decodes to cost, as
+// noise in one that did not record it may.
+func noiseIsTheCost(pieces [][]byte, cost kdf.Params) bool {
+	for _, p := range pieces {
+		if d, ok := format.PeekParams(p); ok && d == cost {
+			return true
+		}
+	}
+	return false
 }
 
 // TestMixedTransportFormats reconstructs from pieces that each arrived in a

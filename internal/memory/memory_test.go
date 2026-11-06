@@ -5,6 +5,7 @@ package memory
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -39,24 +40,6 @@ func TestLockedBuffer(t *testing.T) {
 		t.Fatal("Bytes should be nil after Destroy")
 	}
 	b.Destroy() // idempotent
-}
-
-func TestNewLockedFrom(t *testing.T) {
-	src := []byte("copy me then wipe me")
-	want := append([]byte(nil), src...)
-	b, err := NewLockedFrom(src)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer b.Destroy()
-	if !bytes.Equal(b.Bytes(), want) {
-		t.Fatal("copy mismatch")
-	}
-	for _, v := range src {
-		if v != 0 {
-			t.Fatal("source not wiped")
-		}
-	}
 }
 
 // WipeAll runs from the signal handler, so it clears the contents but leaves
@@ -109,14 +92,22 @@ func TestInstallCleanupStops(t *testing.T) {
 	stop()
 }
 
+// lockedSecret returns a registered locked buffer holding s.
+func lockedSecret(t *testing.T, s string) *LockedBuffer {
+	t.Helper()
+	b, err := NewLocked(len(s))
+	if err != nil {
+		t.Fatal(err)
+	}
+	copy(b.Bytes(), s)
+	return b
+}
+
 // TestGuardPanicWipesAndRepanics checks the crash path: live locked buffers are
 // destroyed and the panic continues, so a crash does not become a silent
 // success.
 func TestGuardPanicWipesAndRepanics(t *testing.T) {
-	buf, err := NewLockedFrom([]byte("panic time secret"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	buf := lockedSecret(t, "panic time secret")
 
 	func() {
 		defer func() {
@@ -141,28 +132,51 @@ func TestGuardPanicWipesAndRepanics(t *testing.T) {
 	}()
 }
 
+// TestCleanupRunsTheHooks checks what the signal handler and GuardPanic run on
+// the way out: every hook still registered, newest first, each once, then the
+// wipe. A hook that was removed, because what it undoes is already undone, does
+// not run, and one that panics does not keep the rest from running.
+func TestCleanupRunsTheHooks(t *testing.T) {
+	var order []string
+	buf := lockedSecret(t, "cleanup secret")
+	OnCleanup(func() { order = append(order, "first") })
+	removed := OnCleanup(func() { order = append(order, "removed") })
+	OnCleanup(func() { panic("a hook that fails") })
+	OnCleanup(func() { order = append(order, "last") })
+	removed()
+	removed()
+
+	Cleanup()
+	Cleanup()
+	if got := strings.Join(order, ","); got != "last,first" {
+		t.Fatalf("hooks ran as %q, want last,first, once each", got)
+	}
+	if b := buf.Bytes(); b != nil && !bytes.Equal(b, make([]byte, len(b))) {
+		t.Fatalf("the locked buffer survived the cleanup: %q", b)
+	}
+}
+
+// TestGuardPanicRunsTheHooks checks a crash undoes what the hooks undo, such as
+// a terminal mode, before the panic carries on.
+func TestGuardPanicRunsTheHooks(t *testing.T) {
+	ran := false
+	OnCleanup(func() { ran = true })
+	func() {
+		defer func() { _ = recover() }()
+		defer GuardPanic()
+		panic("crash")
+	}()
+	if !ran {
+		t.Fatal("GuardPanic did not run the cleanup hooks")
+	}
+}
+
 // TestDisableCoreDumps checks the hardening call succeeds or reports why, on
 // every platform.
 func TestDisableCoreDumps(t *testing.T) {
 	if err := DisableCoreDumps(); err != nil {
 		t.Logf("core dumps could not be disabled here: %v", err)
 	}
-}
-
-// TestLockedReportsWhetherMemoryIsPinned checks the flag callers use to decide
-// whether to warn, on a buffer that really was allocated.
-func TestLockedReportsWhetherMemoryIsPinned(t *testing.T) {
-	b, err := NewLocked(64)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer b.Destroy()
-	if len(b.Bytes()) != 64 {
-		t.Fatalf("buffer is %d bytes", len(b.Bytes()))
-	}
-	// Locking can legitimately fail on a restricted system; the flag just has to
-	// tell the truth rather than panic.
-	t.Logf("locked: %v", b.Locked())
 }
 
 // Bytes hands out a slice the caller can use like any other, and Free releases

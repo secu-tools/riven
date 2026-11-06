@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/secu-tools/riven/internal/shamir"
+	"github.com/secu-tools/riven/internal/testkit"
 )
 
 // TestChunkedSharesRevealNothingBelowTheThreshold checks that cutting a large
@@ -44,7 +45,7 @@ func TestChunkedSharesRevealNothingBelowTheThreshold(t *testing.T) {
 	const sample = 1 << 14
 	for c := 0; c < chunks; c++ {
 		ys, _ := chunkOf(shares[0], c)
-		if chi := chiSquare(ys[:sample]); chi > 400 {
+		if chi := testkit.ChiSquare(ys[:sample]); chi > 400 {
 			t.Fatalf("chunk %d of one share is not uniform (chi-square %.0f)", c+1, chi)
 		}
 
@@ -67,7 +68,7 @@ func TestChunkedSharesRevealNothingBelowTheThreshold(t *testing.T) {
 		if zeros > sample/20 {
 			t.Fatalf("chunk %d: %d shares give back %d of %d secret bytes", c+1, k-1, zeros, sample)
 		}
-		if chi := chiSquare(guess); chi > 400 {
+		if chi := testkit.ChiSquare(guess); chi > 400 {
 			t.Fatalf("chunk %d: %d shares interpolate to a skewed value (chi-square %.0f)", c+1, k-1, chi)
 		}
 	}
@@ -84,21 +85,4 @@ func TestChunkedSharesRevealNothingBelowTheThreshold(t *testing.T) {
 	if same > len(first)/20 {
 		t.Fatalf("two chunks of one share agree on %d of %d bytes", same, len(first))
 	}
-}
-
-// chiSquare measures how far the byte distribution of b is from uniform. With 255
-// degrees of freedom a uniform source lands near 255; 400 is over six standard
-// deviations above that.
-func chiSquare(b []byte) float64 {
-	var counts [256]int
-	for _, v := range b {
-		counts[v]++
-	}
-	expect := float64(len(b)) / 256
-	chi := 0.0
-	for _, c := range counts {
-		d := float64(c) - expect
-		chi += d * d / expect
-	}
-	return chi
 }

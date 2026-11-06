@@ -42,17 +42,6 @@ func NewLocked(size int) (*LockedBuffer, error) {
 	return b, nil
 }
 
-// NewLockedFrom copies src into a fresh locked buffer and then zeros src.
-func NewLockedFrom(src []byte) (*LockedBuffer, error) {
-	b, err := NewLocked(len(src))
-	if err != nil {
-		return nil, err
-	}
-	copy(b.Bytes(), src)
-	Zero(src)
-	return b, nil
-}
-
 // Bytes returns the usable slice. It aliases the locked memory; do not retain it
 // past Destroy. Returns nil after Destroy.
 func (b *LockedBuffer) Bytes() []byte {
@@ -62,13 +51,6 @@ func (b *LockedBuffer) Bytes() []byte {
 		return nil
 	}
 	return b.mem[:b.n:b.n]
-}
-
-// Locked reports whether the memory was successfully pinned.
-func (b *LockedBuffer) Locked() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.locked
 }
 
 // Wipe zeros the contents but keeps the memory mapped.

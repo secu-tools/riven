@@ -15,9 +15,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/secu-tools/riven/internal/core"
+	"github.com/secu-tools/riven/internal/pieceio"
 )
 
 var binPath string
@@ -278,7 +282,7 @@ func TestKeylessNeedsNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("keyless split: %v\n%s", err, o)
 	}
-	if !strings.Contains(o, "split only, no encryption and no password") {
+	if !strings.Contains(o, "none: no password") || !strings.Contains(o, "warning: no password") {
 		t.Fatalf("summary should say the mode plainly:\n%s", o)
 	}
 
@@ -346,19 +350,21 @@ func TestHybridWithHiddenAlgorithms(t *testing.T) {
 	}
 	// Verification must succeed: the KEM layer's algorithm has to be resolved
 	// consistently, not left unset.
-	if !strings.Contains(o, "Verification: PASSED") {
+	if !strings.Contains(o, "verified  yes") {
 		t.Fatalf("verification did not pass:\n%s", o)
 	}
-	// The summary must name the recipient layer so the user knows what to pass.
-	if !strings.Contains(o, "recipient key (x-wing)") {
-		t.Fatalf("summary should name the recipient layer:\n%s", o)
+	// The summary must name the recipient layer and the algorithm it got, so the
+	// user knows what to pass.
+	m := regexp.MustCompile(`x-wing recipient key\s+\(([a-z0-9-]+)\)`).FindStringSubmatch(o)
+	if m == nil {
+		t.Fatalf("summary should name the recipient layer and its algorithm:\n%s", o)
 	}
 
 	// Both algorithms plus the private key reconstruct it.
 	stdout, _, err := rivenRaw(t, env1, "combine",
 		filepath.Join(out, "h.bin.1"), filepath.Join(out, "h.bin.2"),
 		"--password-env", flagPw1, "--identity", priv,
-		"--algo", "chacha20-poly1305,aes-256-gcm", "-y")
+		"--algo", "chacha20-poly1305,"+m[1], "-y")
 	if err != nil {
 		t.Fatalf("combine: %v", err)
 	}
@@ -465,15 +471,18 @@ func TestMixedLayerCascade(t *testing.T) {
 	if err != nil {
 		t.Fatalf("split: %v\n%s", err, o)
 	}
-	// The summary must list four layers in the order the flags were given.
-	for _, want := range []string{
-		"1. ", "2. ", "3. ", "4. ",
-		"x-wing", "ml-kem-1024",
-		"Every recipient private key listed above is required",
-	} {
-		if !strings.Contains(o, want) {
-			t.Fatalf("summary missing %q:\n%s", want, o)
+	// The summary must list four layers in the order the flags were given. It
+	// wraps to the terminal, so it is read as one line.
+	flat := strings.Join(strings.Fields(o), " ")
+	order := []string{"layers password (", "x-wing recipient key (", "ml-kem-1024 recipient key (",
+		"password (", "every private key is needed"}
+	at := 0
+	for _, want := range order {
+		i := strings.Index(flat[at:], want)
+		if i < 0 {
+			t.Fatalf("summary missing %q in order:\n%s", want, o)
 		}
+		at += i + len(want)
 	}
 
 	p1 := filepath.Join(out, "board.bin.1")
@@ -623,7 +632,7 @@ func TestAutomationOutputIsExact(t *testing.T) {
 		t.Fatalf("standard output was not byte exact:\ngot  %q\nwant %q", stdout, payload)
 	}
 	// Commentary belongs on standard error only.
-	if len(stderr) == 0 || !bytes.Contains(stderr, []byte("recovered")) {
+	if len(stderr) == 0 || !bytes.Contains(stderr, []byte("bytes written to standard output")) {
 		t.Fatalf("expected a note on standard error, got %q", stderr)
 	}
 
@@ -736,6 +745,61 @@ func TestHelpListsRegistryContents(t *testing.T) {
 	}
 }
 
+// qrEdgeLen returns how long an input named name must be for its unpadded pieces
+// to fit in a QR code while the size class they pad up to does not. A piece
+// records the build's version and commit, so its size is measured rather than
+// assumed: each unpadded split corrects the length, and one is returned only
+// once a split has shown its piece lands in that window.
+func qrEdgeLen(t *testing.T, dir, name string) int {
+	t.Helper()
+	limit := pieceio.QRMaxBytes
+	under := limit
+	for core.BucketFor(under, core.DefaultPadPercent) > limit {
+		under--
+	}
+	if under == limit {
+		t.Fatalf("the QR capacity of %d bytes is a size class, so padding cannot push a piece past it", limit)
+	}
+
+	// Aim for the middle of the window, between the class under the limit and the
+	// limit itself. Below a Shamir chunk a byte of content adds one to a piece, so
+	// the second split should land there.
+	target := (under + 1 + limit) / 2
+	n := 2048
+	for try := 1; ; try++ {
+		got := unpaddedPieceLen(t, filepath.Join(dir, fmt.Sprintf("probe%d", try)), name, n)
+		if got > under && got <= limit {
+			return n
+		}
+		if try == 3 {
+			t.Fatalf("%d bytes of content make a %d-byte piece, still outside %d to %d",
+				n, got, under+1, limit)
+		}
+		n += target - got
+	}
+}
+
+// unpaddedPieceLen splits n bytes, named name, into dir without padding and
+// returns the length of a piece.
+func unpaddedPieceLen(t *testing.T, dir, name string, n int) int {
+	t.Helper()
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	in := writeFile(t, dir, name, make([]byte, n))
+	out := filepath.Join(dir, "out")
+	if o, err := riven(t, env1, "split", in, "-n", "3", "-k", "2",
+		"--password-env", flagPw1, "--kdf", cheapKDF, "--pad", "none",
+		"--format", "binary", "--out", out, "-y"); err != nil {
+		t.Fatalf("unpadded split of %d bytes: %v\n%s", n, err, o)
+	}
+	fi, err := os.Stat(filepath.Join(out, name+".1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return int(fi.Size())
+}
+
 // TestQRPaddingInteraction covers the one place where two features work against
 // each other: padding is still applied when exporting to QR, so a piece that
 // would fit can be pushed over the limit. Nothing may be half-written, and the
@@ -744,7 +808,7 @@ func TestQRPaddingInteraction(t *testing.T) {
 	dir := t.TempDir()
 	// Sized so the unpadded pieces fit in a QR code but the next size class does
 	// not: the natural piece is under the limit, the padded one is over it.
-	data := make([]byte, 2682)
+	data := make([]byte, qrEdgeLen(t, dir, "edge.bin"))
 	rand.Read(data)
 	in := writeFile(t, dir, "edge.bin", data)
 
@@ -753,7 +817,7 @@ func TestQRPaddingInteraction(t *testing.T) {
 	// depends only on the length.
 	out := filepath.Join(dir, "padded")
 	o, err := riven(t, env1, "split", in, "-n", "3", "-k", "2",
-		"--password-env", flagPw1, "--kdf", "m=8,t=1,p=1",
+		"--password-env", flagPw1, "--kdf", cheapKDF,
 		"--format", "qr", "--out", out, "-y")
 	if err == nil {
 		t.Fatalf("padding should push this input past the QR limit:\n%s", o)
@@ -771,13 +835,13 @@ func TestQRPaddingInteraction(t *testing.T) {
 	for run := 0; run < 3; run++ {
 		out := filepath.Join(dir, fmt.Sprintf("z%d", run))
 		if o, err := riven(t, env1, "split", in, "-n", "3", "-k", "2",
-			"--password-env", flagPw1, "--kdf", "m=8,t=1,p=1", "--pad", "none",
+			"--password-env", flagPw1, "--kdf", cheapKDF, "--pad", "none",
 			"--format", "qr", "--out", out, "-y"); err != nil {
 			t.Fatalf("run %d: --pad none should always fit here: %v\n%s", run, err, o)
 		}
 		got, _, err := rivenRaw(t, env1, "combine",
 			filepath.Join(out, "edge.bin.1.png"), filepath.Join(out, "edge.bin.2.png"),
-			"--password-env", flagPw1, "--kdf", "m=8,t=1,p=1", "-y")
+			"--password-env", flagPw1, "--kdf", cheapKDF, "-y")
 		if err != nil {
 			t.Fatalf("run %d: combine from QR: %v", run, err)
 		}
@@ -791,7 +855,7 @@ func TestQRPaddingInteraction(t *testing.T) {
 	rand.Read(big)
 	bigIn := writeFile(t, dir, "big.bin", big)
 	o, err = riven(t, env1, "split", bigIn, "-n", "3", "-k", "2",
-		"--password-env", flagPw1, "--kdf", "m=8,t=1,p=1", "--pad", "none",
+		"--password-env", flagPw1, "--kdf", cheapKDF, "--pad", "none",
 		"--format", "qr", "--out", filepath.Join(dir, "big"), "-y")
 	if err == nil {
 		t.Fatal("a 20 KB input must not fit in a QR code")

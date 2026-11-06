@@ -53,9 +53,62 @@ func WipeAll() {
 	}
 }
 
+var (
+	hookMu   sync.Mutex
+	hooks    []*hook
+	hookNext int
+)
+
+// hook is one cleanup registered with OnCleanup.
+type hook struct {
+	id int
+	fn func()
+}
+
+// OnCleanup registers fn to run if the process is cut short: by a signal the
+// cleanup handler catches, or by a panic GuardPanic sees. It is for undoing what
+// must not outlive the process, such as a terminal left in a mode the shell does
+// not expect. The returned function removes fn once it is no longer needed; it
+// is safe to call more than once.
+func OnCleanup(fn func()) (remove func()) {
+	hookMu.Lock()
+	defer hookMu.Unlock()
+	hookNext++
+	h := &hook{id: hookNext, fn: fn}
+	hooks = append(hooks, h)
+	return func() {
+		hookMu.Lock()
+		defer hookMu.Unlock()
+		for i, other := range hooks {
+			if other.id == h.id {
+				hooks = append(hooks[:i], hooks[i+1:]...)
+				return
+			}
+		}
+	}
+}
+
+// Cleanup runs every registered hook, newest first and each once, then wipes
+// every locked buffer. It is what the signal handler and GuardPanic do before
+// the process ends. A hook that panics is passed over so the rest, and the
+// wipe, still run.
+func Cleanup() {
+	hookMu.Lock()
+	pending := hooks
+	hooks = nil
+	hookMu.Unlock()
+	for i := len(pending) - 1; i >= 0; i-- {
+		func() {
+			defer func() { _ = recover() }()
+			pending[i].fn()
+		}()
+	}
+	WipeAll()
+}
+
 // InstallCleanup suppresses core dumps and installs an interrupt/terminate
-// handler that wipes all secrets before exiting. It returns a stop function
-// that removes the handler (call it before a normal exit).
+// handler that runs Cleanup before exiting. It returns a stop function that
+// removes the handler (call it before a normal exit).
 func InstallCleanup() (stop func()) {
 	_ = DisableCoreDumps()
 
@@ -63,7 +116,7 @@ func InstallCleanup() (stop func()) {
 	notifySignals(ch)
 	go func() {
 		if _, ok := <-ch; ok {
-			WipeAll()
+			Cleanup()
 			os.Exit(130)
 		}
 	}()
@@ -79,13 +132,13 @@ func InstallCleanup() (stop func()) {
 	}
 }
 
-// GuardPanic wipes all secrets if the current goroutine is unwinding a panic,
-// then re-raises it. Defer it at the top of any goroutine that touches secrets:
+// GuardPanic runs Cleanup if the current goroutine is unwinding a panic, then
+// re-raises it. Defer it at the top of any goroutine that touches secrets:
 //
 //	defer memory.GuardPanic()
 func GuardPanic() {
 	if r := recover(); r != nil {
-		WipeAll()
+		Cleanup()
 		panic(r)
 	}
 }

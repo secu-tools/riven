@@ -16,7 +16,7 @@
 > Every piece records the program version and commit hash that wrote it, and
 > `riven info PIECE` prints them, so you can find the matching binary or check
 > out that commit and build it. Those fields sit inside the sealed metadata, so
-> `info` can only read them while the piece still opens with your password --
+> `info` can only read them while the piece still opens with your password or key --
 > **run it once now and keep the output**, rather than counting on it after
 > something has gone wrong. Keeping a copy of the binary you split with is the
 > one measure that always works.
@@ -31,30 +31,42 @@ random data.
 
 - **Shamir secret sharing** -- choose how many pieces exist (N) and how many are
   needed (K). Below K, a piece tells you nothing about the content.
-- **Layers** -- protect the content with one password, or stack several layers,
-  each keyed by a password or by someone's public key, so two people must
-  cooperate. Or use no password at all and let the threshold be the only
-  protection.
-- **Files or text** -- split a file, a string, or whatever another program pipes
-  in; recover it to a file or straight to standard output for the next command.
-  The file's name travels inside the encrypted metadata, so a reconstruction
-  restores it.
-- **Post-quantum** -- 256-bit symmetric keys with Argon2id, plus recipient key
-  layers built on the standard library's HPKE (RFC 9180): X-Wing (ML-KEM-768 with
-  X25519) by default, or ML-KEM-768/1024, X25519, P-256, P-384. Usable alongside
-  passwords or on their own, so a recipient needs only their private key.
-- **Six transport formats** -- a binary file, base64 for messengers, base32 for
-  copying by hand, BIP-39 words for writing out by hand, a QR code image, or a
-  printable recovery sheet. Formats can be mixed when reconstructing, and the text
-  formats carry a checksum so a typo is reported as such.
+- **[Two methods](docs/usage.md#method)** -- `full` (the default, and the safer)
+  makes each piece a share of the whole file, so fewer than K reveal nothing,
+  and that is mathematically proven. `compact` makes each piece about 1/K of the
+  file, for large files and QR codes; below K it relies on the encryption
+  (AES-256 and ChaCha20) holding.
+- **[Layers](docs/usage.md#layers)** -- protect the content with one password,
+  or stack several layers, each keyed by a password or by someone's public key,
+  so two people must cooperate. Or use [no password at
+  all](docs/usage.md#split-only-with-no-password) and let the threshold be the
+  only protection.
+- **[Files or text](docs/usage.md#what-to-split)** -- split a file, a string, or
+  whatever another program pipes in; recover it to a file or straight to
+  standard output for the next command. The file's name travels inside the
+  encrypted metadata, so a reconstruction restores it.
+- **[Post-quantum](docs/usage.md#keygen)** -- 256-bit symmetric keys with
+  Argon2id, plus recipient key layers built on the standard library's HPKE (RFC
+  9180): X-Wing (ML-KEM-768 with X25519) by default, or ML-KEM-768/1024, X25519,
+  P-256, P-384. Usable alongside passwords or on their own, so a recipient needs
+  only their private key.
+- **[Six transport formats](docs/usage.md#export-formats)** -- a binary file,
+  base64 for messengers, base32 for copying by hand, BIP-39 words for writing
+  out by hand, a QR code image, or a printable recovery sheet. Formats can be
+  mixed when reconstructing, and the text formats carry a checksum so a typo is
+  reported as such.
 - **Stealth** -- a piece has no header, magic bytes, or extension signature; it
-  looks like random noise unless you have the password. Padding rounds every
-  piece up to a size class, so its length gives only a range.
-- **Wizard** -- run `riven <file>` and answer a few questions (Enter takes the
-  default). Everything the wizard asks can also be passed as a flag, so any
-  workflow can be fully automated.
-- **Tab completion** -- `riven completion bash|zsh|fish|powershell`, generated
-  from the parser's own flag tables so it cannot fall behind.
+  looks like random noise unless you have the password or key that opens it
+  (or, for `--info public` and `none`, the tool; see [what one piece
+  shows](docs/usage.md#what-one-piece-shows)).
+  [Padding](docs/usage.md#piece-size) rounds every piece up to a size class, so
+  its length gives only a range.
+- **[Wizard](docs/usage.md#the-wizard)** -- run `riven <file>` and answer a few
+  questions (Enter takes the default). Everything the wizard asks can also be
+  passed as a flag, so any workflow can be fully automated.
+- **[Tab completion](docs/usage.md#completion)** --
+  `riven completion bash|zsh|fish|powershell`, generated from the parser's own
+  flag tables so it cannot fall behind.
 
 ## Install
 
@@ -105,15 +117,15 @@ riven split secret.pdf -n 5 -k 3 --keyless -y
 riven combine secret.pdf.1 secret.pdf.3 secret.pdf.4 -y > recovered.pdf
 ```
 
-Inspect a single piece (needs the password):
+Inspect a single piece (needs the first layer's password, or its key with
+`--identity`, unless the set was split with `--info public`):
 
 ```
 riven info secret.pdf.2
 ```
 
-Riven splits one file. To split a directory, pack it into an archive yourself
-first, with whatever compression you prefer -- every piece is a full copy of the
-input, so a smaller archive means N smaller pieces:
+Riven splits one file. To split a directory, pack it into an archive first
+([why compressing pays](docs/usage.md#splitting-a-directory)):
 
 ```
 tar -czf wallet.tar.gz ./wallet
@@ -134,39 +146,17 @@ Generate a post-quantum recipient key pair:
 riven keygen
 ```
 
+Pieces in different formats can be combined together, since the format is read
+from the content:
+
+```
+riven combine piece.1 piece.2.png piece.3.txt
+```
+
 Turn on tab completion:
 
 ```
 source <(riven completion bash)        # or zsh, fish, powershell
-```
-
-## Export formats
-
-Each piece can be written as any combination of:
-
-| Format | File | Size | Use |
-|--------|------|------|-----|
-| binary | `secret.pdf.1` | 1.0x | default; smallest |
-| base64 | `secret.pdf.1.txt` | 1.4x | paste into a messenger, or print |
-| base32 | `secret.pdf.1.b32.txt` | 2.0x | copy by hand; one case, grouped in fours |
-| words | `secret.pdf.1.words.txt` | 4.7x | write out by hand as BIP-39 words; up to 4096 bytes per piece |
-| qr | `secret.pdf.1.png` | n/a | scan from paper; holds up to 2952 bytes per piece |
-| sheet | `secret.pdf.1.html` | n/a | print: QR code, text and instructions on a page |
-
-`words` is by far the largest form and exists only for a small secret that has to
-be transcribed by a person; use `base32` for anything else. The export menu marks
-a format the pieces are too large for, and states what each one costs -- the word
-count, or the number of printed pages -- before you pick it.
-
-QR error correction is chosen automatically: the strongest level that still
-fits, so small pieces tolerate ~30% damage and only near-capacity pieces drop to
-the weakest level (which Riven warns about, since it matters when printing).
-
-When reconstructing, the input format is detected from the content, so pieces can
-be mixed freely:
-
-```
-riven combine piece.1 piece.2.png piece.3.txt
 ```
 
 ## Scripting
@@ -194,80 +184,45 @@ See [docs/usage.md](docs/usage.md) for all flags.
 The input is cascade-encrypted, the ciphertext is split into N shares, and each
 share is sealed in an authenticated envelope. Rebuilding needs **K pieces AND
 every password** (AND every recipient private key, if any were used). A single
-piece with the password shows only its own metadata -- which piece it is, how
-many are needed, whether it is intact -- never the content.
+piece shows at most its own details -- which piece it is, how many are needed,
+whether it is intact -- never the content.
 
 Two consequences worth knowing before you start:
 
-- **A leaked password alone is worthless.** Without K pieces there is nothing to
-  decrypt, at any computational cost, now or against a quantum attacker. K pieces
-  without the password are equally useless.
+- **A leaked password alone is worthless.** Without K pieces there is nothing the
+  password can decrypt. K pieces without the password are equally useless.
 - **Each piece is about the size of the whole input**, not `size / N`, so N
   pieces cost roughly N times the original. A 1 GB file into 5 pieces writes five
   ~1 GB files. That is what makes fewer than K pieces reveal nothing.
-
-Every piece of a set is the same size, and splitting the same input again gives
-that size again. `--pad` sets how coarse the size class is: 1 percent by default,
-up to 500 for a vaguer answer, or `none` for exact sizes.
-
-Each piece records the algorithms, the Argon2id cost and the input file's name by
-default, so the password is all you need and `combine` offers the original name
-back. It is offered rather than used unasked, because the name came from whoever
-wrote the pieces. Withhold any of them (`--record-algo false`, `--record-kdf false`,
-`--record-name false`) and the first two become a second secret to supply with
-`--algo` or `--kdf`.
-
-`--keyless` uses no password: any K pieces rebuild the file, fewer than K reveal
-nothing about the content.
-
-Its metadata is readable, by design. There is no password to ask for, so
-`riven info` on a single piece tells you what it is: which set it belongs to,
-which piece it is, how many more you need, and the original file name. That is
-the point -- a keyless piece found later is identifiable rather than an anonymous
-blob of noise. The content is not readable, nor is its exact length, and a single
-piece cannot even confirm a guess of it.
-
-A keyless set is also unauthenticated: substituted pieces rebuild without
-complaint. This is not a gap that can be closed. Authentication needs a secret
-the attacker does not have, and keyless means you hold none -- a key built into
-Riven would be in the source and in every binary, so it would authenticate
-nothing. One password layer gives both encryption and authentication; that is
-the fix when you need it.
-
-Layers stack in any order, each keyed by a password or a recipient key:
-
-```
-riven split board.pdf -n 4 -k 2 --password-env PW --recipient alice.pub --recipient bob.pub -y
-```
-
-That needs the password and both private keys.
+  `--method compact` trades that for pieces of about 1/K of the input; the
+  [method](docs/usage.md#method) section says what it gives up.
 
 ## Security notes
 
 - Choose strong passwords, or let Riven generate them (`--generate`, or press
-  Enter at the prompt). Generated passwords are shown once, and under `-y` are
-  printed to standard output one per line -- they are the **only** way to recover
-  your data, and are stored nowhere else.
-- Passwords may be in any language: a password is read as UTF-8 and normalized
-  (NFC) before use, so the same characters open the pieces however they are typed.
+  Enter at the prompt). A generated password is shown once and stored nowhere
+  else: it is the **only** way to recover your data
+  ([passwords](docs/usage.md#passwords)).
 - Store pieces and passwords separately. Losing more than N-K pieces, or any
   password, makes the data unrecoverable by design.
-- Plan for the storage: N pieces take about N times the size of the original.
-- Plan for the memory too: a split holds the shares at once, so it needs roughly
-  `(N+3)` times the input size. See
-  [docs/usage.md](docs/usage.md#large-inputs) for what to do about a large file.
+- Plan for the memory: a split holds the shares at once, so it needs roughly
+  `(N+2)` times the input, or about 3 times with `--method compact`
+  ([large inputs](docs/usage.md#large-inputs)).
 - Passwords are held in locked memory that stays out of swap, and are wiped on
   exit, on Ctrl-C, and on panic. Keys, plaintext and shares are zeroed as soon as
   they are done with, but are not pinned: they can be gigabytes. Core dumps are
   disabled.
-- A single leaked piece is worth nothing: below K it reveals nothing about the
-  content, which is a property of Shamir secret sharing rather than of this tool.
-  More in [docs/faq.md](docs/faq.md#security).
+- What a leaked piece or a leaked password is worth, and what is not covered:
+  [docs/faq.md](docs/faq.md#security) and [SECURITY.md](SECURITY.md).
 
 ## Documentation
 
-- [docs/faq.md](docs/faq.md) -- size, formats, what a leaked piece is worth
-- [docs/usage.md](docs/usage.md) -- commands and every flag
+- [docs/usage.md](docs/usage.md) -- commands, every flag, and what each choice
+  trades
+- [docs/faq.md](docs/faq.md) -- short answers: size, formats, what a leaked piece
+  is worth
+- [SECURITY.md](SECURITY.md) -- what Riven claims, what it does not, and how to
+  report a break
 - [docs/format.md](docs/format.md) -- byte-level piece format
 - [docs/compilation.md](docs/compilation.md) -- building and cross-compiling
 - [docs/testing.md](docs/testing.md) -- running the test suites

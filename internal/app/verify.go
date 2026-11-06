@@ -24,7 +24,7 @@ func cmdVerify(opts *cliOptions) error {
 		return err
 	}
 	if len(opts.files) == 0 {
-		return errors.New("verify needs at least one piece: riven verify PIECE...")
+		return errors.New("verify needs pieces: the piece files, or a folder of them")
 	}
 	out := msgWriter(opts)
 
@@ -41,9 +41,14 @@ func cmdVerify(opts *cliOptions) error {
 	}
 	defer wipe()
 
-	noteExpensiveOpen(raw, open.Params)
-
 	sets, unreadable := groupBySet(out, pieces, open)
+	defer func() {
+		for _, set := range sets {
+			for _, p := range set {
+				p.Wipe()
+			}
+		}
+	}()
 	if len(sets) == 0 {
 		return errors.New("no piece could be opened; check the password and the files")
 	}
@@ -51,8 +56,9 @@ func cmdVerify(opts *cliOptions) error {
 	// same one worked. Saying so turns "wrong password" into "damaged file",
 	// which is the difference between retrying and fetching another copy.
 	if unreadable > 0 {
-		fmt.Fprintf(out, "\n  %d piece(s) failed while others opened with the same password,\n"+
-			"  so those files are damaged rather than wrongly keyed.\n", unreadable)
+		fmt.Fprintln(out)
+		warn(out, fmt.Sprintf("%d piece(s) did not open although others did with the same answers, "+
+			"so those files are damaged rather than wrongly keyed.", unreadable))
 	}
 
 	failed := unreadable > 0
@@ -67,25 +73,21 @@ func cmdVerify(opts *cliOptions) error {
 	return nil
 }
 
-// opened pairs a piece with what its manifest says.
-type opened struct {
-	piece []byte
-	info  *core.PieceInfo
-}
-
-// groupBySet opens each piece and files it under its set id. It returns the
-// number of pieces that could not be opened, which is a failure the caller
-// reports even when the sets that did open are complete.
-func groupBySet(out io.Writer, items []heldPiece, open core.OpenOptions) (map[string][]opened, int) {
-	sets := map[string][]opened{}
+// groupBySet opens each piece and files it under its set id. The pieces stay
+// open, so a rebuild does not derive their keys again; the caller wipes them. It
+// returns the number of pieces that could not be opened, which is a failure the
+// caller reports even when the sets that did open are complete.
+func groupBySet(out io.Writer, items []heldPiece, open core.OpenOptions) (map[string][]*core.Piece, int) {
+	sets := map[string][]*core.Piece{}
 	unreadable := 0
 	for _, item := range items {
-		info, err := core.Info(item.bytes, open)
+		p, err := core.Open(item.bytes, open)
 		if err != nil {
-			writeWrapped(out, "  ", fmt.Sprintf("%q: FAILED to open (%v)", item.det.Path, err))
+			writeWrapped(out, "  ", paint(out, toneError, "FAILED:")+" "+pieceFailure(item.det.Path, err))
 			unreadable++
 			continue
 		}
+		info := p.Info
 		status := "intact"
 		if !info.Intact {
 			status = "DAMAGED"
@@ -94,18 +96,23 @@ func groupBySet(out io.Writer, items []heldPiece, open core.OpenOptions) (map[st
 		if !item.det.Verified {
 			checked = ", no checksum in this format"
 		}
-		writeWrapped(out, "  ", fmt.Sprintf("%q: piece %d of %d, %s, read as %s%s",
-			item.det.Path, info.Serial, info.N, status, item.det.Format, checked))
+		which := fmt.Sprintf("piece %d of %d", info.Serial, info.N)
+		if info.Hidden {
+			which = "piece of a set with hidden details"
+		}
+		writeWrapped(out, "  ", fmt.Sprintf("%q: %s, %s, read as %s%s",
+			item.det.Path, which, status, item.det.Format, checked))
 		if !info.Intact {
+			p.Wipe()
 			unreadable++
 			continue
 		}
-		sets[info.SetID] = append(sets[info.SetID], opened{piece: item.bytes, info: info})
+		sets[info.SetID] = append(sets[info.SetID], p)
 	}
 	return sets, unreadable
 }
 
-func sortedSetIDs(sets map[string][]opened) []string {
+func sortedSetIDs(sets map[string][]*core.Piece) []string {
 	ids := make([]string, 0, len(sets))
 	for id := range sets {
 		ids = append(ids, id)
@@ -117,43 +124,51 @@ func sortedSetIDs(sets map[string][]opened) []string {
 // verifySet reports whether one set can be rebuilt, reconstructing it when
 // enough distinct pieces are present. It returns false when the set is short or
 // the reconstruction fails.
-func verifySet(out io.Writer, id string, held []opened, open core.OpenOptions) bool {
-	// One piece per serial: a second copy of a piece adds nothing to a rebuild.
-	distinct := map[int][]byte{}
-	for _, h := range held {
-		if _, ok := distinct[h.info.Serial]; !ok {
-			distinct[h.info.Serial] = h.piece
-		}
+//
+// Rebuilding in memory is the only check that covers the shares as well as the
+// envelopes, so it is worth the work when the pieces are there. A set whose
+// pieces do not say how many it needs or which piece each is can only be told
+// by rebuilding, so its shortfall is reported without a count.
+func verifySet(out io.Writer, id string, held []*core.Piece, open core.OpenOptions) bool {
+	first := held[0].Info
+	if first.Hidden {
+		fmt.Fprintln(out)
+		heading(out, fmt.Sprintf("Set %s: %d piece(s) held; the set hides how many it needs.", id[:8], len(held)))
+		return reportRebuild(out, held, open)
 	}
-	need, total := held[0].info.K, held[0].info.N
-	short := need - len(distinct)
-
-	fmt.Fprintf(out, "\nSet %s: %d of %d distinct pieces held, %d needed of %d.\n",
-		id[:8], len(distinct), total, need, total)
-	if short > 0 {
-		fmt.Fprintf(out, "  NOT ENOUGH: %d more piece(s) required to rebuild.\n", short)
+	// One piece per serial: a second copy of a piece adds nothing to a rebuild.
+	distinct := map[int]bool{}
+	for _, p := range held {
+		distinct[p.Info.Serial] = true
+	}
+	fmt.Fprintln(out)
+	heading(out, fmt.Sprintf("Set %s: %d of %d pieces held, %d needed.", id[:8], len(distinct), first.N, first.K))
+	if short := first.K - len(distinct); short > 0 {
+		fmt.Fprintf(out, "  %s %d more piece(s) required to rebuild.\n", paint(out, toneWarning, "NOT ENOUGH:"), short)
 		return false
 	}
+	return reportRebuild(out, held, open)
+}
 
-	// Rebuilding in memory is the only check that covers the shares as well as
-	// the envelopes, so it is worth the work when the pieces are there.
-	subset := make([][]byte, 0, need)
-	for _, piece := range distinct {
-		if len(subset) == need {
-			break
-		}
-		subset = append(subset, piece)
-	}
-	recovered, err := core.Combine(subset, open)
+// reportRebuild rebuilds in memory from pieces already open and says how it
+// went.
+func reportRebuild(out io.Writer, pieces []*core.Piece, open core.OpenOptions) bool {
+	recovered, _, err := core.CombineOpened(pieces, open)
 	if err != nil {
-		if errors.Is(err, core.ErrKeyRequired) {
-			fmt.Fprintln(out, "  pieces are consistent; a recipient private key is needed to rebuild.")
+		switch {
+		case errors.Is(err, core.ErrKeyRequired):
+			fmt.Fprintf(out, "  %s the pieces agree; rebuilding needs a recipient private key.\n",
+				paint(out, toneGood, "OK:"))
 			return true
+		case errors.Is(err, core.ErrTooFewPieces):
+			fmt.Fprintf(out, "  %s these pieces do not rebuild it; more are required.\n",
+				paint(out, toneWarning, "NOT ENOUGH:"))
+			return false
 		}
-		fmt.Fprintf(out, "  FAILED to rebuild: %v\n", err)
+		writeWrapped(out, "  ", paint(out, toneError, "FAILED")+" to rebuild: "+humanize(err))
 		return false
 	}
 	defer memory.Zero(recovered)
-	fmt.Fprintf(out, "  OK: these pieces rebuild %d bytes.\n", len(recovered))
+	fmt.Fprintf(out, "  %s these pieces rebuild %d bytes.\n", paint(out, toneGood, "OK:"), len(recovered))
 	return true
 }

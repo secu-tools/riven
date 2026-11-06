@@ -82,7 +82,7 @@ func TestUsageCoversEveryFlag(t *testing.T) {
 		"--password-env", "--generate", "--recipient", "--identity",
 		"--out", "--format", "--qr-scale", "--kdf",
 		"--record-algo", "--record-kdf",
-		"--pad", "--pub", "--priv", "-y",
+		"--pad", "--pub", "--priv", "-y", "--no-color",
 	}
 	for _, f := range flags {
 		if !strings.Contains(out, f) {

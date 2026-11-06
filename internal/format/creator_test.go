@@ -17,16 +17,18 @@ import (
 func TestCreatorFieldsAreNotPassedThroughToTheTerminal(t *testing.T) {
 	evil := "\x1b]0;PWNED\x07\x1b[31mriven 9.9 - VERIFIED\x1b[0m"
 	piece, err := Encode(EncodeInput{
-		SetID:          make([]byte, SetIDLen),
-		K:              2,
-		N:              3,
-		Serial:         1,
-		Keyless:        true,
-		PayloadHash:    make([]byte, hashLen),
-		Share:          []byte("xxxxxxxxxx"),
-		CreatorVersion: evil,
-		CreatorCommit:  "\x1b[32mdeadbeef",
-		Params:         kdf.Default(),
+		Details: Details{
+			K:              2,
+			N:              3,
+			CreatorVersion: evil,
+			CreatorCommit:  "\x1b[32mdeadbeef",
+			Params:         kdf.Default(),
+		},
+		SetID:       make([]byte, SetIDLen),
+		Serial:      1,
+		Keyless:     true,
+		PayloadHash: make([]byte, hashLen),
+		Share:       []byte("xxxxxxxxxx"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -54,16 +56,18 @@ func TestCreatorFieldsAreNotPassedThroughToTheTerminal(t *testing.T) {
 // An ordinary version and commit must come back untouched.
 func TestOrdinaryCreatorFieldsRoundTrip(t *testing.T) {
 	piece, err := Encode(EncodeInput{
-		SetID:          make([]byte, SetIDLen),
-		K:              2,
-		N:              3,
-		Serial:         1,
-		Keyless:        true,
-		PayloadHash:    make([]byte, hashLen),
-		Share:          []byte("xxxxxxxxxx"),
-		CreatorVersion: "v1.2.3.9",
-		CreatorCommit:  "cea8ee0c0cad+dirty",
-		Params:         kdf.Default(),
+		Details: Details{
+			K:              2,
+			N:              3,
+			CreatorVersion: "v1.2.3.9",
+			CreatorCommit:  "cea8ee0c0cad+dirty",
+			Params:         kdf.Default(),
+		},
+		SetID:       make([]byte, SetIDLen),
+		Serial:      1,
+		Keyless:     true,
+		PayloadHash: make([]byte, hashLen),
+		Share:       []byte("xxxxxxxxxx"),
 	})
 	if err != nil {
 		t.Fatal(err)

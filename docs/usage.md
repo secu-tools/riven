@@ -9,6 +9,11 @@ and every flag has a matching wizard question. `-y` (`--yes`) takes defaults for
 anything still unanswered and never prompts: if a required value is missing it
 fails with a message naming the flag to use.
 
+Messages fold to the width of the window. On a terminal, errors, warnings and
+finished steps are coloured; the words say the same without it. Colour is left
+out when the output goes to a file or a pipe, when `NO_COLOR` is set, when
+`TERM=dumb`, and with `--no-color`.
+
 ## What to split
 
 The data can come from three places:
@@ -35,8 +40,9 @@ riven split wallet.tar.gz -n 5 -k 3 --password-env PW -o ./pieces -y
 ```
 
 The archive format and the compression are yours to choose. Compress if you can:
-every piece is a full copy of the input, so halving the archive halves all N of
-them, and the memory a split needs with it (see [Large inputs](#large-inputs)).
+every piece is as large as the input (1/K of it with `--method compact`), so
+halving the archive halves all N of them, and the memory a split needs with it
+(see [Large inputs](#large-inputs)).
 
 ## How a split is protected
 
@@ -75,9 +81,11 @@ riven split deal.pdf -n 3 -k 2 --recipient alice.pub --recipient bob.pub -y
 riven combine deal.pdf.1 deal.pdf.2 --identity alice.key --identity bob.key -y
 ```
 
-`--algo` names the algorithm per layer, positionally; unnamed layers get one
-chosen. Neighbouring layers may not share an algorithm, so a weakness in one does
-not carry through the cascade.
+`--algo` names the algorithm per layer, positionally. Unnamed layers take
+AES-256-GCM, XChaCha20-Poly1305 and Twofish-256-GCM in turn, three different
+designs, skipping one that shares a design with the layer above. Neighbouring
+layers may not share an algorithm, so a weakness in one does not carry through
+the cascade.
 
 ```
 --algo chacha20-poly1305,aes-256-gcm,xchacha20-poly1305,twofish-256-gcm
@@ -86,8 +94,91 @@ not carry through the cascade.
 ### Split only, with no password
 
 `--keyless` writes pieces with no encryption and no password. Any K pieces rebuild
-the file; fewer reveal nothing. The trade-off: anyone who gathers K pieces succeeds,
-and anyone holding this tool can recognise a keyless piece. K must be at least 2.
+the file; fewer reveal nothing. K must be at least 2. The trade-offs:
+
+- **Anyone who gathers K pieces succeeds.** The threshold is the only lock.
+- **A piece says what it is.** With no password to ask for, `riven info` on one
+  piece shows which set it belongs to, which piece it is, how many more are needed
+  and the original file name, so a piece found later is identifiable rather than
+  an anonymous blob of noise. `--info none` hides that. Either way the content and
+  its exact length stay unreadable, and one piece cannot even confirm a guess of
+  the content.
+- **Nothing authenticates the set.** Substituted pieces rebuild without complaint.
+  That cannot be fixed without a secret: a key built into Riven would be in the
+  source and in every binary, so it would authenticate nothing. One password layer
+  gives both encryption and authentication.
+
+### Method
+
+Many secret-sharing tools encrypt the file, split only the key, and put the whole
+encrypted file in every piece, so one piece holds everything an attacker needs
+except the key. Riven spreads the encrypted file itself over the pieces, in one of
+two ways, chosen with `--method`:
+
+| | `full` (default) | `compact` |
+|---|---|---|
+| Each piece holds | a share of the whole encrypted file | a share of the keys, and 1/K of the encrypted file |
+| Piece size | the whole file | about 1/K of the file |
+| Fewer than K pieces | reveal nothing: mathematically proven | reveal nothing while AES-256 and ChaCha20 stay unbroken |
+| K pieces | as strong as your passwords and keys | the same |
+
+`full` is the safer method. Fewer than K of its pieces hold no ciphertext at all,
+only shares that fit every possible content equally well, so no computer and no
+future attack, quantum ones included, can read anything from them. Use it whenever
+the file is small enough, which is most secrets.
+
+`compact` trades that proof for size. Use it for large files, or to fit a QR code:
+a 3-of-5 set of a 6,000 byte file gives pieces of about 2,350 bytes instead of
+6,300.
+The content is sealed under two fresh random keys with different ciphers,
+AES-256-GCM then XChaCha20-Poly1305, and an all-or-nothing transform, then cut
+into N fragments, any K of which rebuild it; only the keys are Shamir-shared. A
+partial set has neither the keys nor the whole of the sealed data, so reading it
+would take breaking both ciphers.
+
+Both methods work with or without a password: your password and key layers, if
+any, still go on underneath.
+
+### What one piece shows
+
+`--info` decides who can read a piece's details: which piece it is, how many are
+needed, the layers and the file name. The Argon2id cost stays readable, because
+a password is stretched before anything opens; only `--record-kdf false` or
+`none` keeps it off a piece.
+
+| `--info` | Details readable by | One stolen piece can be used to try passwords |
+|---|---|---|
+| `protected` (default) | whoever holds the first layer's password or private key | the first layer's, if it is a password |
+| `strict` | whoever holds every password and private key the set takes | only all of them at once, and only with every key |
+| `public` (default with `--keyless`) | anyone with Riven | no |
+| `none` | nobody: `info` shows only the set id | no |
+
+`protected` asks for one secret, the one the first `--password-env` or
+`--recipient` names, so its holder can tell what a piece is without the others.
+`strict` asks for everything rebuilding asks for. Details sealed to a private key
+cost each piece one more encapsulated key (see [keygen](#keygen)).
+
+Where one piece can be used to try passwords, each guess costs one Argon2id
+derivation, and a correct one gives the details, not the content, which still
+needs K pieces and the other layers. A generated password makes this moot.
+
+`public` helps recovery: a piece found later says what it is and which build
+wrote it. `none` gives nothing away, so `verify` cannot say how many pieces a
+short set still needs, and recovery sheets leave out the piece number, the counts
+and the file name. It needs `-k 2` or more: at `-k 1` every piece is the whole
+set.
+
+### What each piece records
+
+Each piece records the algorithms, the Argon2id cost and the input file's name by
+default, so the password is all you need and `combine` offers the original name
+back. It is offered rather than used unasked, because the name came from whoever
+wrote the pieces (see [Where the recovered file is
+written](#where-the-recovered-file-is-written)). Withhold any of them with
+`--record-algo false`, `--record-kdf false` or `--record-name false`; the first
+two then have to be supplied with `--algo` or `--kdf` when combining. That adds
+little secrecy: there are only 256 possible costs, and the default algorithms are
+the first an attacker would try.
 
 ## split
 
@@ -103,14 +194,16 @@ riven FILE                     # same thing via the wizard
 | `--password-env NAME` | add a password layer, read from environment `NAME` | one password layer |
 | `--recipient FILE` | add a recipient layer using that public key | none |
 | `--algo a,b,c` | algorithm per layer, in order | chosen automatically |
-| `--keyless` | no encryption and no password | off |
+| `--keyless` | no encryption and no password (see [Split only](#split-only-with-no-password)) | off |
+| `--method full\|compact` | how the content is spread over the pieces (see [Method](#method)) | `full` |
+| `--info protected\|strict\|public\|none` | who can read a piece's details (see [What one piece shows](#what-one-piece-shows)) | `protected`, or `public` with `--keyless` |
 | `-f, --format LIST` | `binary`, `base64`, `base32`, `qr`, `sheet`, `words`, `all`, or a comma-separated subset | `binary` |
 | `--qr-scale N` | QR module size in pixels | 8 |
 | `--kdf SPEC` | Argon2id cost: a preset name or `m=<MiB>,t=<passes>,p=<lanes>` | `recommended` |
-| `--record-algo true\|false` | write the algorithms into each piece | `true` |
+| `--record-algo true\|false` | write the algorithms into each piece (see [What each piece records](#what-each-piece-records)) | `true` |
 | `--record-kdf true\|false` | write the Argon2id cost into each piece | `true` |
 | `--identity FILE` | your private key, so the split can be fully verified | none |
-| `--pad PCT` | class width in whole percent; `0` or `none` drops the size class | `1` |
+| `--pad PCT` | class width in whole percent; `0` or `none` drops the size class (see [Piece size](#piece-size)) | `1` |
 | `--verify true\|false` | re-read the pieces and rebuild the original before reporting success (`-v` alone turns it on, `--no-verify` off) | `true` |
 | `--generate` | generate strong password(s) instead of prompting | off |
 | `-t, --text STRING` | split this string instead of a file | none |
@@ -120,8 +213,9 @@ riven FILE                     # same thing via the wizard
 | `-o, --out DIR` | output directory for pieces | the input file's directory |
 | `-y, --yes` | non-interactive; defaults, no prompts | off |
 
-Pieces are written as `FILE.01`, `FILE.02`, ... (numbers zero-padded to the width
-of N), plus the extension for each format (see [Export formats](#export-formats)).
+Pieces are written as `FILE.1`, `FILE.2`, ..., zero-padded to the width of N
+(`FILE.01` from ten pieces up), plus the extension for each format (see [Export
+formats](#export-formats)).
 If files with those names already exist, Riven asks before replacing them, since
 they are probably an earlier set; under `-y` they are replaced.
 
@@ -136,7 +230,7 @@ behind one question:
 
 ```
 Security:
-  1) recommended: encrypt with one password (chacha20-poly1305)
+  1) recommended: encrypt with one password (aes-256-gcm)
   2) advanced: several layers, each a password or a recipient key
   3) no encryption: split only, no password, any K pieces rebuild the file
 ```
@@ -144,8 +238,11 @@ Security:
 Option 2 then asks, for each layer, whether it is keyed by a password or a
 recipient key, which algorithm to use, and where the password or key comes from. It
 can generate a key pair on the spot if you do not have one. After the layers it
-asks what to record, the Argon2id cost, and the size padding. Passing any of those
-as a flag skips the matching question.
+asks the method, what one piece shows, what to record, the Argon2id cost, and the
+size padding. Passing any of those as a flag skips the matching question. The
+recommended option asks none of them and uses the defaults. When a password is
+already given with `--password-env`, option 3 is not offered, since it would
+drop that password.
 
 ## combine
 
@@ -170,20 +267,29 @@ A directory may be given instead of the pieces. The files directly inside it are
 read (it does not descend into subdirectories), anything that is not a piece is
 ignored, and a piece exported in several formats is counted once. That last part
 matters: opening a piece costs a full key derivation, so a folder written with
-`--format all` would otherwise cost five times what it should.
+`--format all` would otherwise cost six times what it should.
 
 ```
 riven combine ./pieces --password-env PW --out recovered.pdf -y
 ```
 
-Keyless sets need no password and are opened without asking for anything. Private
-keys can be given in any order: Riven works out which layer each one belongs to.
+Keyless sets need no password and are opened without asking for anything. A set
+split with `--info public` or `--info none` opens without a password too, then
+asks for exactly as many as its layers need; under `-y` it names
+`--password-env` instead. So does a set whose details are sealed to a recipient
+key alone, once `--identity` has opened it. At the prompt, the first password
+alone opens a protected set, and the rest are then asked for. Private keys can be
+given in any order: Riven works out which layer each one belongs to.
 
 A damaged piece is skipped with a warning when enough intact pieces remain, so a
 spare piece is worth keeping.
 
-When a set omitted its algorithms or cost, an interactive run asks for them; with
-`-y` it fails and names the flag instead.
+When a set omitted its algorithms or cost, an interactive run asks for them, once
+each, at the point the set turns out to need them; with `-y` it fails and names
+the flag instead. Each piece is opened once whatever is asked. A run with no
+`--password-env` tries every piece without a password first and asks only if some
+piece needs one; when some pieces open without a password and others do not, it
+says so, and Enter alone means the set has none.
 
 ### Where the recovered file is written
 
@@ -235,8 +341,9 @@ riven verify ./pieces  --password-env RIVEN_PW    # the folder, on any shell
 ```
 
 A set that is short of the threshold is reported with the number still needed,
-which is the point of running it. A piece that is damaged, or that belongs to
-another set, is named.
+which is the point of running it. A set split with `--info none` hides that
+number, so it is only reported as short. A piece that is damaged, or that belongs
+to another set, is named.
 
 ## info
 
@@ -247,9 +354,14 @@ riven info DIR [options]
 
 Takes the same password, `--algo`, `--kdf`, and `--identity` flags as `combine`.
 Opens each piece and prints the transport form it detected, the set id, which piece
-it is and how many are needed, whether it is intact, the payload size, a payload id
-shared by pieces of the same file, the recorded file name if there is one, the
-layers (when recorded), and the Argon2id cost. Passing several pieces also groups them by set. No content is revealed.
+it is and how many are needed, whether it is intact, the method, the recorded
+file name if there is one, the layers (when recorded), and the Argon2id cost.
+Passing several pieces also groups them by set. No content is revealed.
+
+A `protected` piece needs its first layer's password or `--identity` key, and a
+`strict` one every password and key its set takes. One split with `--info public`
+needs none of them. One split with `--info none` shows its set id and nothing
+else, with or without them.
 
 ## keygen
 
@@ -272,45 +384,54 @@ riven keygen -o ./keys       # riven-key.pub and riven-key.key under ./keys
 riven keygen x25519 --pub alice.pub --priv alice.key -y
 ```
 
-| Type | Post-quantum | Public key | Added to every piece |
-|------|--------------|------------|----------------------|
-| `x-wing` (default) | yes, plus classical | 1216 bytes | 1120 bytes |
-| `ml-kem-768` | yes | 1184 bytes | 1088 bytes |
-| `ml-kem-1024` | yes | 1568 bytes | 1568 bytes |
-| `x25519` | no | 32 bytes | 32 bytes |
-| `p256` | no | 65 bytes | 65 bytes |
-| `p384` | no | 97 bytes | 97 bytes |
+| Type | Post-quantum | Public key | Added to every piece | When the details are sealed to it too |
+|------|--------------|------------|----------------------|---------------------------------------|
+| `x-wing` (default) | yes, plus classical | 1216 bytes | 1120 bytes | 2240 bytes |
+| `ml-kem-768` | yes | 1184 bytes | 1088 bytes | 2176 bytes |
+| `ml-kem-1024` | yes | 1568 bytes | 1568 bytes | 3136 bytes |
+| `x25519` | no | 32 bytes | 32 bytes | 64 bytes |
+| `p256` | no | 65 bytes | 65 bytes | 130 bytes |
+| `p384` | no | 97 bytes | 97 bytes | 194 bytes |
 
 `x-wing` (ML-KEM-768 with X25519) holds as long as either of them does. Use it
 unless you have a reason not to. The `ml-kem-*` types are post-quantum only;
 `x25519`, `p256` and `p384` are not post-quantum and exist for existing keys and
 small pieces.
 
-Size matters because the encapsulated key rides in **every** piece. Largest
-content that still fits one QR code, measured with `--pad none` and no recorded
-file name (a recorded name takes its length off these):
+Size matters because the encapsulated key rides in **every** piece, and twice
+when the envelope that keeps the details is sealed to the key as well: under the
+default `--info protected` when the key is the first layer, and under
+`--info strict`. Largest content that still fits one QR code, measured with
+`--pad none`, no recorded file name (a recorded name takes its length off these),
+and the key as the only layer, so carried twice. The compact columns are for 2 of
+3; a higher threshold fits about K times the content, less the overhead:
 
-| Type | Weakest (L) | Strongest (H) |
-|------|-------------|---------------|
-| `x25519` | 2695 B | 1015 B |
-| `p256` | 2662 B | 982 B |
-| `p384` | 2630 B | 950 B |
-| `ml-kem-768` | 1639 B | does not fit |
-| `x-wing` | 1607 B | does not fit |
-| `ml-kem-1024` | 1159 B | does not fit |
+| Type | `full`, weakest (L) | `full`, strongest (H) | `compact`, L | `compact`, H |
+|------|---------------------|-----------------------|--------------|--------------|
+| `x25519` | 2655 B | 975 B | 5141 B | 1781 B |
+| `p256` | 2589 B | 909 B | 5042 B | 1682 B |
+| `p384` | 2525 B | 845 B | 4946 B | 1586 B |
+| `ml-kem-768` | 543 B | does not fit | 1973 B | does not fit |
+| `x-wing` | 479 B | does not fit | 1877 B | does not fit |
+| `ml-kem-1024` | does not fit | does not fit | 533 B | does not fit |
 
-A post-quantum recipient set can still go on paper, but only with weak error
-correction and a small payload; `x25519` is the comfortable choice for print.
-Padding applies on top of these figures.
+Carrying the key once, under `--info public` or `none` or behind a password as
+the first layer, adds its size back in the `full` columns and about twice that in
+the `compact` ones. A post-quantum recipient set can still go on paper, but only
+with weak error correction, a small payload, and `--method compact` or the key
+carried once; `x25519` is the comfortable choice for print. Padding applies on
+top of these figures.
 
 Splitting and combining need no type flag: each key file names its type in its
 label, and key lengths are distinct per type, so a mislabelled file is refused.
-Using a key of the wrong type reports the size the data actually needs.
+When the details are not sealed to it, a key of the wrong type reports the size
+the data actually needs; a piece whose details are sealed to it just does not
+open.
 
 ## Passwords
 
 - Interactive entry is masked with `*`, and new passwords must be confirmed.
-- Press Enter at a password prompt to generate a strong random one.
+- Press Enter at a split's password prompt to generate a strong random one.
 - For automation, `--password-env NAME` is the only source. Environment variables
   leave no copy on disk and, unlike command-line arguments, do not appear in the
   process list. Repeat the flag once per password layer, in outer-to-inner order.
@@ -377,27 +498,33 @@ the file size. Shamir gives every share the full length of the payload, so N sha
 of an X byte input are N*X bytes on their own. A split needs roughly
 
 ```
-(N + 3) * input size
+full:     (N + 2) * input size
+compact:  (2 + 2/K) * input size (3 times at -k 2, 4 at -k 1)
 ```
 
-which is the input, the encrypted payload, the N shares, and one piece being
-written. A 1 GiB file into 5 pieces needs about 8 GiB. Above 64 MiB the split
-prints the figure before it starts.
+The content is encrypted straight into what is shared or dispersed, so it is
+never held twice. For the full method that is the input, the encrypted payload
+and the N shares, with one piece being written once the payload is gone: a 1 GiB
+file into 5 pieces needs about 7 GiB. The compact method holds the input and the
+sealed data, then works out each piece's fragment only when that piece is
+written, so the piece count does not add to it: the same file needs about 3 GiB
+at any N. Above 64 MiB the split prints the figure before it starts.
 
 Pieces are written and released one at a time rather than all being held, so the
 export format count does not add to this, and neither does the piece count beyond
 its share. `combine` needs the K pieces it was given plus one copy of the result.
 
-The N*X floor is a property of Shamir sharing, not of this implementation, so
-files far past available memory are out of reach for the current piece format.
-Raising that ceiling needs a chunked format, where the payload is sharded and
-sealed a block at a time; that is a format change and is not implemented.
+The N*X floor of the full method is a property of Shamir sharing, not of this
+implementation. Both methods work in memory, so files far past available memory
+are out of reach for the current piece format. Raising that ceiling needs a
+chunked format, where the payload is sharded and sealed a block at a time; that
+is a format change and is not implemented.
 
 Practical guidance:
 
 - Under about a tenth of free memory, divided by N: no thought needed.
 - Larger than that: compress first (`tar -czf`, `zstd`), which shrinks the input
-  and therefore every share.
+  and therefore every share, or use `--method compact`.
 - Much larger: split an encrypted container, or split the key to one, rather than
   the data. A key is a few dozen bytes at any file size, and that also puts QR,
   `sheet` and `words` back within reach.
@@ -423,8 +550,8 @@ The wizard asks the same thing and accepts either numbers or names, mixed:
 choice costs for the pieces at hand: a format the pieces are too large for is
 marked `NOT AVAILABLE` with the size and the limit, and `words` gives the word
 count per piece. A note too long to sit beside its entry takes the line under
-it, and the listing as a whole is folded to the width of the terminal. The same limits are enforced for `--format`, before any file is
-written.
+it, and the listing is folded to the width of the terminal. The same limits are
+enforced for `--format`, before any file is written.
 
 The three text formats carry a checksum, so a mistyped character is reported as a
 damaged file rather than as a wrong password. It sits inside the encoded text, so
@@ -460,11 +587,11 @@ as a low-quality JPEG. It rectifies the image from the code's own finder pattern
 before decoding, so a steep angle is not a problem in itself.
 
 Size is what decides how forgiving it is. Up to about 400 bytes per piece, even a
-poor photograph reads. Larger symbols have smaller modules, so past roughly 900
-bytes a very steep angle stops working and the shot needs to be flatter and
-sharper. The split summary says so when the pieces cross that size. If a set has
-to survive being photographed casually, use more pieces of a smaller file, or an
-`x25519` recipient key rather than a post-quantum one.
+poor photograph reads. Larger symbols have smaller modules, so a very steep angle
+stops working and the shot needs to be flatter and sharper; the split summary
+warns when the pieces are over 400 bytes. If a set has to survive being
+photographed casually, keep the pieces small: a smaller file, `--method compact`
+with a higher K, or an `x25519` recipient key rather than a post-quantum one.
 
 QR export is all or nothing: if any piece is too large, nothing is written and the
 error names the piece and the overshoot. A set where only some pieces have a QR
@@ -480,6 +607,9 @@ input that fails will always fail.
 size fits. With a wider class than the default, a narrower one such as `--pad 1`
 may be enough. The error says which to try. The cost of `none` is that the piece
 length then follows the content length.
+
+When the content is simply too large, `--method compact` makes each piece about
+1/K of it, which the error also suggests.
 
 ### sheet
 
@@ -497,8 +627,8 @@ It degrades rather than failing as pieces grow:
 |------------|--------------|
 | up to 2952 bytes | QR code plus text |
 | larger | text only, with the missing code explained on the page |
-| more than about 780 bytes per page | a warning to keep the pages together and in order |
-| over 16 pages, about 17 KB | refused: use `base32` or `binary` |
+| over about 880 bytes, more than one page | a warning to keep the pages together and in order |
+| over 16 pages, about 14 KB | refused: use `base32` or `binary` |
 
 The split reports the page count when a piece runs to more than one page, since
 losing one page of a piece loses the piece.
@@ -561,7 +691,7 @@ Single password, 3-of-5:
 riven split notes.txt -n 5 -k 3 --password-env PW -y
 ```
 
-Two password layers with generated passwords, all three formats:
+Two password layers with generated passwords, in every format:
 
 ```
 riven split vault.db -n 4 -k 2 --algo chacha20-poly1305,twofish-256-gcm \

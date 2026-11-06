@@ -15,7 +15,8 @@ go test -tags scripts ./tests/scripts/             # the build scripts, against 
 ## What the tiers cover
 
 - **Unit** (`internal/*/`) -- each package against its own contract: the pipeline
-  in every mode, the byte format against [format.md](format.md), padding, the
+  in every mode, both split methods and every `--info` setting, the dispersal and
+  the all-or-nothing package, the byte format against [format.md](format.md), padding, the
   transport encodings, key types, the CLI surface, and the stealth properties
   (no constant offsets, uniform bytes, nothing recognisable in a piece), that
   fewer than K pieces reveal nothing, every order of the algorithms, and that
@@ -26,7 +27,8 @@ go test -tags scripts ./tests/scripts/             # the build scripts, against 
 - **End to end** (`tests/e2e/`) -- the compiled binary, driven as a user drives it:
   every algorithm and key type, the export formats and mixed input, text and
   standard input, keygen, completion scripts, the `-y` output contract, the
-  failure paths, and rebuilding pieces from [format.md](format.md) alone.
+  failure paths, and rebuilding pieces from [format.md](format.md) alone, compact
+  sets with hidden details included.
 - **Smoke** (`tests/smoke/`) -- the binary starts, answers, and exits correctly.
 - **Build scripts** (`tests/scripts/`) -- build.sh and build.ps1, run against a
   copy of the tree: the build number convention, a failed compile, a failed
@@ -41,7 +43,7 @@ offered; a password-sealed set must not open without one.
 ## Fuzzing
 
 Parsers must never panic on hostile input. Targets cover `wire`, `format`,
-`cascade`, `core`, `qrcode` and `pieceio`.
+`cascade`, `core`, `disperse`, `qrcode` and `pieceio`.
 
 ```
 go test -run "^Fuzz" -count=1 ./internal/...                 # seed corpus only

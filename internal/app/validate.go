@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/secu-tools/riven/internal/ciphers"
+	"github.com/secu-tools/riven/internal/core"
 	"github.com/secu-tools/riven/internal/kdf"
 	"github.com/secu-tools/riven/internal/pieceio"
 )
@@ -61,6 +62,10 @@ func validateKeylessConflicts(opts *cliOptions) error {
 		return fmt.Errorf("--keyless uses no password, so --generate does not apply")
 	case opts.recordKDFSet:
 		return fmt.Errorf("--keyless derives no key, so the --record-kdf options do not apply")
+	case opts.infoSet:
+		if info, err := parseInfo(opts.info); err == nil && (info == core.InfoProtected || info == core.InfoStrict) {
+			return fmt.Errorf("--keyless has nothing to protect the details with: use --info public or --info none")
+		}
 	}
 	return nil
 }
@@ -102,6 +107,16 @@ func validateSplitValues(opts *cliOptions) error {
 	}
 	if opts.format != "" {
 		if _, err := pieceio.ParseFormats(opts.format); err != nil {
+			return err
+		}
+	}
+	if opts.methodSet {
+		if _, err := parseMethod(opts.method); err != nil {
+			return err
+		}
+	}
+	if opts.infoSet {
+		if _, err := parseInfo(opts.info); err != nil {
 			return err
 		}
 	}
@@ -148,6 +163,9 @@ func validateOpenOptions(opts *cliOptions) error {
 	if opts.generate {
 		return fmt.Errorf("--generate applies to splitting, not to opening pieces")
 	}
+	if opts.methodSet || opts.infoSet {
+		return fmt.Errorf("--method and --info apply to splitting; a piece records both, so opening needs neither")
+	}
 	if opts.algoSet {
 		if _, err := ciphers.ParseList(opts.algo); err != nil {
 			return err
@@ -183,6 +201,8 @@ func validateKeygenOptions(opts *cliOptions) error {
 		return fmt.Errorf("--format applies to splitting, not to generating a key pair")
 	case opts.padSet:
 		return fmt.Errorf("--pad applies to splitting, not to generating a key pair")
+	case opts.methodSet || opts.infoSet:
+		return fmt.Errorf("--method and --info apply to splitting, not to generating a key pair")
 	case opts.kdfSpec != "":
 		return fmt.Errorf("--kdf applies to splitting, not to generating a key pair")
 	case opts.generate:

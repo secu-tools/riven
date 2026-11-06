@@ -50,7 +50,7 @@ func writePieces(t *testing.T, dir string, pieces [][]byte) []string {
 // generatedPassword finds the password the wizard invented in what it printed.
 func generatedPassword(t *testing.T, stderr string) []byte {
 	t.Helper()
-	const mark = "generated password for auto: "
+	const mark = "generated password for layer 1: "
 	i := strings.Index(stderr, mark)
 	if i < 0 {
 		t.Fatalf("no generated password was shown:\n%s", stderr)
@@ -87,7 +87,7 @@ func TestMenuSplitsAFileThroughTheRecommendedPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("menu split: %v\n%s\n%s", err, out, errOut)
 	}
-	for _, want := range []string{"Done. 3 pieces written", "Verification: PASSED", "one password layer"} {
+	for _, want := range []string{"Done:", "3 pieces of", verifiedYes, "one password layer"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
 		}
@@ -133,6 +133,8 @@ func TestSplitAsksTheAdvancedQuestions(t *testing.T) {
 		"2", "2", // N, K
 		"1", "", "pw-one", "pw-one", "y", // layer 1: password, default algorithm, typed twice, add another
 		"2", "", "", "4", "layerkey", "n", // layer 2: recipient, default algorithm, generate a key, x25519, base name, no more
+		"2",      // the compact method
+		"4",      // nothing shown on a piece (after protected, strict and public)
 		"y", "n", // record the algorithms, not the name
 		"y",  // record the cost (the cost itself came from --kdf)
 		"10", // padding percent
@@ -149,16 +151,16 @@ func TestSplitAsksTheAdvancedQuestions(t *testing.T) {
 		t.Fatalf("advanced split: %v\n%s\n%s", err, out, errOut)
 	}
 	for _, want := range []string{
-		"Layers (outer to inner)", "password", "recipient key (x25519)",
-		"Every recipient private key listed above is required",
-		"Piece size: padded to a 10 percent size class",
-		"Verification: PASSED",
+		"layers", "password (", "x25519 recipient key (",
+		"every private key is needed", "compact: pieces",
+		"hidden: one piece shows nothing", verifiedYes,
 	} {
-		if !strings.Contains(out, want) {
+		// The summary wraps to the terminal, so a phrase may cross a line.
+		if !strings.Contains(strings.Join(strings.Fields(out), " "), want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "File name:") {
+	if strings.Contains(out, " pieces of ") {
 		t.Error("the name was recorded although the answer was no")
 	}
 
@@ -325,15 +327,14 @@ func TestRefuseKeyOverwriteAsksWhenItCan(t *testing.T) {
 	}
 }
 
-// At a terminal the passwords are asked for one layer at a time until an empty
-// line, and at least one is required.
-func TestGatherOpenPasswordsPromptsUntilAnEmptyLine(t *testing.T) {
-	sealed := makePieces(t, core.SplitOptions{N: 2, K: 2,
-		Layers: []core.LayerSpec{{Kind: core.PasswordLayer, Password: []byte("one")}}}, []byte("open"))
-
+// At a terminal the envelope passwords are asked for one layer at a time until
+// an empty line, and at least one is required. The answer is kept, so a command
+// that opens several pieces one at a time asks once.
+func TestEnvelopePasswordsPromptUntilAnEmptyLine(t *testing.T) {
 	var pws [][]byte
 	var err error
-	out := withTerminal(t, "one\ntwo\n\n", func() { pws, err = gatherOpenPasswords(&cliOptions{}, sealed) })
+	p := &prompter{opts: &cliOptions{}}
+	out := withTerminal(t, "one\ntwo\n\n", func() { pws, err = p.envelopePasswords(false) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,16 +344,55 @@ func TestGatherOpenPasswordsPromptsUntilAnEmptyLine(t *testing.T) {
 	if !strings.Contains(out, "Layer 1 password") || !strings.Contains(out, "no more layers") {
 		t.Errorf("the prompts do not explain the loop:\n%s", out)
 	}
+	again := withTerminal(t, "", func() { pws, err = p.envelopePasswords(false) })
+	if err != nil || len(pws) != 2 || again != "" {
+		t.Fatalf("a second call asked again (%q) or lost the answer: %q, %v", again, pws, err)
+	}
 
-	withTerminal(t, "\n", func() { _, err = gatherOpenPasswords(&cliOptions{}, sealed) })
+	withTerminal(t, "\n", func() { _, err = (&prompter{opts: &cliOptions{}}).envelopePasswords(false) })
 	if err == nil || !strings.Contains(err.Error(), "no password entered") {
 		t.Errorf("an immediate empty line must fail: %v", err)
 	}
 
+	// When other pieces opened, an empty line means the set has no password.
+	withTerminal(t, "\n", func() { pws, err = (&prompter{opts: &cliOptions{}}).envelopePasswords(true) })
+	if err != nil || len(pws) != 0 {
+		t.Errorf("Enter on a mixed set should mean no password: %q, %v", pws, err)
+	}
+
 	// Without a terminal there is nobody to ask.
-	if _, err := gatherOpenPasswords(&cliOptions{}, sealed); err == nil ||
+	if _, err := (&prompter{opts: &cliOptions{}}).envelopePasswords(false); err == nil ||
 		!strings.Contains(err.Error(), "--password-env") {
 		t.Errorf("a run with no terminal must name the flag: %v", err)
+	}
+	if _, err := (&prompter{opts: &cliOptions{}}).envelopePasswords(true); err == nil ||
+		!strings.Contains(err.Error(), "leave out the pieces") {
+		t.Errorf("a mixed set with no terminal must say what to do: %v", err)
+	}
+}
+
+// A protected set may be sealed to a private key rather than a password, so when
+// nothing opened, the way out names --identity until one was given, and the
+// password after.
+func TestEnvelopePasswordsNameTheKey(t *testing.T) {
+	var err error
+	withTerminal(t, "\n", func() { _, err = (&prompter{opts: &cliOptions{}}).envelopePasswords(false) })
+	if err == nil || !strings.Contains(err.Error(), "--identity") {
+		t.Errorf("an empty password with no key given must point to --identity: %v", err)
+	}
+	if _, err := (&prompter{opts: &cliOptions{}}).envelopePasswords(false); err == nil ||
+		!strings.Contains(err.Error(), "--identity") {
+		t.Errorf("a run with no terminal and no key must name --identity: %v", err)
+	}
+
+	withKey := &cliOptions{identities: []string{"r.key"}}
+	withTerminal(t, "\n", func() { _, err = (&prompter{opts: withKey}).envelopePasswords(false) })
+	if err == nil || strings.Contains(err.Error(), "--identity") {
+		t.Errorf("with a key given, an empty password must not point to --identity: %v", err)
+	}
+	if _, err := (&prompter{opts: withKey}).envelopePasswords(false); err == nil ||
+		!strings.Contains(err.Error(), "with the key given") || !strings.Contains(err.Error(), "--password-env") {
+		t.Errorf("a run with no terminal and a key that did not open must ask for the password: %v", err)
 	}
 }
 
@@ -556,20 +596,45 @@ func TestWriteRecoveredOffersTheRecordedName(t *testing.T) {
 }
 
 // The cost warning names a slow open before it starts, and only for one.
-func TestNoteExpensiveOpenWarnsAboutACostlySet(t *testing.T) {
-	pieces := makePieces(t, core.SplitOptions{N: 2, K: 2,
-		Layers: []core.LayerSpec{{Kind: core.PasswordLayer, Password: []byte("pw")}}}, []byte("x"))
-
-	out := withTerminal(t, "", func() { noteExpensiveOpen(pieces, nil) })
+func TestNoteCostWarnsAboutACostlySet(t *testing.T) {
+	out := withTerminal(t, "", func() { noteCost(fastKDF) })
 	if out != "" {
 		t.Errorf("a cheap set was warned about:\n%s", out)
 	}
 	costly := kdf.Paranoid
-	out = withTerminal(t, "", func() { noteExpensiveOpen(pieces, &costly) })
+	out = withTerminal(t, "", func() { noteCost(costly) })
 	if !strings.Contains(out, "takes a moment") || !strings.Contains(out, costly.Describe()) {
-		t.Errorf("a costly override was not announced:\n%s", out)
+		t.Errorf("a costly set was not announced:\n%s", out)
 	}
-	if out := withInput(t, "", func() { noteExpensiveOpen(pieces, &costly) }); out != "" {
+	if out := withInput(t, "", func() { noteCost(costly) }); out != "" {
 		t.Errorf("without a terminal there is nobody to warn:\n%s", out)
+	}
+
+	// Through a real combine the warning comes before the derivation, for a set
+	// sealed with a password, given the cost up front.
+	pieces := makePieces(t, core.SplitOptions{N: 2, K: 2,
+		Layers: []core.LayerSpec{{Kind: core.PasswordLayer, Password: []byte("pw")}}}, []byte("x"))
+	open := core.OpenOptions{Passwords: [][]byte{[]byte("pw")}, BeforeDerive: noteCost, Params: &costly}
+	out = withTerminal(t, "", func() { _, _ = core.Combine(pieces, open) })
+	if !strings.Contains(out, "takes a moment") {
+		t.Errorf("a costly combine was not announced:\n%s", out)
+	}
+}
+
+// TestInfoQuestionOffersNothingOnlyFromKTwo checks the info question offers to
+// show nothing only where that can hold: at K 1 every piece is the whole set,
+// and the choice would be refused once the questions were over.
+func TestInfoQuestionOffersNothingOnlyFromKTwo(t *testing.T) {
+	for k, want := range map[int]bool{1: false, 2: true} {
+		plan := &splitPlan{opts: core.SplitOptions{N: 2, K: k,
+			Layers: []core.LayerSpec{{Kind: core.PasswordLayer, Password: []byte("pw")}}}}
+		var err error
+		out := withTerminal(t, "1\n", func() { err = planInfo(plan, &cliOptions{}) })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Contains(out, ") nothing."); got != want {
+			t.Errorf("K %d: nothing offered %v, want %v:\n%s", k, got, want, out)
+		}
 	}
 }

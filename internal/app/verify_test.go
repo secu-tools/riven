@@ -59,6 +59,24 @@ func TestVerifyPassesForACompleteSet(t *testing.T) {
 	}
 }
 
+// TestVerifyAsksForThePasswordOnce checks an interactive verify of a password set
+// asks for the password once: the answer that opened the pieces also rebuilds
+// them, rather than the rebuild asking for it again.
+func TestVerifyAsksForThePasswordOnce(t *testing.T) {
+	dir := t.TempDir()
+	paths := writeSet(t, dir, core.SplitOptions{N: 3, K: 2, Params: fastKDF,
+		Layers: []core.LayerSpec{{Kind: core.PasswordLayer, Password: []byte("asked once")}}},
+		[]byte("verify me"), pieceio.Binary)
+
+	opts := verifyOpts(t, paths[:2])
+	opts.yes = false
+	var err error
+	out := withTerminal(t, "asked once\n\n", func() { err = cmdVerify(opts) })
+	if err != nil || strings.Contains(out, "This set needs") || !strings.Contains(out, "OK: these pieces rebuild") {
+		t.Fatalf("the password was not enough once: %v\n%s", err, out)
+	}
+}
+
 // TestVerifyReportsAShortSet checks the useful case: not a failure of the
 // pieces, but a count of what is missing.
 func TestVerifyReportsAShortSet(t *testing.T) {

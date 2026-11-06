@@ -32,29 +32,28 @@ func makePieces(t *testing.T, opts core.SplitOptions, input []byte) [][]byte {
 	return pieces
 }
 
-// TestLooksKeylessTellsTheModes checks the probe used to decide whether to ask
-// for a password: a keyless set needs none, a password set does.
-func TestLooksKeylessTellsTheModes(t *testing.T) {
+// TestKeylessSetOpensWithoutAQuestion checks the open side tells the modes apart
+// by opening: a keyless set rebuilds with nothing asked and nothing given, and a
+// password set run without a terminal fails naming the flag.
+func TestKeylessSetOpensWithoutAQuestion(t *testing.T) {
 	keyless := makePieces(t, core.SplitOptions{N: 3, K: 2, Keyless: true}, []byte("open"))
-	if !looksKeyless(keyless) {
-		t.Fatal("a keyless set should be recognised")
+	got, _, err := combinePieces(&cliOptions{yes: true}, keyless, nil)
+	if err != nil || string(got) != "open" {
+		t.Fatalf("a keyless set: %q, %v", got, err)
 	}
 	sealed := makePieces(t, core.SplitOptions{N: 3, K: 2,
 		Layers: []core.LayerSpec{{Kind: core.PasswordLayer, Password: []byte("pw")}}}, []byte("open"))
-	if looksKeyless(sealed) {
-		t.Fatal("a password set must not look keyless")
+	if _, _, err := combinePieces(&cliOptions{yes: true}, sealed, nil); err == nil ||
+		!strings.Contains(err.Error(), "--password-env") {
+		t.Fatalf("a password set without a password: %v", err)
 	}
-	if looksKeyless(nil) {
-		t.Fatal("no pieces cannot look keyless")
-	}
-	if looksKeyless([][]byte{[]byte("not a piece")}) {
-		t.Fatal("junk must not look keyless")
+	if _, _, err := combinePieces(&cliOptions{yes: true}, [][]byte{[]byte("not a piece")}, nil); err == nil {
+		t.Fatal("junk was combined")
 	}
 }
 
-// TestGatherOpenPasswords covers where passwords come from when opening: the
-// environment in automation, nothing at all for a keyless set, and a clear
-// refusal when automation has no source.
+// TestGatherOpenPasswords covers where passwords come from up front: the
+// environment, in flag order, or nothing, leaving the question to the open.
 func TestGatherOpenPasswords(t *testing.T) {
 	t.Setenv("RIVEN_UNIT_OPEN1", "one")
 	t.Setenv("RIVEN_UNIT_OPEN2", "two")
@@ -66,32 +65,27 @@ func TestGatherOpenPasswords(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := gatherOpenPasswords(opts, sealed)
+	got, err := gatherOpenPasswords(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 2 || string(got[0]) != "one" || string(got[1]) != "two" {
 		t.Fatalf("passwords are %q, want them in flag order", got)
 	}
-
-	keyless := makePieces(t, core.SplitOptions{N: 3, K: 2, Keyless: true}, []byte("open"))
-	pws, err := gatherOpenPasswords(&cliOptions{yes: true}, keyless)
-	if err != nil {
-		t.Fatalf("a keyless set should need no password: %v", err)
-	}
-	if len(pws) != 0 {
-		t.Fatal("a keyless set should return no passwords")
+	if got, _, err := combinePieces(opts, sealed, nil); err == nil {
+		t.Fatalf("two passwords for a one-layer set rebuilt %q", got)
 	}
 
-	if _, err := gatherOpenPasswords(&cliOptions{yes: true}, sealed); err == nil {
-		t.Fatal("automation with no password source must fail")
+	pws, err := gatherOpenPasswords(&cliOptions{yes: true})
+	if err != nil || len(pws) != 0 {
+		t.Fatalf("no flag should give no password and no error: %q, %v", pws, err)
 	}
 
 	missing, err := parseArgs([]string{"combine", "a", "--password-env", "RIVEN_UNIT_NOT_SET"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := gatherOpenPasswords(missing, sealed); err == nil {
+	if _, err := gatherOpenPasswords(missing); err == nil {
 		t.Fatal("an unset environment variable must fail")
 	}
 }
@@ -122,28 +116,12 @@ func TestResolveOpenKeys(t *testing.T) {
 	}
 }
 
-func TestLayerCountReadsTheSet(t *testing.T) {
-	pieces := makePieces(t, core.SplitOptions{N: 3, K: 2, Layers: []core.LayerSpec{
-		{Kind: core.PasswordLayer, Password: []byte("a")},
-		{Kind: core.PasswordLayer, Password: []byte("b")},
-	}}, []byte("layers"))
-	open := core.OpenOptions{Passwords: [][]byte{[]byte("a"), []byte("b")}}
-	n, err := layerCount(pieces, open)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n != 2 {
-		t.Fatalf("layer count is %d, want 2", n)
-	}
-	if _, err := layerCount(pieces, core.OpenOptions{Passwords: [][]byte{[]byte("wrong")}}); err == nil {
-		t.Fatal("a wrong password must not yield a layer count")
-	}
-}
-
-// TestCombineWithRecoveryNeedsTheHiddenAlgorithms checks that a set which did
-// not record its algorithms fails in automation with the error naming that
-// cause, and succeeds once the algorithms are supplied.
-func TestCombineWithRecoveryNeedsTheHiddenAlgorithms(t *testing.T) {
+// TestCombineNeedsTheHiddenAlgorithms checks that a set which did not record its
+// algorithms fails in automation with the error naming the flag and the layer
+// count, and succeeds once the algorithms are supplied.
+func TestCombineNeedsTheHiddenAlgorithms(t *testing.T) {
+	t.Setenv("RIVEN_UNIT_HA1", "a")
+	t.Setenv("RIVEN_UNIT_HA2", "b")
 	ids := ciphers.Cascade(2)
 	pws := [][]byte{[]byte("a"), []byte("b")}
 	pieces, err := core.Split([]byte("hidden algorithms"), core.SplitOptions{
@@ -157,13 +135,21 @@ func TestCombineWithRecoveryNeedsTheHiddenAlgorithms(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	open := core.OpenOptions{Passwords: pws}
-	if _, _, err := combineWithRecovery(&cliOptions{yes: true}, pieces[:2], open); err == nil {
-		t.Fatal("automation cannot guess the algorithms")
+	args := []string{"combine", "p", "--password-env", "RIVEN_UNIT_HA1", "--password-env", "RIVEN_UNIT_HA2", "-y"}
+	opts, err := parseArgs(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := combinePieces(opts, pieces[:2], nil); err == nil ||
+		!strings.Contains(err.Error(), "--algo") || !strings.Contains(err.Error(), "2 needed") {
+		t.Fatalf("automation cannot guess the algorithms: %v", err)
 	}
 
-	open.Schemes = ids
-	got, _, err := combineWithRecovery(&cliOptions{yes: true}, pieces[:2], open)
+	opts, err = parseArgs(append(args, "--algo", ciphers.Name(ids[0])+","+ciphers.Name(ids[1])))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := combinePieces(opts, pieces[:2], nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +217,7 @@ func TestPrintPieceInfoStatesWhatOnePieceReveals(t *testing.T) {
 	buf.ReadFrom(r)
 	out := buf.String()
 
-	for _, want := range []string{"3 of 5", "need any 3", "intact", "set id", "chacha20-poly1305"} {
+	for _, want := range []string{"3 of 5", "need any 3", "intact", "set id", ciphers.Default().Name} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("info is missing %q:\n%s", want, out)
 		}

@@ -13,7 +13,6 @@ func TestRoundTrip(t *testing.T) {
 	w.U8(0x12)
 	w.U16(0x3456)
 	w.U32(0x789abcde)
-	w.U64(0x0102030405060708)
 	w.Bytes([]byte("hello"))
 	w.Raw([]byte("tail"))
 	buf := w.Result()
@@ -28,14 +27,11 @@ func TestRoundTrip(t *testing.T) {
 	if v, _ := r.U32(); v != 0x789abcde {
 		t.Fatal("u32")
 	}
-	if v, _ := r.U64(); v != 0x0102030405060708 {
-		t.Fatal("u64")
-	}
 	b, _ := r.Bytes(1024)
 	if !bytes.Equal(b, []byte("hello")) {
 		t.Fatal("bytes")
 	}
-	if !bytes.Equal(r.Rest(), []byte("tail")) {
+	if !bytes.Equal(r.RestView(), []byte("tail")) {
 		t.Fatal("rest")
 	}
 }
@@ -79,10 +75,40 @@ func FuzzReader(f *testing.F) {
 			_, _ = r.U8()
 			_, _ = r.U16()
 			_, _ = r.U32()
-			_, _ = r.U64()
 			_, _ = r.Bytes(1 << 20)
 			_, _ = r.Raw(3)
 		}
-		_ = r.Rest()
+		_ = r.RestView()
 	})
+}
+
+// TestViewsShareTheBuffer checks View and RestView return the bytes in place
+// rather than copies, and that a view cannot grow over the field after it.
+func TestViewsShareTheBuffer(t *testing.T) {
+	w := NewWriter(0)
+	w.Bytes([]byte("first"))
+	w.Bytes([]byte("second"))
+	w.Raw([]byte("rest"))
+	buf := w.Result()
+
+	r := NewReader(buf)
+	first, err := r.View(0)
+	if err != nil || string(first) != "first" {
+		t.Fatalf("view %q, %v", first, err)
+	}
+	first[0] = 'F'
+	if !bytes.Contains(buf, []byte("First")) {
+		t.Fatal("a view is a copy")
+	}
+	_ = append(first, 'X')
+	second, err := r.View(6)
+	if err != nil || string(second) != "second" {
+		t.Fatalf("appending to a view changed the next field: %q, %v", second, err)
+	}
+	if rest := r.RestView(); string(rest) != "rest" || r.Remaining() != 0 {
+		t.Fatalf("rest view %q", rest)
+	}
+	if _, err := NewReader([]byte{0, 0, 0, 3, 1, 2}).View(0); err != ErrTooLarge {
+		t.Fatalf("a view past the buffer: %v", err)
+	}
 }

@@ -99,7 +99,7 @@ func dirPieceFiles(dir string) ([]pieceArg, error) {
 //
 // Repeats are dropped, since one piece exported in several formats decodes to
 // the same bytes. Opening a piece costs a full key derivation, so a directory
-// written with --format all would otherwise cost five times what it should.
+// written with --format all would otherwise cost six times what it should.
 func loadInputs(out io.Writer, args []string, strict bool) ([]heldPiece, error) {
 	inputs, err := expandPieceArgs(args)
 	if err != nil {
@@ -139,6 +139,5 @@ func loadInputs(out io.Writer, args []string, strict bool) ([]heldPiece, error) 
 }
 
 var errSplitDirectory = errors.New(
-	"riven splits one file: pack the directory into an archive first, for example " +
-		"'tar -czf archive.tar.gz DIR', then split that. Compressing as you pack " +
-		"shrinks every piece, since each one is the size of the whole input")
+	"a folder cannot be split: pack it into an archive first, for example " +
+		"'tar -czf archive.tar.gz DIR', and split that (see docs/usage.md)")

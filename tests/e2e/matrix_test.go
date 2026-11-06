@@ -33,9 +33,10 @@ func algorithms(t *testing.T) []string {
 	if !ok {
 		t.Fatal("help has no ALGORITHMS section")
 	}
-	line, _, _ := strings.Cut(rest, "\n")
+	// The list may wrap over several lines; the section ends at a blank one.
+	section, _, _ := strings.Cut(rest, "\n\n")
 	var names []string
-	for _, n := range strings.Split(line, ",") {
+	for _, n := range strings.Split(strings.ReplaceAll(section, "\n", ","), ",") {
 		if n = strings.TrimSpace(n); n != "" {
 			names = append(names, n)
 		}
@@ -46,9 +47,12 @@ func algorithms(t *testing.T) []string {
 	return names
 }
 
-// fastCost keeps Argon2 cheap so a large matrix stays quick. The pipeline being
+// cheapKDF is the Argon2id cost the tests split with, and fastCost the flag that
+// gives it. Argon2 stays cheap so a large matrix stays quick; the pipeline being
 // exercised is the same whatever the cost.
-var fastCost = []string{"--kdf", "m=8,t=1,p=1"}
+const cheapKDF = "m=8,t=1,p=1"
+
+var fastCost = []string{"--kdf", cheapKDF}
 
 // roundTrip splits input with the given flags, reconstructs from two pieces and
 // checks the result. It returns the split output so a caller can assert on the
@@ -64,7 +68,7 @@ func roundTrip(t *testing.T, env []string, name string, input []byte, splitFlags
 	if err != nil {
 		t.Fatalf("split: %v\n%s", err, o)
 	}
-	if !strings.Contains(o, "Verification: PASSED") && !strings.Contains(o, "Verification: pieces open") {
+	if !strings.Contains(o, "verified  yes") && !strings.Contains(o, "verified  partly") {
 		t.Fatalf("split did not verify:\n%s", o)
 	}
 
@@ -225,12 +229,12 @@ func TestMatrixModesAndRecording(t *testing.T) {
 			[]string{"--password-env", flagPw1, "--password-env", flagPw2, "--algo", pair}},
 		{"no cost",
 			[]string{"--password-env", flagPw1, "--record-kdf", "false"},
-			[]string{"--password-env", flagPw1, "--kdf", "m=8,t=1,p=1"}},
+			[]string{"--password-env", flagPw1, "--kdf", cheapKDF}},
 		{"neither",
 			[]string{"--password-env", flagPw1, "--password-env", flagPw2, "--algo", pair,
 				"--record-algo", "false", "--record-kdf", "false"},
 			[]string{"--password-env", flagPw1, "--password-env", flagPw2, "--algo", pair,
-				"--kdf", "m=8,t=1,p=1"}},
+				"--kdf", cheapKDF}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

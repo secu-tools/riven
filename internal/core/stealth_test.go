@@ -40,6 +40,13 @@ func splitModes(t *testing.T, input []byte, n, k int) map[string][][]byte {
 			{Kind: RecipientLayer, Recipient: priv.Public()},
 		}},
 		"keyless": {N: n, K: k, Keyless: true},
+		"compact": {N: n, K: k, Method: MethodCompact,
+			Layers: []LayerSpec{{Kind: PasswordLayer, Password: []byte("one")}}},
+		"public details": {N: n, K: k, Info: InfoPublic,
+			Layers: []LayerSpec{{Kind: PasswordLayer, Password: []byte("one")}}},
+		"hidden details": {N: n, K: k, Info: InfoHidden, Method: MethodCompact,
+			Layers: []LayerSpec{{Kind: PasswordLayer, Password: []byte("one")}}},
+		"keyless compact hidden": {N: n, K: k, Keyless: true, Method: MethodCompact, Info: InfoHidden},
 	}
 	out := make(map[string][][]byte, len(modes))
 	for name, o := range modes {

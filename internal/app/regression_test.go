@@ -218,9 +218,14 @@ func TestRegressionCombineAsksForAlgorithmsAfterTheCost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("RIVEN_UNIT_RCA", string(pw))
+	opts, err := parseArgs([]string{"combine", "p", "--password-env", "RIVEN_UNIT_RCA"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	var got []byte
 	withTerminal(t, "m=8,t=1,p=1\nchacha20-poly1305\n", func() {
-		got, _, err = combineWithRecovery(&cliOptions{}, pieces, core.OpenOptions{Passwords: [][]byte{pw}})
+		got, _, err = combinePieces(opts, pieces, nil)
 	})
 	if err != nil || !bytes.Equal(got, input) {
 		t.Fatalf("the set did not rebuild through the prompts: %q, %v", got, err)

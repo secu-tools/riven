@@ -274,12 +274,6 @@ func TestSchemeDescription(t *testing.T) {
 		if s.String() != s.Name() {
 			t.Fatalf("%s prints as %q", s.Name(), s.String())
 		}
-		if got := SchemeForCiphertextSize(s.CiphertextSize()); len(got) != 1 || got[0] != s {
-			t.Fatalf("%d bytes resolved to %v, want just %s", s.CiphertextSize(), got, s.Name())
-		}
-	}
-	if got := SchemeForCiphertextSize(7); got != nil {
-		t.Fatalf("an unknown size resolved to %v", got)
 	}
 	// An unregistered scheme must describe itself rather than panic.
 	unknown := Scheme(200)

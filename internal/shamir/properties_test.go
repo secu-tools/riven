@@ -15,6 +15,8 @@ import (
 	"crypto/rand"
 	mathrand "math/rand/v2"
 	"testing"
+
+	"github.com/secu-tools/riven/internal/testkit"
 )
 
 // refMult multiplies in GF(2^8) modulo x^8 + x^4 + x^3 + x + 1 by shift and add,
@@ -142,7 +144,7 @@ func TestFewerThanThresholdSharesRevealNothing(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		forEachSubset(len(shares), k-1, func(idx []int) {
+		testkit.Subsets(len(shares), k-1, func(idx []int) {
 			held := make([][]byte, len(idx))
 			for i, j := range idx {
 				held[i] = shares[j]
@@ -177,7 +179,7 @@ func TestSharesAreUniformWhateverTheSecret(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if chi := chiSquare(shares[0][:size]); chi > 400 {
+			if chi := testkit.ChiSquare(shares[0][:size]); chi > 400 {
 				t.Fatalf("fill=%#02x k=%d: one share is not uniform (chi-square %.0f)", fill, k, chi)
 			}
 			if k > 2 {
@@ -185,7 +187,7 @@ func TestSharesAreUniformWhateverTheSecret(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if chi := chiSquare(guess); chi > 400 {
+				if chi := testkit.ChiSquare(guess); chi > 400 {
 					t.Fatalf("fill=%#02x k=%d: %d shares interpolate to a skewed value (chi-square %.0f)",
 						fill, k, k-1, chi)
 				}
@@ -227,38 +229,4 @@ func countEqual(a, b []byte) int {
 		}
 	}
 	return n
-}
-
-// chiSquare measures how far the byte distribution of b is from uniform. With 255
-// degrees of freedom a uniform source lands near 255; 400 is over six standard
-// deviations above that.
-func chiSquare(b []byte) float64 {
-	var counts [256]int
-	for _, v := range b {
-		counts[v]++
-	}
-	expect := float64(len(b)) / 256
-	chi := 0.0
-	for _, c := range counts {
-		d := float64(c) - expect
-		chi += d * d / expect
-	}
-	return chi
-}
-
-// forEachSubset calls fn with every r-sized subset of 0..n-1, in increasing order.
-func forEachSubset(n, r int, fn func(idx []int)) {
-	idx := make([]int, r)
-	var rec func(start, depth int)
-	rec = func(start, depth int) {
-		if depth == r {
-			fn(append([]int(nil), idx...))
-			return
-		}
-		for i := start; i < n; i++ {
-			idx[depth] = i
-			rec(i+1, depth+1)
-		}
-	}
-	rec(0, 0)
 }

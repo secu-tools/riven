@@ -26,7 +26,6 @@ func TestSizesIsSafeFromManyGoroutines(t *testing.T) {
 				_ = s.CiphertextSize()
 				_ = s.PublicKeySize()
 				_ = s.PrivateKeySize()
-				_ = SchemeForCiphertextSize(s.CiphertextSize())
 			}
 		}()
 	}

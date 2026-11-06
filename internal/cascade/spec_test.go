@@ -16,7 +16,7 @@ import (
 func TestPayloadMatchesTheSpecification(t *testing.T) {
 	params := kdf.Params{Memory: 8 * 1024, Time: 1, Par: 1}
 	plaintext := []byte("cascade payload contents")
-	payload, err := Encrypt(plaintext, []Layer{
+	payload, err := encrypt(plaintext, []Layer{
 		{Kind: Password, SchemeID: 2, Password: []byte("outer")},
 		{Kind: KEM, SchemeID: 3, KEMSecret: bytes.Repeat([]byte{7}, 32), KEMCiphertext: bytes.Repeat([]byte{9}, 32)},
 	}, params, true)
@@ -77,7 +77,7 @@ func TestPayloadMatchesTheSpecification(t *testing.T) {
 	}
 
 	// Section 8.1: id 0 means "not recorded".
-	hidden, err := Encrypt(plaintext, []Layer{{Kind: Password, SchemeID: 2, Password: []byte("p")}}, params, false)
+	hidden, err := encrypt(plaintext, []Layer{{Kind: Password, SchemeID: 2, Password: []byte("p")}}, params, false)
 	if err != nil {
 		t.Fatal(err)
 	}

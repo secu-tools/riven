@@ -8,7 +8,9 @@
 package parallel
 
 import (
+	"fmt"
 	"runtime"
+	"runtime/debug"
 	"sync"
 )
 
@@ -49,12 +51,26 @@ func Do(n, workers int, fn func(i int) error) error {
 	errs := make([]error, n)
 	next := make(chan int)
 	var wg sync.WaitGroup
+	var crash workerPanic
+	var crashOnce sync.Once
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for i := range next {
-				errs[i] = fn(i)
+				func() {
+					// A panic here would end the process from a goroutine with
+					// nothing deferred in it, skipping the cleanup the caller's
+					// goroutine has in place. It is caught, the worker carries on
+					// so the rest of the work is not left blocked, and the first
+					// one is raised again in the caller once all have finished.
+					defer func() {
+						if r := recover(); r != nil {
+							crashOnce.Do(func() { crash = workerPanic{value: r, stack: debug.Stack()} })
+						}
+					}()
+					errs[i] = fn(i)
+				}()
 			}
 		}()
 	}
@@ -63,6 +79,9 @@ func Do(n, workers int, fn func(i int) error) error {
 	}
 	close(next)
 	wg.Wait()
+	if crash.stack != nil {
+		panic(crash)
+	}
 
 	for _, err := range errs {
 		if err != nil {
@@ -70,4 +89,15 @@ func Do(n, workers int, fn func(i int) error) error {
 		}
 	}
 	return nil
+}
+
+// workerPanic is a panic raised in a worker, carried to the caller with the
+// stack of the goroutine it happened in, which is the one worth reading.
+type workerPanic struct {
+	value any
+	stack []byte
+}
+
+func (p workerPanic) Error() string {
+	return fmt.Sprintf("%v\n\npanicked in a worker:\n%s", p.value, p.stack)
 }

@@ -273,6 +273,8 @@ try() {
 		{[]string{"riven", "keygen", ""}, kem.Default().Name()},
 		{[]string{"riven", "completion", ""}, shellPowerShell},
 		{[]string{"riven", "split", "--pad", ""}, "none"},
+		{[]string{"riven", "split", "--method", ""}, "compact"},
+		{[]string{"riven", "split", "--info", ""}, "public"},
 		{[]string{"riven", "--rec"}, "--record-algo"},
 		// A path must produce nothing, so that "complete -o default" takes over.
 		{[]string{"riven", "combine", "/root/piece1.data"}, ""},

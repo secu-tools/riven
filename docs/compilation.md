@@ -36,7 +36,7 @@ All three scripts accept the same flags. Run the one for your OS:
 | `-all` | Build every platform/arch combination |
 | `-deb` / `-rpm` | Package linux builds as .deb/.rpm (combine with `-linux`) |
 | `-test` | Run unit tests + fuzz seed corpus |
-| `-testall` | Run the full suite: unit, fuzz, integration, e2e, smoke |
+| `-testall` | Run every suite: unit, fuzz, integration, e2e, smoke, build scripts |
 | `-integration` | Run integration tests (tag: `integration`) |
 | `-teste2e` | Run end-to-end tests (tag: `e2e`) |
 | `-testsmoke` | Run smoke tests (tag: `smoke`) |

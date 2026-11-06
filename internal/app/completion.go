@@ -40,6 +40,8 @@ const (
 	argAlgo
 	argKDF
 	argPad
+	argMethod
+	argInfo
 	argBool
 	argEnv
 )
@@ -52,6 +54,8 @@ var flagArgKinds = map[string]argKind{
 	"--algo": argAlgo, "--algos": argAlgo,
 	"--kdf":         argKDF,
 	"--pad":         argPad,
+	"--method":      argMethod,
+	"--info":        argInfo,
 	"--record-algo": argBool, "--record-kdf": argBool, "--record-name": argBool,
 	"--verify":       argBool,
 	"--password-env": argEnv, "--text-env": argEnv,
@@ -133,6 +137,11 @@ func completionKeyTypes() []string {
 // completionPads are the padding answers worth suggesting. Any percent is legal,
 // so this is a starting point rather than the set of valid values.
 func completionPads() []string { return []string{"none", "0", "1", "2", "5", "10", "25", "50"} }
+
+// completionMethods and completionInfos are the values --method and --info take.
+func completionMethods() []string { return names(splitMethods) }
+
+func completionInfos() []string { return names(infoModes) }
 
 // cmdCompletion prints a completion script for one shell.
 func cmdCompletion(opts *cliOptions) error {
@@ -218,6 +227,10 @@ _riven() {
         %s)
             COMPREPLY=( $(compgen -W "%s" -- "$cur") ); return 0 ;;
         %s)
+            COMPREPLY=( $(compgen -W "%s" -- "$cur") ); return 0 ;;
+        %s)
+            COMPREPLY=( $(compgen -W "%s" -- "$cur") ); return 0 ;;
+        %s)
             COMPREPLY=( $(compgen -W "true false" -- "$cur") ); return 0 ;;
         %s)
             COMPREPLY=( $(compgen -v -- "$cur") ); return 0 ;;
@@ -259,6 +272,8 @@ complete -o default -F _riven riven
 		alternatives(flagsOfKind(argAlgo)), words(ciphers.Names()),
 		alternatives(flagsOfKind(argKDF)), words(kdf.PresetNames()),
 		alternatives(flagsOfKind(argPad)), words(completionPads()),
+		alternatives(flagsOfKind(argMethod)), words(completionMethods()),
+		alternatives(flagsOfKind(argInfo)), words(completionInfos()),
 		alternatives(flagsOfKind(argBool)),
 		alternatives(flagsOfKind(argEnv)),
 		alternatives(flagsOfKind(argFree)),
@@ -316,12 +331,14 @@ _riven() {
     '(--algo --algos)'{--algo,--algos}'[algorithm per layer]:algorithm:_values -s , algorithm $algos' \
     '--kdf[Argon2id cost]:cost:($kdfs)' \
     '--pad[size-class width in percent]:percent:($pads)' \
+    '--method[how the content is spread over the pieces]:method:(%s)' \
+    '--info[what one piece shows about its set]:mode:(%s)' \
     '--record-algo[write the algorithms into each piece]:choice:(true false)' \
     '--record-kdf[write the Argon2id cost into each piece]:choice:(true false)' \
     '--record-name[write the input file name into each piece]:choice:(true false)' \
     '--verify[re-read and rebuild the pieces after writing]:choice:(true false)' \
     '-v[re-read and rebuild the pieces after writing]' \
-    '--no-verify[skip the post-split self-check]' \
+    '--no-verify[skip the post-split self-check]'     '--no-color[plain output, without colour]' \
     '--password-env[environment variable holding a password]:variable:_parameters' \
     '--text-env[environment variable holding the data]:variable:_parameters' \
     '(-t --text)'{-t,--text}'[split this string]:text:' \
@@ -364,6 +381,8 @@ fi
 		words(completionPads()),
 		words(completionKeyTypes()),
 		words(completionShells()),
+		words(completionMethods()),
+		words(completionInfos()),
 	)
 	return err
 }
@@ -406,12 +425,15 @@ func writeFishCompletion(w io.Writer) error {
 		{"--algos", "-x -a '" + words(ciphers.Names()) + "'", "algorithm per layer"},
 		{"--kdf", "-x -a '" + words(kdf.PresetNames()) + "'", "Argon2id cost"},
 		{"--pad", "-x -a '" + words(completionPads()) + "'", "size-class width in percent"},
+		{"--method", "-x -a '" + words(completionMethods()) + "'", "how the content is spread over the pieces"},
+		{"--info", "-x -a '" + words(completionInfos()) + "'", "what one piece shows about its set"},
 		{"--record-algo", "-x -a 'true false'", "write the algorithms into each piece"},
 		{"--record-kdf", "-x -a 'true false'", "write the Argon2id cost into each piece"},
 		{"--record-name", "-x -a 'true false'", "write the input file name into each piece"},
 		{"--verify", "-x -a 'true false'", "re-read and rebuild the pieces after writing"},
 		{"-v", "", "re-read and rebuild the pieces after writing"},
 		{"--no-verify", "", "skip the post-split self-check"},
+		{"--no-color", "", "plain output, without colour"},
 		{"--password-env", "-x -a '(set --names --export)'", "environment variable holding a password"},
 		{"--text-env", "-x -a '(set --names --export)'", "environment variable holding the data"},
 		{"-o/--out", "-r -F", "output directory or file"},
@@ -464,6 +486,8 @@ Register-ArgumentCompleter -Native -CommandName riven -ScriptBlock {
     if ($wordToComplete -eq '') { $previous = $words[$words.Count - 1] }
 
     $values = switch -Exact ($previous) {
+        { $_ -in @(%s) } { @(%s); break }
+        { $_ -in @(%s) } { @(%s); break }
         { $_ -in @(%s) } { @(%s); break }
         { $_ -in @(%s) } { @(%s); break }
         { $_ -in @(%s) } { @(%s); break }
@@ -532,6 +556,8 @@ Register-ArgumentCompleter -Native -CommandName riven -ScriptBlock {
 		psList(flagsOfKind(argAlgo)), psList(ciphers.Names()),
 		psList(flagsOfKind(argKDF)), psList(kdf.PresetNames()),
 		psList(flagsOfKind(argPad)), psList(completionPads()),
+		psList(flagsOfKind(argMethod)), psList(completionMethods()),
+		psList(flagsOfKind(argInfo)), psList(completionInfos()),
 		psList(flagsOfKind(argBool)),
 		psList(flagsOfKind(argEnv)),
 		psList(allFlags()),

@@ -136,7 +136,13 @@ func readPasswordMasked(prompt string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer term.Restore(fd, oldState)
+	// Typing is not echoed until the mode is restored. Ctrl-C arrives here as a
+	// keystroke, but a signal (Ctrl-Break on Windows, SIGTERM or SIGHUP
+	// elsewhere) ends the process without this function returning, so the
+	// restore is also left with the cleanup that runs then.
+	restore := func() { _ = term.Restore(fd, oldState) }
+	defer memory.OnCleanup(restore)()
+	defer restore()
 
 	pw := newPasswordBuf()
 	buf := make([]byte, 1)
@@ -227,34 +233,4 @@ func (p *passwordBuf) take() []byte {
 func (p *passwordBuf) free() {
 	memory.Free(p.b)
 	p.b, p.n = nil, 0
-}
-
-// readPasswordConfirmed prompts twice and requires a match.
-func readPasswordConfirmed(prompt string) ([]byte, error) {
-	for {
-		p1, err := readPasswordMasked(prompt + ": ")
-		if err != nil {
-			return nil, err
-		}
-		p2, err := readPasswordMasked("confirm password: ")
-		if err != nil {
-			for i := range p1 {
-				p1[i] = 0
-			}
-			return nil, err
-		}
-		if string(p1) == string(p2) {
-			for i := range p2 {
-				p2[i] = 0
-			}
-			return p1, nil
-		}
-		for i := range p1 {
-			p1[i] = 0
-		}
-		for i := range p2 {
-			p2[i] = 0
-		}
-		fmt.Println("  passwords did not match, try again")
-	}
 }

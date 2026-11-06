@@ -13,6 +13,7 @@
 package cascade
 
 import (
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
 	"errors"
@@ -63,14 +64,11 @@ type Layer struct {
 }
 
 // Descriptor is public metadata about a layer. SchemeID is zero and Recorded is
-// false when the algorithm was not written into the payload. KEMCiphertextLen is
-// the length of the stored encapsulated key, which identifies the recipient key
-// type on a KEM layer.
+// false when the algorithm was not written into the payload.
 type Descriptor struct {
-	Kind             Kind
-	SchemeID         uint8
-	Recorded         bool
-	KEMCiphertextLen int
+	Kind     Kind
+	SchemeID uint8
+	Recorded bool
 }
 
 // Decapsulator recovers a KEM shared secret from a stored ciphertext. Several may
@@ -79,95 +77,156 @@ type Descriptor struct {
 // so each candidate is tried until one produces a layer that authenticates.
 type Decapsulator func(ciphertext []byte) ([]byte, error)
 
-// Encrypt wraps plaintext in the given layers and returns a self-describing
-// payload (header followed by the outermost ciphertext). plaintext is not
-// modified. When recordSchemes is false the algorithm identifiers are omitted.
-func Encrypt(plaintext []byte, layers []Layer, params kdf.Params, recordSchemes bool) ([]byte, error) {
-	if len(layers) > maxLayers {
-		return nil, fmt.Errorf("cascade: too many layers (%d > %d)", len(layers), maxLayers)
+// Len returns the length of the payload EncryptTo writes from n bytes of
+// plaintext under layers.
+func Len(n int, layers []Layer) (int, error) {
+	schemes, err := resolve(layers)
+	if err != nil {
+		return 0, err
+	}
+	hdr, ct := lengths(n, layers, schemes)
+	return hdr + ct, nil
+}
+
+// EncryptTo is Encrypt writing the payload into dst, which must be exactly Len
+// bytes, so a caller can have it land where it is used next. Every layer seals in
+// place, so nothing else the size of the plaintext is allocated. On an error dst
+// is wiped.
+func EncryptTo(dst, plaintext []byte, layers []Layer, params kdf.Params, recordSchemes bool) error {
+	schemes, err := resolve(layers)
+	if err != nil {
+		return err
+	}
+	hdr, ct := lengths(len(plaintext), layers, schemes)
+	if len(dst) != hdr+ct {
+		return fmt.Errorf("cascade: payload buffer is %d bytes, need %d", len(dst), hdr+ct)
+	}
+	fail := func(err error) error {
+		memory.Zero(dst)
+		return err
 	}
 
 	type applied struct {
-		kind     Kind
 		schemeID uint8
 		salt     []byte
 		nonce    []byte
-		kemCt    []byte
 	}
 	descs := make([]applied, len(layers))
 
-	ct := append([]byte(nil), plaintext...)
-	// Apply innermost (highest index) first so layer 0 ends up outermost.
+	// The body grows by a tag per layer into the room dst leaves after it. Apply
+	// innermost (highest index) first so layer 0 ends up outermost.
+	body := dst[hdr : hdr+len(plaintext)]
+	copy(body, plaintext)
 	for i := len(layers) - 1; i >= 0; i-- {
-		scheme, ok := ciphers.ByID(layers[i].SchemeID)
-		if !ok {
-			memory.Zero(ct)
-			return nil, fmt.Errorf("cascade: unknown scheme id %d", layers[i].SchemeID)
-		}
-		nonce := make([]byte, scheme.NonceLen)
+		nonce := make([]byte, schemes[i].NonceLen)
 		if _, err := rand.Read(nonce); err != nil {
-			memory.Zero(ct)
-			return nil, err
+			return fail(err)
 		}
-
-		var key, salt, kemCt []byte
-		switch layers[i].Kind {
-		case Password:
+		var salt []byte
+		if layers[i].Kind == Password {
 			salt = make([]byte, kdf.SaltLen)
 			if _, err := rand.Read(salt); err != nil {
-				memory.Zero(ct)
-				return nil, err
+				return fail(err)
 			}
-			key = params.Derive(layers[i].Password, salt)
-		case KEM:
-			var err error
-			key, err = kemKey(layers[i].KEMSecret)
-			if err != nil {
-				memory.Zero(ct)
-				return nil, err
-			}
-			kemCt = layers[i].KEMCiphertext
-		default:
-			memory.Zero(ct)
-			return nil, fmt.Errorf("cascade: unknown layer kind %d", layers[i].Kind)
 		}
-
-		aead, err := scheme.New(key)
-		memory.Zero(key)
+		aead, err := layerAEAD(layers[i], schemes[i], salt, params)
 		if err != nil {
-			memory.Zero(ct)
-			return nil, err
+			return fail(err)
 		}
-		sealed := aead.Seal(nil, nonce, ct, layerAD(scheme.ID))
-		memory.Zero(ct)
-		ct = sealed
+		body = aead.Seal(body[:0], nonce, body, layerAD(schemes[i].ID))
 
-		stored := scheme.ID
+		stored := schemes[i].ID
 		if !recordSchemes {
 			stored = schemeHidden
 		}
-		descs[i] = applied{kind: layers[i].Kind, schemeID: stored, salt: salt, nonce: nonce, kemCt: kemCt}
+		descs[i] = applied{schemeID: stored, salt: salt, nonce: nonce}
 	}
 
-	w := wire.NewWriter(len(ct) + 64)
+	w := wire.NewWriter(hdr)
 	w.U16(Version)
 	w.U8(uint8(len(layers)))
-	for _, d := range descs {
-		w.U8(uint8(d.kind))
+	for i, d := range descs {
+		w.U8(uint8(layers[i].Kind))
 		w.U8(d.schemeID)
 		w.Bytes(d.salt)
 		w.Bytes(d.nonce)
-		w.Bytes(d.kemCt)
+		w.Bytes(kemCiphertext(layers[i]))
 	}
-	w.Raw(ct)
-	return w.Result(), nil
+	if len(w.Result()) != hdr {
+		return fail(errors.New("cascade: header length does not match its layers"))
+	}
+	copy(dst, w.Result())
+	return nil
 }
 
-// Decrypt reverses Encrypt. Passwords for the Password layers are supplied in
-// order via passwords; decap recovers shared secrets for KEM layers (nil when
-// there are none). schemes supplies the per-layer algorithm ids for payloads
-// that did not record them, and may be nil otherwise. The returned plaintext is
-// caller-owned.
+// resolve looks up every layer's algorithm, rejecting what Encrypt cannot apply.
+func resolve(layers []Layer) ([]ciphers.Scheme, error) {
+	if len(layers) > maxLayers {
+		return nil, fmt.Errorf("cascade: too many layers (%d > %d)", len(layers), maxLayers)
+	}
+	schemes := make([]ciphers.Scheme, len(layers))
+	for i, l := range layers {
+		scheme, ok := ciphers.ByID(l.SchemeID)
+		if !ok {
+			return nil, fmt.Errorf("cascade: unknown scheme id %d", l.SchemeID)
+		}
+		if l.Kind != Password && l.Kind != KEM {
+			return nil, fmt.Errorf("cascade: unknown layer kind %d", l.Kind)
+		}
+		schemes[i] = scheme
+	}
+	return schemes, nil
+}
+
+// lengths returns the header length and the ciphertext length for n bytes of
+// plaintext: per layer a kind, an id and three length-prefixed fields (salt,
+// nonce, encapsulated key), and a tag on the ciphertext.
+func lengths(n int, layers []Layer, schemes []ciphers.Scheme) (hdr, ct int) {
+	hdr, ct = 2+1, n
+	for i, l := range layers {
+		hdr += 2 + 3*4 + schemes[i].NonceLen + len(kemCiphertext(l))
+		if l.Kind == Password {
+			hdr += kdf.SaltLen
+		}
+		ct += schemes[i].TagLen
+	}
+	return hdr, ct
+}
+
+// kemCiphertext is what the header stores as a layer's encapsulated key.
+func kemCiphertext(l Layer) []byte {
+	if l.Kind == KEM {
+		return l.KEMCiphertext
+	}
+	return nil
+}
+
+// layerAEAD keys one layer for sealing, wiping the key once the AEAD holds it.
+func layerAEAD(l Layer, scheme ciphers.Scheme, salt []byte, params kdf.Params) (cipher.AEAD, error) {
+	var key []byte
+	if l.Kind == Password {
+		key = params.Derive(l.Password, salt)
+	} else {
+		k, err := kemKey(l.KEMSecret)
+		if err != nil {
+			return nil, err
+		}
+		key = k
+	}
+	aead, err := scheme.New(key)
+	memory.Zero(key)
+	return aead, err
+}
+
+// Decrypt reverses Encrypt in place: it overwrites payload and returns the
+// plaintext as a sub-slice of it, so no copy the size of the content is made.
+// Passwords for the Password layers are supplied in order via passwords; decap
+// recovers shared secrets for KEM layers (nil when there are none). schemes
+// supplies the per-layer algorithm ids for payloads that did not record them,
+// and may be nil otherwise.
+//
+// After an error the payload is partly decrypted or wiped, since an AEAD clears
+// what it fails to open, so a caller that may try again keeps its own copy.
 func Decrypt(payload []byte, passwords [][]byte, decaps []Decapsulator, params kdf.Params, schemes []uint8) ([]byte, error) {
 	layers, ct, err := parse(payload)
 	if err != nil {
@@ -180,34 +239,26 @@ func Decrypt(payload []byte, passwords [][]byte, decaps []Decapsulator, params k
 		return nil, err
 	}
 
-	cur := ct
 	pwIdx := 0
 	for i, l := range layers {
 		scheme, err := layerScheme(l, schemes, i)
 		if err != nil {
 			return nil, err
 		}
-
-		var pt []byte
 		switch l.kind {
 		case Password:
-			pt, err = openPasswordLayer(l, scheme, cur, passwords[pwIdx], params)
+			ct, err = openPasswordLayer(l, scheme, ct, passwords[pwIdx], params)
 			pwIdx++
 		case KEM:
-			pt, err = openKEMLayer(l, scheme, cur, decaps, i)
+			ct, err = openKEMLayer(l, scheme, ct, decaps, i)
 		default:
 			err = fmt.Errorf("cascade: unknown layer kind %d", l.kind)
 		}
 		if err != nil {
 			return nil, err
 		}
-
-		if i > 0 {
-			memory.Zero(cur)
-		}
-		cur = pt
 	}
-	return cur, nil
+	return ct, nil
 }
 
 // checkPasswordCount rejects a password list that does not match the payload,
@@ -244,7 +295,7 @@ func layerScheme(l layerDesc, schemes []uint8, i int) (ciphers.Scheme, error) {
 	return scheme, nil
 }
 
-// openPasswordLayer peels one Argon2id-keyed layer.
+// openPasswordLayer peels one Argon2id-keyed layer in place.
 func openPasswordLayer(l layerDesc, scheme ciphers.Scheme, ct, password []byte, params kdf.Params) ([]byte, error) {
 	key := params.Derive(password, l.salt)
 	aead, err := scheme.New(key)
@@ -252,23 +303,31 @@ func openPasswordLayer(l layerDesc, scheme ciphers.Scheme, ct, password []byte, 
 	if err != nil {
 		return nil, err
 	}
-	pt, err := aead.Open(nil, l.nonce, ct, layerAD(scheme.ID))
+	pt, err := aead.Open(ct[:0], l.nonce, ct, layerAD(scheme.ID))
 	if err != nil {
 		return nil, ErrWrongPassword
 	}
 	return pt, nil
 }
 
-// openKEMLayer peels one recipient-keyed layer by trying each supplied key.
+// openKEMLayer peels one recipient-keyed layer in place by trying each supplied
+// key.
 //
 // A shared secret cannot be checked on its own: a mechanism returns an unrelated
 // secret rather than an error for a key that does not match, so the AEAD tag is
-// what decides. The last decapsulation error is kept and reported, because it
+// what decides. An AEAD clears what it fails to open, so with more than one key
+// to try, each attempt opens into a scratch buffer and the one that works is
+// copied back. The last decapsulation error is kept and reported, because it
 // explains a mismatched key type, which is the likely reason for supplying the
 // wrong key file.
 func openKEMLayer(l layerDesc, scheme ciphers.Scheme, ct []byte, decaps []Decapsulator, i int) ([]byte, error) {
 	if len(decaps) == 0 {
 		return nil, fmt.Errorf("%w: layer %d", ErrKeyRequired, i+1)
+	}
+	dst := ct[:0]
+	if len(decaps) > 1 {
+		dst = make([]byte, 0, len(ct))
+		defer memory.Zero(dst[:cap(dst)])
 	}
 	var lastDecapErr error
 	for _, d := range decaps {
@@ -287,8 +346,8 @@ func openKEMLayer(l layerDesc, scheme ciphers.Scheme, ct []byte, decaps []Decaps
 		if err != nil {
 			return nil, err
 		}
-		if pt, err := aead.Open(nil, l.nonce, ct, layerAD(scheme.ID)); err == nil {
-			return pt, nil
+		if pt, err := aead.Open(dst, l.nonce, ct, layerAD(scheme.ID)); err == nil {
+			return ct[:copy(ct, pt)], nil
 		}
 	}
 	if lastDecapErr != nil {
@@ -327,24 +386,6 @@ func checkSchemes(layers []layerDesc, schemes []uint8) error {
 		return fmt.Errorf("cascade: this payload has %d layers, got %d algorithms", len(layers), len(schemes))
 	}
 	return nil
-}
-
-// Descriptors returns per-layer public metadata for display, without decrypting.
-func Descriptors(payload []byte) ([]Descriptor, error) {
-	layers, _, err := parse(payload)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]Descriptor, len(layers))
-	for i, l := range layers {
-		out[i] = Descriptor{
-			Kind:             l.kind,
-			SchemeID:         l.schemeID,
-			Recorded:         l.schemeID != schemeHidden,
-			KEMCiphertextLen: len(l.kemCt),
-		}
-	}
-	return out, nil
 }
 
 type layerDesc struct {
@@ -392,7 +433,7 @@ func parse(payload []byte) ([]layerDesc, []byte, error) {
 		}
 		layers[i] = layerDesc{kind: Kind(kind), schemeID: id, salt: salt, nonce: nonce, kemCt: kemCt}
 	}
-	return layers, r.Rest(), nil
+	return layers, r.RestView(), nil
 }
 
 func kemKey(ss []byte) ([]byte, error) {

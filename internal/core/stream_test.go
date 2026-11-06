@@ -164,20 +164,32 @@ func TestSplitToWorksForEveryThreshold(t *testing.T) {
 }
 
 // TestMemoryEstimateIsNotOptimistic checks the figure quoted before a large
-// split is never under what the shares alone cost, which is N times the input.
+// split is never under what the split must hold: N full shares for the full
+// method, and the input, the package and N fragments of 1/K for the compact one.
 func TestMemoryEstimateIsNotOptimistic(t *testing.T) {
 	for _, size := range []int{1 << 10, 1 << 20, 1 << 30} {
 		for _, n := range []int{2, 5, 64, 255} {
-			got := MemoryEstimate(size, n)
+			got := MemoryEstimate(size, n, 2, MethodFull)
 			if floor := int64(size) * int64(n); got < floor {
 				t.Errorf("%d bytes into %d pieces estimated at %d, under the %d the shares need",
 					size, n, got, floor)
 			}
+			for _, k := range []int{1, 2, n} {
+				got := MemoryEstimate(size, n, k, MethodCompact)
+				// The input, the sealed package, and one fragment in flight.
+				if floor := 2*int64(size) + int64(size)/int64(k); got < floor {
+					t.Errorf("compact %d bytes into %d-of-%d estimated at %d, under %d", size, k, n, got, floor)
+				}
+			}
 		}
 	}
 	// A terabyte must not overflow into a small or negative number.
-	if got := MemoryEstimate(1<<40, 255); got < 1<<40*255 {
+	if got := MemoryEstimate(1<<40, 255, 2, MethodFull); got < 1<<40*255 {
 		t.Fatalf("a large input overflowed the estimate: %d", got)
+	}
+	// Compact needs less than full once K is above one.
+	if full, small := MemoryEstimate(1<<30, 5, 3, MethodFull), MemoryEstimate(1<<30, 5, 3, MethodCompact); small >= full {
+		t.Fatalf("compact 3-of-5 estimated at %d, not under the full method's %d", small, full)
 	}
 }
 

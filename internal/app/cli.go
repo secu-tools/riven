@@ -77,6 +77,11 @@ type cliOptions struct {
 	pad    string
 	padSet bool
 
+	method    string
+	methodSet bool
+	info      string
+	infoSet   bool
+
 	// verify controls the post-split self-check that re-reads the pieces and
 	// rebuilds the original. Default on; verifySet records an explicit choice.
 	verify    bool
@@ -194,6 +199,8 @@ var valueFlags = map[string]flagValue{
 	"--priv":      func(o *cliOptions, v string) error { o.privOut = v; return nil },
 	"--identity":  func(o *cliOptions, v string) error { o.identities = append(o.identities, v); return nil },
 	"--pad":       func(o *cliOptions, v string) error { o.pad, o.padSet = v, true; return nil },
+	"--method":    func(o *cliOptions, v string) error { o.method, o.methodSet = v, true; return nil },
+	"--info":      func(o *cliOptions, v string) error { o.info, o.infoSet = v, true; return nil },
 	"--record-algo": boolFlag("--record-algo", func(o *cliOptions, b bool) {
 		o.recordAlgo, o.recordAlgoSet = b, true
 	}),
@@ -226,8 +233,11 @@ var switchFlags = map[string]flagSwitch{
 	"--generate":      func(o *cliOptions) { o.generate = true },
 	"-v":              func(o *cliOptions) { setVerify(o, true) },
 	"--no-verify":     func(o *cliOptions) { setVerify(o, false) },
-	"-y":              func(o *cliOptions) { o.yes = true },
-	"--yes":           func(o *cliOptions) { o.yes = true },
+	// Colour is set up before parsing, from the raw arguments; the flag is only
+	// accepted here.
+	"--no-color": func(*cliOptions) {},
+	"-y":         func(o *cliOptions) { o.yes = true },
+	"--yes":      func(o *cliOptions) { o.yes = true },
 }
 
 // setVerify records the post-split self-check preference, marking it explicitly
@@ -341,150 +351,98 @@ func rejectShadowedFlag(name string) error {
 func printUsage() {
 	fmt.Print(`riven ` + Version() + `
 
-Split a file into stealth, post-quantum-hardened pieces using cascade
-encryption and Shamir secret sharing. Any K of N pieces plus the correct
-password(s) reconstruct the original; fewer reveal nothing.
+Split a file into N pieces: any K of them, with the password, rebuild it, and
+fewer than K reveal nothing. docs/usage.md explains every option in full.
 
 USAGE
-  riven [FILE]                 wizard: split FILE (or show the menu with no FILE)
-  riven split  FILE            split a file into pieces
-  riven split  -               split data read from standard input
-  riven split  --text STRING   split a string instead of a file
-  riven info   PIECE...        show what a piece is (needs the password)
-  riven verify PIECE...        check the pieces rebuild the file, writing nothing
-  riven combine PIECE...       reconstruct the original from pieces
-  riven keygen [TYPE]          generate a recipient key pair (default ` + kem.Default().Name() + `)
-  riven completion [SHELL]     print a completion script (` + strings.Join(completionShells(), ", ") + `)
+  riven [FILE]                wizard: split FILE, or a menu with no FILE
+  riven split FILE | -        split a file, or standard input (needs -y)
+  riven split --text STRING   split a string
+  riven combine PIECE...      rebuild the original from K pieces
+  riven verify PIECE...       check the pieces rebuild it, writing nothing
+  riven info PIECE...         show what a piece is
+  riven keygen [TYPE]         make a recipient key pair (default ` + kem.Default().Name() + `)
+  riven completion [SHELL]    print a completion script for your shell
   riven version | help
+  A folder can be given in place of its pieces.
 
-INPUT
-  FILE                         path to the file to split. To split a directory,
-                               pack it into an archive first (tar, zip, 7z).
-                               Compress it too if you can: every piece is a full
-                               copy of the input, so a smaller archive means N
-                               smaller pieces
-  -                            read the data from standard input
-  -t, --text STRING            split this string (visible in the process list)
-  --text-env NAME              split the contents of environment variable NAME
-  --name BASE                  base name for the piece files (default: the input
-                               file name, or "secret" for text and standard
-                               input). This names the pieces, not the content
+EXAMPLES
+  riven secret.pdf
+  riven split secret.pdf -n 5 -k 3 --password-env PW -y
+  riven combine secret.pdf.1 secret.pdf.3 secret.pdf.5 --password-env PW
 
-LAYERS
-  A split can be protected by several layers, applied outermost first. Each layer
-  is keyed either by a password or by a recipient public key, and every one of them
-  is needed to decrypt. The order of the --password-env and --recipient flags is
-  the order of the layers:
+SPLIT
+  -n, --parts N               pieces to write (default 5)
+  -k, --threshold K           pieces needed to rebuild (default 3)
+  --password-env NAME         add a password layer, read from variable NAME
+  --recipient FILE            add a layer for that recipient public key
+  --algo a,b,c                algorithm per layer, outermost first
+  --generate                  generate the password(s)
+  --keyless                   no password: any K pieces rebuild it on their own
+  --method full|compact       full (default): fewer than K pieces reveal
+                              nothing, proven. compact: pieces 1/K the size,
+                              safe while AES-256 and ChaCha20 hold
+  --info protected|strict|public|none
+                              who can read a piece's details. protected
+                              (default): the layer 1 password or key; one
+                              piece can then test guesses of that password.
+                              strict: every password and key. public and
+                              none: guessing needs K pieces
+  -f, --format LIST           formats, comma-separated, or all (default binary)
+  --kdf SPEC                  Argon2id cost: a preset or m=MiB,t=passes,p=lanes
+  --pad PCT                   size class width in percent (default 1), or none
+  --record-algo true|false    record the algorithms (default true)
+  --record-kdf true|false     record the Argon2id cost (default true)
+  --record-name true|false    record the file name (default true)
+  --verify true|false         rebuild after writing, as a check (default true)
+  --qr-scale N                QR module size in pixels (default ` + strconv.Itoa(defaultQRScale) + `)
+  -t, --text STRING           split this string (seen in the process list)
+  --text-env NAME             split the contents of variable NAME
+  --name BASE                 base name for the piece files
+  -o, --out DIR               where to write the pieces
 
-    riven split f --password-env PW1 --recipient alice.pub \
-                  --recipient bob.pub --password-env PW2
-
-  gives four layers: password, alice's key, bob's key, password. Alice and Bob must
-  both take part, and both passwords are needed as well.
-
-  --password-env NAME          add a password layer, read from environment NAME
-  --recipient FILE             add a recipient layer, using that public key
-  --algo a,b,c                 algorithm per layer, in the same order. Layers left
-                               unnamed get one automatically
-
-SPLIT OPTIONS
-  -n, --parts N                total pieces to produce
-  -k, --threshold K            pieces required to reconstruct (1..N)
-  --keyless                    no encryption and no password: any K pieces rebuild
-                               the file on their own (needs K of 2 or more)
-  -f, --format LIST            export formats: ` + formatNames() + `, or all
-                               (comma-separated; default binary)
-  --qr-scale N                 QR module size in pixels (default ` + strconv.Itoa(defaultQRScale) + `)
-  --kdf SPEC                   Argon2id cost: a preset or m=<MiB>,t=<passes>,p=<lanes>
-  --record-algo true|false     write the algorithms into each piece (default
-                               true; false means --algo is needed to decrypt)
-  --record-kdf true|false      write the Argon2id cost into each piece (default
-                               true; false means --kdf is needed to decrypt)
-  --record-name true|false     write the input file's name into each piece, so
-                               combine restores it (default true). Only the name
-                               is kept, never the path or any other attribute, and
-                               it sits inside the encrypted metadata
-  --pad PCT                    size-class width in percent (default 1, maximum
-                               500). Every piece is rounded up to the next class,
-                               so its size gives only a range. 0 or "none" drops
-                               the class, which reveals the content length
-  --verify true|false          after writing, re-read the pieces and rebuild the
-                               original to confirm they work (default true).
-                               -v alone turns it on, --no-verify skips it
-  --generate                   generate strong password(s) instead of prompting
-  -o, --out DIR                output directory for pieces
-
-COMBINE AND INFO OPTIONS
-  --algo a,b,c                 algorithms, for sets that did not record them
-  --kdf SPEC                   Argon2id cost, for sets that did not record it
-  --identity FILE              your recipient private key; repeat once per
-                               recipient layer, in any order
-  -o, --out FILE               where to write recovered data ("-" means standard
-                               output); combine only. Without it, combine asks
-                               where to write, offering the name recorded in the
-                               pieces as the default -- that name was chosen by
-                               whoever wrote them, so it is confirmed rather than
-                               used unasked. Under -y the data goes to standard
-                               output instead
-
-  Input format is detected from the content, so binary pieces, base64 text, and
-  QR images can be mixed freely in one command. Keyless sets need no password and
-  are opened without asking for one.
-
-  A directory may be given instead of a piece: the files directly inside it are
-  read, anything that is not a piece is ignored, and one piece exported in
-  several formats is only counted once.
-
-  With -y and no --out, the recovered bytes go to standard output exactly as they
-  were, and nothing else is printed there, so the result can be piped straight
-  into another program.
+COMBINE, VERIFY AND INFO
+  --password-env NAME         a password; repeat once per layer, in order
+  --identity FILE             your recipient private key; repeat as needed
+  --algo a,b,c                algorithms, for a set that did not record them
+  --kdf SPEC                  Argon2id cost, for a set that did not record it
+  -o, --out FILE              combine: where to write it ("-" for standard out)
 
 KEYGEN
-  riven keygen [TYPE]          generate a recipient key pair of that type
-                               (default ` + kem.Default().Name() + `). The type decides how many bytes
-                               every piece carries, which matters most for QR:
-
+  riven keygen [TYPE] [--pub FILE] [--priv FILE] [-o DIR]
+  TYPE, with the bytes it adds to every piece:
 ` + keygenTypeList() + `
-  --pub FILE                   public key output path
-  --priv FILE                  private key output path
-  -o, --out DIR                directory for the files riven names itself. Not
-                               needed once --pub and --priv name both, and
-                               refused there. Any directory in a path is created
 
-COMPLETION
-  riven completion [SHELL]     print the script for ` + strings.Join(completionShells(), ", ") + `.
-                               With no SHELL it is taken from the environment
-
-    bash        source <(riven completion bash)
-    zsh         riven completion zsh > "${fpath[1]}/_riven"
-    fish        riven completion fish > ~/.config/fish/completions/riven.fish
-    powershell  riven completion powershell | Out-String | Invoke-Expression
-
-COMMON OPTIONS
-  -y, --yes                    non-interactive: use defaults, never prompt, and
-                               fail instead of asking for missing values. Standard
-                               output then carries only machine-readable results:
-                               generated passwords when splitting, one per line, and
-                               the recovered data when combining. Everything else
-                               goes to standard error
+COMMON
+  -y, --yes                   never prompt: use defaults, or fail and name the
+                              flag. Standard output then carries only results
+  --no-color                  plain output, without colour (as does NO_COLOR)
+  -h, --help / -V, --version
 
 ALGORITHMS
-  ` + strings.Join(ciphers.Names(), ", ") + `
+  ` + indentList(ciphers.Names()) + `
 
 ARGON2 PRESETS
   ` + strings.Join(kdf.PresetNames(), ", ") + `
-  custom: m=<MiB>,t=<passes>,p=<lanes>; memory is one of ` + joinUint32(kdf.MemoryChoices()) + ` MiB,
-  passes 1-` + strconv.Itoa(kdf.MaxTime) + `, lanes one of ` + joinUint8(kdf.ParChoices()) + `
+  custom: memory ` + joinUint32(kdf.MemoryChoices()) + ` MiB, passes 1-` +
+		strconv.Itoa(kdf.MaxTime) + `, lanes ` + joinUint8(kdf.ParChoices()) + `
 
 EXPORT FORMATS
   ` + formatNames() + `
   qr holds at most ` + strconv.Itoa(pieceio.QRMaxBytes) + ` bytes per piece, words at most ` +
 		strconv.Itoa(pieceio.Bip39MaxPiece) + `.
-  words is BIP-39 English text, about ` + strconv.FormatFloat(pieceio.Bip39Expansion, 'f', 1, 64) +
-		` times the size of a binary piece: it is
-  for a small secret written out by hand, not for a file.
 `)
 }
+
+// indentList prints names comma-separated over as many indented lines as the
+// help text's width needs.
+func indentList(names []string) string {
+	return strings.Join(wrapWords(strings.Join(names, ", "), helpWidth-2), "\n  ")
+}
+
+// helpWidth is the widest line of the help text: it is printed as it is, not
+// folded to the terminal, so it is kept to what an 80-column window shows.
+const helpWidth = 79
 
 func formatNames() string {
 	names := make([]string, 0, len(pieceio.All()))
@@ -511,12 +469,11 @@ func joinUint8(v []uint8) string {
 }
 
 // keygenTypeList renders the recipient key types for the help text, with the
-// per-piece cost that decides between them.
+// bytes each adds to every piece, which is what decides between them.
 func keygenTypeList() string {
 	var b strings.Builder
 	for _, s := range kem.All() {
-		fmt.Fprintf(&b, "    %-12s %s\n", s.Name(), s.Summary())
-		fmt.Fprintf(&b, "    %-12s adds %d bytes to every piece\n", "", s.CiphertextSize())
+		fmt.Fprintf(&b, "    %-12s %-7s  %s\n", s.Name(), fmt.Sprintf("+%d B", s.CiphertextSize()), s.Summary())
 	}
 	return strings.TrimRight(b.String(), "\n")
 }

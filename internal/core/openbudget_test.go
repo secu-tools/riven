@@ -4,6 +4,8 @@
 package core
 
 import (
+	"bytes"
+	"sync/atomic"
 	"testing"
 
 	"github.com/secu-tools/riven/internal/format"
@@ -23,15 +25,17 @@ var cheap = kdf.Params{Memory: 8 * 1024, Time: 1, Par: 1}
 func pieceDeclaring(t *testing.T, declared kdf.Params) []byte {
 	t.Helper()
 	piece, err := format.Encode(format.EncodeInput{
+		Details: format.Details{
+			K:         2,
+			N:         3,
+			KDFStored: true,
+			Params:    cheap,
+		},
 		SetID:       make([]byte, format.SetIDLen),
-		K:           2,
-		N:           3,
 		Serial:      1,
 		PayloadHash: make([]byte, 32),
 		Share:       []byte("xxxxxxxxxx"),
-		RecordKDF:   true,
 		Passwords:   [][]byte{[]byte("pw")},
-		Params:      cheap,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -119,5 +123,74 @@ func TestOpenWorkersFollowsTheWorstPiece(t *testing.T) {
 	}
 	if got < 1 {
 		t.Fatalf("worker count fell to %d", got)
+	}
+}
+
+// TestTheRestOpenTheWayTheReferenceDid checks the pieces after the reference are
+// tried only the way it opened: a strict set's envelope takes every password, so
+// trying the first alone on each piece would double what each costs.
+func TestTheRestOpenTheWayTheReferenceDid(t *testing.T) {
+	const n = 4
+	for _, c := range []struct {
+		info       InfoMode
+		first, all int32
+	}{{InfoStrict, 1, n}, {InfoProtected, n, 0}} {
+		pieces, err := Split([]byte("two passwords"), SplitOptions{N: n, K: 2, Info: c.info, Params: cheap,
+			RecordAlgo: true, RecordKDF: true, Layers: []LayerSpec{
+				{Kind: PasswordLayer, Password: []byte("outermost")},
+				{Kind: PasswordLayer, Password: []byte("innermost")},
+			}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		o := OpenOptions{Passwords: [][]byte{[]byte("outermost"), []byte("innermost")}}
+		op := &opening{pieces: pieces, o: &o, opened: make([]*format.Manifest, n),
+			params: make([]kdf.Params, n), failed: make([]error, n)}
+		var tries [2]atomic.Int32
+		for w, way := range op.passwordWays() {
+			op.ways = append(op.ways, func(p []byte) (*format.Manifest, kdf.Params, error) {
+				tries[w].Add(1)
+				return way(p)
+			})
+		}
+		if err := op.withPasswords(); err != nil || op.count() != n {
+			t.Fatalf("%s: %d of %d opened: %v", c.info, op.count(), n, err)
+		}
+		if first, all := tries[0].Load(), tries[1].Load(); first != c.first || all != c.all {
+			t.Fatalf("%s: the first password alone was tried %d times and every password %d, want %d and %d",
+				c.info, first, all, c.first, c.all)
+		}
+	}
+}
+
+// TestTheRestOpenAtTheCostTheReferenceDid checks the pieces after the reference
+// are tried at the cost it opened with. A set that did not record its cost has
+// noise in every cost byte, and noise that happens to be the cost opens that
+// piece alone: the others, tried at their own bytes, would be taken for damaged.
+func TestTheRestOpenAtTheCostTheReferenceDid(t *testing.T) {
+	const n = 3
+	pieces, err := Split([]byte("cost by chance"), SplitOptions{N: n, K: 2, Params: cheap, RecordAlgo: true,
+		Layers: []LayerSpec{{Kind: PasswordLayer, Password: []byte("pw")}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := OpenOptions{Passwords: [][]byte{[]byte("pw")}}
+	op := &opening{pieces: pieces, o: &o, opened: make([]*format.Manifest, n),
+		params: make([]kdf.Params, n), failed: make([]error, n)}
+	// Tried at its own cost byte, only the first piece's noise is the cost. The
+	// others fail without the derivation their noise asks for, which can be a
+	// gibibyte.
+	op.ways = []decoder{func(p []byte) (*format.Manifest, kdf.Params, error) {
+		cost := o.Params
+		if cost == nil {
+			if !bytes.Equal(p, pieces[0]) {
+				return nil, kdf.Params{}, format.ErrWrongPassword
+			}
+			cost = &cheap
+		}
+		return format.DecodePassword(p, o.Passwords, cost)
+	}}
+	if err := op.withPasswords(); err != nil || op.count() != n {
+		t.Fatalf("%d of %d opened once the first opened at its own cost byte: %v", op.count(), n, err)
 	}
 }

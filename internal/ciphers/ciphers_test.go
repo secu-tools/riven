@@ -22,6 +22,9 @@ func TestAllSchemesRoundTrip(t *testing.T) {
 			if aead.NonceSize() != s.NonceLen {
 				t.Fatalf("nonce size mismatch: got %d want %d", aead.NonceSize(), s.NonceLen)
 			}
+			if aead.Overhead() != s.TagLen {
+				t.Fatalf("tag length mismatch: got %d want %d", aead.Overhead(), s.TagLen)
+			}
 			for _, n := range []int{0, 1, 15, 16, 17, 1000} {
 				pt := make([]byte, n)
 				rand.Read(pt)
@@ -83,31 +86,28 @@ func TestRegistryIsConsistent(t *testing.T) {
 			t.Fatalf("%s: nonce length %d", s.Name, s.NonceLen)
 		}
 	}
-	if Count() != len(All()) {
-		t.Fatal("Count disagrees with All")
-	}
-	if len(Names()) != Count() {
-		t.Fatal("Names disagrees with Count")
+	if len(Names()) != len(All()) {
+		t.Fatal("Names disagrees with All")
 	}
 }
 
-// TestCascadeNeverRepeatsAdjacent covers the sequence used to suggest algorithms
-// for successive layers.
-func TestCascadeNeverRepeatsAdjacent(t *testing.T) {
-	for n := 1; n <= Count()*3; n++ {
+// TestCascadeTakesTurnsAmongDesigns covers the order layers that name no
+// algorithm take one in: AES, then ChaCha20, then Twofish, starting over.
+func TestCascadeTakesTurnsAmongDesigns(t *testing.T) {
+	want := []string{"aes-256-gcm", "xchacha20-poly1305", "twofish-256-gcm", "aes-256-gcm"}
+	for i, id := range Cascade(len(want)) {
+		if Name(id) != want[i] {
+			t.Fatalf("layer %d defaults to %s, want %s", i+1, Name(id), want[i])
+		}
+	}
+	for n := 1; n <= len(All())*3; n++ {
 		seq := Cascade(n)
 		if len(seq) != n {
 			t.Fatalf("Cascade(%d) returned %d ids", n, len(seq))
 		}
-		for i := range seq {
-			if _, ok := ByID(seq[i]); !ok {
-				t.Fatalf("Cascade(%d) produced unknown id %d", n, seq[i])
-			}
-			if i > 0 && seq[i] == seq[i-1] {
-				t.Fatalf("Cascade(%d) repeated id %d at %d", n, seq[i], i)
-			}
-			if Nth(i) != seq[i] {
-				t.Fatalf("Nth(%d) disagrees with Cascade", i)
+		for i := 1; i < n; i++ {
+			if a, b := mustID(t, seq[i-1]), mustID(t, seq[i]); a.design == b.design {
+				t.Fatalf("Cascade(%d) puts %s under %s, the same design", n, b.Name, a.Name)
 			}
 		}
 	}
@@ -117,6 +117,46 @@ func TestCascadeNeverRepeatsAdjacent(t *testing.T) {
 	if seq := Cascade(1); seq[0] != Default().ID {
 		t.Fatal("first cascade algorithm should be the default")
 	}
+}
+
+// A layer chosen by hand may share a design with the next layer's turn, as
+// chacha20-poly1305 does with xchacha20-poly1305: the default then moves on, so
+// one break still cannot reach both.
+func TestSuggestedNeverSharesTheDesignAbove(t *testing.T) {
+	for _, s := range All() {
+		if s.design == "" {
+			t.Fatalf("%s names no design", s.Name)
+		}
+	}
+	for i := 0; i < len(suggested)*2; i++ {
+		for _, above := range All() {
+			got := mustID(t, Suggested(i, above.ID))
+			if got.design == above.design {
+				t.Fatalf("layer %d under %s defaults to %s, the same design", i+1, above.Name, got.Name)
+			}
+		}
+	}
+	if got := Name(Suggested(1, mustName(t, "chacha20-poly1305").ID)); got != "twofish-256-gcm" {
+		t.Fatalf("a second layer under chacha20-poly1305 defaults to %s, want twofish-256-gcm", got)
+	}
+}
+
+func mustID(t *testing.T, id uint8) Scheme {
+	t.Helper()
+	s, ok := ByID(id)
+	if !ok {
+		t.Fatalf("unknown id %d", id)
+	}
+	return s
+}
+
+func mustName(t *testing.T, name string) Scheme {
+	t.Helper()
+	s, ok := ByName(name)
+	if !ok {
+		t.Fatalf("unknown scheme %s", name)
+	}
+	return s
 }
 
 func TestParseList(t *testing.T) {

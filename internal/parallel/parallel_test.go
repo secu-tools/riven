@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -120,6 +121,31 @@ func TestDoSerialPathStopsAtTheFirstFailure(t *testing.T) {
 	}
 	if ran != 2 {
 		t.Fatalf("serial path ran %d indexes, want it to stop after the failure", ran)
+	}
+}
+
+// TestDoPassesAPanicToTheCaller checks a panic in a worker reaches the goroutine
+// that called Do, after every worker has stopped, rather than ending the process
+// from a goroutine nothing defers in. The caller's own deferred cleanup, which
+// restores the terminal and wipes secrets, then runs as it would for any panic.
+func TestDoPassesAPanicToTheCaller(t *testing.T) {
+	var ran atomic.Int32
+	got := func() (r any) {
+		defer func() { r = recover() }()
+		_ = Do(8, 4, func(i int) error {
+			ran.Add(1)
+			if i == 3 {
+				panic("worker failed")
+			}
+			return nil
+		})
+		return nil
+	}()
+	if got == nil || !strings.Contains(fmt.Sprint(got), "worker failed") {
+		t.Fatalf("the caller recovered %v, want the worker's panic", got)
+	}
+	if ran.Load() != 8 {
+		t.Fatalf("%d of 8 indexes ran: the other workers must finish before the panic is passed on", ran.Load())
 	}
 }
 

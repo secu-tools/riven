@@ -92,7 +92,7 @@ func TestSplitRefusesADirectory(t *testing.T) {
 	if err := os.MkdirAll(src, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	log, err := riven(t, env1, "split", src, "--password-env", flagPw1, "--kdf", "m=8,t=1,p=1", "-y")
+	log, err := riven(t, env1, "split", src, "--password-env", flagPw1, "--kdf", cheapKDF, "-y")
 	if err == nil {
 		t.Fatalf("a directory is not an input:\n%s", log)
 	}
@@ -110,11 +110,11 @@ func TestRecordedNameRestoresTheFile(t *testing.T) {
 	out := filepath.Join(dir, "pieces")
 
 	log, err := riven(t, env1, "split", in, "-n", "3", "-k", "2",
-		"--password-env", flagPw1, "--kdf", "m=8,t=1,p=1", "--out", out, "-y")
+		"--password-env", flagPw1, "--kdf", cheapKDF, "--out", out, "-y")
 	if err != nil {
 		t.Fatalf("split: %v\n%s", err, log)
 	}
-	if !strings.Contains(log, "quarterly.pdf") || !strings.Contains(log, "recorded inside the pieces") {
+	if !strings.Contains(log, `pieces of "quarterly.pdf" written`) {
 		t.Errorf("the split should say the name was recorded:\n%s", log)
 	}
 
@@ -152,7 +152,7 @@ func TestNameIsNotRecordedWhenRefused(t *testing.T) {
 	out := filepath.Join(dir, "pieces")
 
 	log, err := riven(t, env1, "split", in, "-n", "2", "-k", "2", "--record-name", "false",
-		"--password-env", flagPw1, "--kdf", "m=8,t=1,p=1", "--out", out, "-y")
+		"--password-env", flagPw1, "--kdf", cheapKDF, "--out", out, "-y")
 	if err != nil {
 		t.Fatalf("split: %v\n%s", err, log)
 	}
@@ -171,7 +171,7 @@ func TestNameIsNotRecordedWhenRefused(t *testing.T) {
 
 	// The flag is refused where there is no name at all.
 	if log, err := riven(t, env1, "split", "--text", "abc", "--record-name", "true",
-		"--password-env", flagPw1, "--kdf", "m=8,t=1,p=1", "-o", dir, "-y"); err == nil {
+		"--password-env", flagPw1, "--kdf", cheapKDF, "-o", dir, "-y"); err == nil {
 		t.Errorf("--record-name true has no meaning for --text:\n%s", log)
 	}
 }
@@ -184,7 +184,7 @@ func TestVerifyReadsAWholeDirectory(t *testing.T) {
 	out := filepath.Join(dir, "pieces")
 
 	if log, err := riven(t, env1, "split", in, "-n", "3", "-k", "2",
-		"--password-env", flagPw1, "--kdf", "m=8,t=1,p=1",
+		"--password-env", flagPw1, "--kdf", cheapKDF,
 		"-f", "binary,base64,base32", "--out", out, "-y"); err != nil {
 		t.Fatalf("split: %v\n%s", err, log)
 	}
@@ -193,7 +193,7 @@ func TestVerifyReadsAWholeDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify a directory: %v\n%s", err, log)
 	}
-	if !strings.Contains(log, "3 of 3 distinct pieces held") {
+	if !strings.Contains(log, "3 of 3 pieces held") {
 		t.Errorf("nine files are three pieces:\n%s", log)
 	}
 	if !strings.Contains(log, "hold the same piece as another") {
@@ -214,7 +214,7 @@ func assertExportRefused(t *testing.T, format, wantErr string) {
 	out := filepath.Join(dir, "pieces")
 
 	log, err := riven(t, env1, "split", in, "-n", "2", "-k", "2",
-		"--password-env", flagPw1, "--kdf", "m=8,t=1,p=1", "-f", format, "--out", out, "-y")
+		"--password-env", flagPw1, "--kdf", cheapKDF, "-f", format, "--out", out, "-y")
 	if err == nil {
 		t.Fatalf("a 64 KiB piece cannot be exported as %s:\n%s", format, log)
 	}
@@ -242,7 +242,7 @@ func TestWordsRoundTripThroughTheBinary(t *testing.T) {
 	out := filepath.Join(dir, "pieces")
 
 	if log, err := riven(t, env1, "split", in, "-n", "3", "-k", "2",
-		"--password-env", flagPw1, "--kdf", "m=8,t=1,p=1", "-f", "words", "--out", out, "-y"); err != nil {
+		"--password-env", flagPw1, "--kdf", cheapKDF, "-f", "words", "--out", out, "-y"); err != nil {
 		t.Fatalf("split: %v\n%s", err, log)
 	}
 
@@ -312,7 +312,7 @@ func TestMultiPageSheetSaysSo(t *testing.T) {
 	out := filepath.Join(dir, "pieces")
 
 	log, err := riven(t, env1, "split", in, "-n", "2", "-k", "2",
-		"--password-env", flagPw1, "--kdf", "m=8,t=1,p=1", "-f", "sheet", "--out", out, "-y")
+		"--password-env", flagPw1, "--kdf", cheapKDF, "-f", "sheet", "--out", out, "-y")
 	if err != nil {
 		t.Fatalf("split: %v\n%s", err, log)
 	}

@@ -124,7 +124,9 @@ func TestRecipientKeyCost(t *testing.T) {
 }
 
 // TestWrongRecipientKeyRejected checks that a key of another type fails with a
-// message naming the mismatch rather than silently producing garbage.
+// message naming the mismatch rather than silently producing garbage. A set
+// with public details opens to the layer, which names both sizes; protected
+// details keep even that from a key that is not the one.
 func TestWrongRecipientKeyRejected(t *testing.T) {
 	dir := t.TempDir()
 	secret := []byte("the key type must match")
@@ -140,19 +142,24 @@ func TestWrongRecipientKeyRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out := filepath.Join(dir, "o")
-	if _, err := riven(t, nil, "split", in, "-n", "2", "-k", "2",
-		"--recipient", pubA, "--identity", privA, "--out", out, "-y"); err != nil {
-		t.Fatal(err)
-	}
+	for _, info := range []string{"public", "protected"} {
+		out := filepath.Join(dir, info)
+		if _, err := riven(t, nil, "split", in, "-n", "2", "-k", "2", "--info", info,
+			"--recipient", pubA, "--identity", privA, "--out", out, "-y"); err != nil {
+			t.Fatal(err)
+		}
 
-	o, err := riven(t, nil, "combine", filepath.Join(out, "m.bin.1"), filepath.Join(out, "m.bin.2"),
-		"--identity", privB, "--out", filepath.Join(dir, "x"), "-y")
-	if err == nil {
-		t.Fatal("an ml-kem-768 key should not open an ml-kem-1024 set")
-	}
-	if !strings.Contains(o, "1568") || !strings.Contains(o, "1088") {
-		t.Fatalf("the error should name both encapsulated key sizes:\n%s", o)
+		o, err := riven(t, nil, "combine", filepath.Join(out, "m.bin.1"), filepath.Join(out, "m.bin.2"),
+			"--identity", privB, "--out", filepath.Join(dir, "x"), "-y")
+		if err == nil {
+			t.Fatalf("%s: an ml-kem-768 key should not open an ml-kem-1024 set", info)
+		}
+		if info == "public" && (!strings.Contains(o, "1568") || !strings.Contains(o, "1088")) {
+			t.Fatalf("the error should name both encapsulated key sizes:\n%s", o)
+		}
+		if info == "protected" && !strings.Contains(o, "did not open") {
+			t.Fatalf("the error should say the pieces did not open:\n%s", o)
+		}
 	}
 }
 

@@ -22,11 +22,12 @@ func TestPieceMatchesTheSpecification(t *testing.T) {
 	const (
 		specHeaderLen = 41 // salt 16 + cost 1 + nonce 24
 		specTagLen    = 16
-		specFixedBody = 71 // version 2 + set id 16 + k/n/serial/flags 4 + hash 32 + count 1 + four u32 prefixes 16 (name, creator version, creator commit, share)
+		specFixedBody = 79 // version 2 + set id 16 + k/n/serial/flags 4 + hash 32 + count 1 + six u32 prefixes 24 (name, creator version, creator commit, share, fragment, details)
 	)
 
 	setID := []byte("0123456789abcdef")
 	share := []byte{0x11, 0x22, 0x33, 0x44, 0x55}
+	fragment := []byte{0x07, 0x99, 0x98}
 	name := "spec.bin"
 	hash := blake2b.Sum256([]byte("payload"))
 	params := kdf.Params{Memory: 32 * 1024, Time: 3, Par: 2}
@@ -36,23 +37,34 @@ func TestPieceMatchesTheSpecification(t *testing.T) {
 	creatorCommit := "abc1234"
 
 	piece, err := Encode(EncodeInput{
-		SetID: setID, K: 3, N: 5, Serial: 2,
-		PayloadHash: hash[:],
-		Share:       share, Name: name,
-		CreatorVersion: creatorVersion, CreatorCommit: creatorCommit,
-		Encrypted: true, RecordAlgo: true, RecordKDF: true,
-		Layers: []cascade.Descriptor{
-			{Kind: cascade.Password, SchemeID: 2, Recorded: true},
-			{Kind: cascade.KEM, SchemeID: 1, Recorded: true},
+		Details: Details{
+			K:              3,
+			N:              5,
+			Name:           name,
+			CreatorVersion: creatorVersion,
+			CreatorCommit:  creatorCommit,
+			Encrypted:      true,
+			AlgoStored:     true,
+			KDFStored:      true,
+			Layers: []cascade.Descriptor{
+				{Kind: cascade.Password, SchemeID: 2, Recorded: true},
+				{Kind: cascade.KEM, SchemeID: 1, Recorded: true},
+			},
+			Params: params,
 		},
-		Passwords: [][]byte{password}, Params: params,
+		SetID:       setID,
+		Serial:      2,
+		PayloadHash: hash[:],
+		Share:       share,
+		Fragment:    fragment,
+		Passwords:   [][]byte{password},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Section 2: the piece length formula.
-	wantLen := specHeaderLen + specFixedBody + 2*2 + len(name) + len(creatorVersion) + len(creatorCommit) + len(share) + specTagLen
+	wantLen := specHeaderLen + specFixedBody + 2*2 + len(name) + len(creatorVersion) + len(creatorCommit) + len(share) + len(fragment) + specTagLen
 	if len(piece) != wantLen {
 		t.Fatalf("piece is %d bytes, the specification says %d", len(piece), wantLen)
 	}
@@ -127,6 +139,8 @@ func TestPieceMatchesTheSpecification(t *testing.T) {
 		flagAlgoRec = 0x04
 		flagKDFRec  = 0x08
 		flagKeyless = 0x10
+		flagCompact = 0x20
+		flagHidden  = 0x40
 	)
 	if flags&flagEnc == 0 || flags&flagAlgoRec == 0 || flags&flagKDFRec == 0 {
 		t.Fatalf("flags are %#02x, want encrypted and both recording bits", flags)
@@ -134,8 +148,11 @@ func TestPieceMatchesTheSpecification(t *testing.T) {
 	if flags&flagKeyless != 0 {
 		t.Fatalf("flags are %#02x, this piece has a password", flags)
 	}
-	if flags&0xE0 != 0 {
-		t.Fatalf("flags are %#02x, bits 5 to 7 are reserved and must be zero", flags)
+	if flags&flagCompact == 0 || flags&flagHidden != 0 {
+		t.Fatalf("flags are %#02x, want compact with the details shown", flags)
+	}
+	if flags&0x80 != 0 {
+		t.Fatalf("flags are %#02x, bit 7 is reserved and must be zero", flags)
 	}
 
 	if got := raw(32); !bytes.Equal(got, hash[:]) {
@@ -165,6 +182,12 @@ func TestPieceMatchesTheSpecification(t *testing.T) {
 	if got := blob(); !bytes.Equal(got, share) {
 		t.Fatalf("share is %x, want %x", got, share)
 	}
+	if got := blob(); !bytes.Equal(got, fragment) {
+		t.Fatalf("fragment is %x, want %x", got, fragment)
+	}
+	if got := blob(); len(got) != 0 {
+		t.Fatalf("details share is %x, want none when the details are shown", got)
+	}
 	if pos != len(body) {
 		t.Fatalf("%d bytes left after the documented fields", len(body)-pos)
 	}
@@ -175,9 +198,15 @@ func TestPieceMatchesTheSpecification(t *testing.T) {
 // password.
 func TestKeylessEnvelopeMatchesTheSpecification(t *testing.T) {
 	piece, err := Encode(EncodeInput{
-		SetID: make([]byte, 16), K: 2, N: 3, Serial: 1,
+		Details: Details{
+			K: 2,
+			N: 3,
+		},
+		SetID:       make([]byte, 16),
+		Serial:      1,
 		PayloadHash: make([]byte, 32),
-		Share:       []byte{1, 2, 3, 4, 5}, Keyless: true,
+		Share:       []byte{1, 2, 3, 4, 5},
+		Keyless:     true,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -27,10 +27,22 @@ func reseal(t *testing.T, piece []byte, edit func(m *format.Manifest)) []byte {
 	}
 	edit(m)
 	out, err := format.Encode(format.EncodeInput{
-		SetID: m.SetID, K: m.K, N: m.N, Serial: m.Serial,
-		Encrypted: m.Encrypted, Hybrid: m.Hybrid, RecordAlgo: m.AlgoStored, Keyless: true,
-		PayloadHash: m.PayloadHash, Layers: m.Layers,
-		Share: m.Share, Name: m.Name, CreatorVersion: m.CreatorVersion, CreatorCommit: m.CreatorCommit,
+		Details: format.Details{
+			K:              m.K,
+			N:              m.N,
+			Encrypted:      m.Encrypted,
+			Hybrid:         m.Hybrid,
+			AlgoStored:     m.AlgoStored,
+			Layers:         m.Layers,
+			Name:           m.Name,
+			CreatorVersion: m.CreatorVersion,
+			CreatorCommit:  m.CreatorCommit,
+		},
+		SetID:       m.SetID,
+		Serial:      m.Serial,
+		Keyless:     true,
+		PayloadHash: m.PayloadHash,
+		Share:       m.Share,
 	})
 	if err != nil {
 		t.Fatal(err)

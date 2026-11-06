@@ -27,7 +27,8 @@ var updateVectors = flag.Bool("update-vectors", false, "rewrite the pieces in te
 
 const vectorDir = "testdata/vectors"
 
-// vectorKeyFile holds the x25519 private key the hybrid vector was sealed to.
+// vectorKeyFile holds the x25519 private key the hybrid and recipient vectors
+// were sealed to.
 // The extension keeps it clear of the .gitignore rule for real key files.
 var vectorKeyFile = filepath.Join(vectorDir, "hybrid.x25519")
 
@@ -36,6 +37,8 @@ type vector struct {
 	content  string
 	fileName string // the name the pieces recorded, if any
 	serials  []int  // the pieces kept, exactly the threshold
+	sealed   bool   // the envelope is sealed to the key, so it opens with nothing less
+	first    bool   // the envelope takes the first password alone
 	split    func(key *kem.PrivateKey) SplitOptions
 	open     func(key *kem.PrivateKey) OpenOptions
 }
@@ -77,7 +80,7 @@ var vectors = []vector{
 		name: "cascade-unrecorded", content: "every algorithm, nothing recorded", serials: []int{2, 3, 4},
 		split: func(*kem.PrivateKey) SplitOptions {
 			layers, _, _ := vectorCascade()
-			return SplitOptions{N: 4, K: 3, Params: vectorCost, Layers: layers}
+			return SplitOptions{N: 4, K: 3, Info: InfoStrict, Params: vectorCost, Layers: layers}
 		},
 		open: func(*kem.PrivateKey) OpenOptions {
 			_, pws, ids := vectorCascade()
@@ -93,9 +96,9 @@ var vectors = []vector{
 		open: func(*kem.PrivateKey) OpenOptions { return OpenOptions{} },
 	},
 	{
-		name: "hybrid", content: "a password and a recipient key", serials: []int{1, 2},
+		name: "hybrid", content: "a password and a recipient key", serials: []int{1, 2}, sealed: true,
 		split: func(key *kem.PrivateKey) SplitOptions {
-			return SplitOptions{N: 2, K: 2, Params: testParams, RecordAlgo: true, RecordKDF: true,
+			return SplitOptions{N: 2, K: 2, Info: InfoStrict, Params: testParams, RecordAlgo: true, RecordKDF: true,
 				Layers: []LayerSpec{
 					{Kind: PasswordLayer, Password: []byte("outer")},
 					{Kind: RecipientLayer, Recipient: key.Public()},
@@ -104,6 +107,55 @@ var vectors = []vector{
 		open: func(key *kem.PrivateKey) OpenOptions {
 			return OpenOptions{Passwords: [][]byte{[]byte("outer")}, PrivateKeys: []*kem.PrivateKey{key}}
 		},
+	},
+	{
+		name: "protected-first", content: "the details behind the first layer", serials: []int{2, 3}, first: true,
+		split: func(key *kem.PrivateKey) SplitOptions {
+			return SplitOptions{N: 3, K: 2, Params: testParams, RecordAlgo: true, RecordKDF: true,
+				Layers: []LayerSpec{
+					{Kind: PasswordLayer, Password: []byte("first")},
+					{Kind: RecipientLayer, Recipient: key.Public()},
+					{Kind: PasswordLayer, Password: []byte("third")},
+				}}
+		},
+		open: func(key *kem.PrivateKey) OpenOptions {
+			return OpenOptions{Passwords: [][]byte{[]byte("first"), []byte("third")}, PrivateKeys: []*kem.PrivateKey{key}}
+		},
+	},
+	{
+		name: "recipient", content: "a recipient key alone", serials: []int{1, 3}, sealed: true,
+		split: func(key *kem.PrivateKey) SplitOptions {
+			return SplitOptions{N: 3, K: 2, Params: testParams, RecordAlgo: true,
+				Layers: []LayerSpec{{Kind: RecipientLayer, Recipient: key.Public()}}}
+		},
+		open: func(key *kem.PrivateKey) OpenOptions {
+			return OpenOptions{PrivateKeys: []*kem.PrivateKey{key}}
+		},
+	},
+	{
+		name: "compact", content: "the compact method, each piece a part", serials: []int{2, 3},
+		split: func(*kem.PrivateKey) SplitOptions {
+			return SplitOptions{N: 3, K: 2, Method: MethodCompact, Params: testParams, RecordAlgo: true, RecordKDF: true,
+				Layers: []LayerSpec{{Kind: PasswordLayer, Password: []byte("compact")}}}
+		},
+		open: func(*kem.PrivateKey) OpenOptions { return OpenOptions{Passwords: [][]byte{[]byte("compact")}} },
+	},
+	{
+		name: "public-details", content: "details readable without the password", serials: []int{1, 2},
+		split: func(*kem.PrivateKey) SplitOptions {
+			return SplitOptions{N: 3, K: 2, Info: InfoPublic, Params: testParams, RecordAlgo: true, RecordKDF: true,
+				Layers: []LayerSpec{{Kind: PasswordLayer, Password: []byte("public")}}}
+		},
+		open: func(*kem.PrivateKey) OpenOptions { return OpenOptions{Passwords: [][]byte{[]byte("public")}} },
+	},
+	{
+		name: "hidden-details", content: "nothing shown on a single piece", fileName: "hidden.txt", serials: []int{1, 3, 4},
+		split: func(*kem.PrivateKey) SplitOptions {
+			return SplitOptions{N: 4, K: 3, Info: InfoHidden, Method: MethodCompact, Name: "hidden.txt",
+				Params: testParams, RecordAlgo: true, RecordKDF: true,
+				Layers: []LayerSpec{{Kind: PasswordLayer, Password: []byte("hidden")}}}
+		},
+		open: func(*kem.PrivateKey) OpenOptions { return OpenOptions{Passwords: [][]byte{[]byte("hidden")}} },
 	},
 }
 
@@ -145,6 +197,19 @@ func TestKnownAnswerVectors(t *testing.T) {
 		// One short of the threshold must still fail.
 		if _, err := Combine(pieces[1:], v.open(key)); err == nil {
 			t.Fatalf("%s: %d of the pieces opened a %d-piece threshold", v.name, len(pieces)-1, len(pieces))
+		}
+		if v.first {
+			opts := v.open(key)
+			if _, err := Info(pieces[0], OpenOptions{Passwords: opts.Passwords[:1]}); err != nil {
+				t.Fatalf("%s: the first password alone did not show the details: %v", v.name, err)
+			}
+		}
+		if v.sealed {
+			withoutKey := v.open(key)
+			withoutKey.PrivateKeys = nil
+			if _, err := Info(pieces[0], withoutKey); err == nil {
+				t.Fatalf("%s: a piece sealed to the key showed its details without it", v.name)
+			}
 		}
 	}
 }

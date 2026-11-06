@@ -20,7 +20,7 @@ import (
 func TestFailedCombineLeavesNoTrace(t *testing.T) {
 	dir := t.TempDir()
 	in := writeFile(t, dir, "s.bin", []byte("the real content"))
-	cheap := []string{"--kdf", "m=8,t=1,p=1", "-y"}
+	cheap := []string{"--kdf", cheapKDF, "-y"}
 
 	split := func(out string, extra ...string) {
 		t.Helper()
@@ -112,9 +112,9 @@ func TestSecretsNeverReachTheOutput(t *testing.T) {
 		succeeds bool
 		args     []string
 	}{
-		{true, append([]string{"split", in, "-n", "3", "-k", "2", "-f", "binary,base64", "--kdf", "m=8,t=1,p=1",
+		{true, append([]string{"split", in, "-n", "3", "-k", "2", "-f", "binary,base64", "--kdf", cheapKDF,
 			"--out", out, "-y"}, pw...)},
-		{true, append([]string{"split", "--text-env", "RIVEN_TEST_TEXT", "-n", "2", "-k", "2", "--kdf", "m=8,t=1,p=1",
+		{true, append([]string{"split", "--text-env", "RIVEN_TEST_TEXT", "-n", "2", "-k", "2", "--kdf", cheapKDF,
 			"--out", filepath.Join(dir, "t"), "-y"}, pw...)},
 		{true, append([]string{"info", p1, "-y"}, pw...)},
 		{true, append([]string{"verify", out, "-y"}, pw...)},
