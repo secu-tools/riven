@@ -77,8 +77,12 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # Every case derives Argon2 keys for every piece, and the race detector
+      # instruments each memory access they make. The suite runs in about a
+      # minute without -race and about 13 minutes under it on a macOS arm64
+      # runner, so the limit is set well above that.
       - name: Run integration tests
-        run: go test -v -tags integration -race -count=1 -timeout 900s ./tests/integration/
+        run: go test -v -tags integration -race -count=1 -timeout 1800s ./tests/integration/
 
   # ---------------------------------------------------------------
   # End-to-end tests: the compiled binary, every protection mode

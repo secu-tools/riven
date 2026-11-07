@@ -569,9 +569,11 @@ func TestEnvelopePasswordsAreAskedOnlyWhenNeeded(t *testing.T) {
 // count, and each once.
 func TestCostAndAlgorithmsAreAskedForOnce(t *testing.T) {
 	// Noise that is the cost, one time in 256, opens the first piece tried
-	// without asking, which is a test of its own in the core package.
+	// without asking, which is a test of its own in the core package. Other
+	// noise is derived at, up to 1 GiB and 8 passes, so dear noise is split
+	// again too, to keep the time from depending on chance.
 	var pieces [][]byte
-	for pieces == nil || noiseIsTheCost(pieces[:2], cheap) {
+	for pieces == nil || noiseUnfit(pieces[:2], cheap) {
 		var err error
 		pieces, err = core.Split([]byte("withheld"), core.SplitOptions{N: 3, K: 2, Params: cheap,
 			Layers: []core.LayerSpec{{Kind: core.PasswordLayer, Password: []byte("pw"), SchemeID: 2}}})
@@ -606,11 +608,13 @@ func TestCostAndAlgorithmsAreAskedForOnce(t *testing.T) {
 	}
 }
 
-// noiseIsTheCost reports whether a cost byte among pieces decodes to cost, as
-// noise in one that did not record it may.
-func noiseIsTheCost(pieces [][]byte, cost kdf.Params) bool {
+// noiseUnfit reports whether a cost byte among pieces, noise in a set that did
+// not record its cost, decodes to cost itself or to more work than 128 MiB at
+// one pass, which a combine without the cost spends deriving.
+func noiseUnfit(pieces [][]byte, cost kdf.Params) bool {
 	for _, p := range pieces {
-		if d, ok := format.PeekParams(p); ok && d == cost {
+		d, ok := format.PeekParams(p)
+		if ok && (d == cost || uint64(d.Memory)*uint64(d.Time) > 128*1024) {
 			return true
 		}
 	}

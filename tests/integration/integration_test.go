@@ -68,10 +68,12 @@ func TestRecordingMatrix(t *testing.T) {
 		for _, recKDF := range []bool{true, false} {
 			name := fmt.Sprintf("algo=%v/kdf=%v", recAlgo, recKDF)
 			t.Run(name, func(t *testing.T) {
-				// An unrecorded cost byte is noise, which is the cost one time in
-				// 256 and then opens without it, so such a set is split again.
+				// An unrecorded cost byte is noise. One time in 256 it is the cost
+				// and opens without it, and otherwise the combine without the
+				// cost below derives at it, up to 1 GiB and 8 passes. Either way
+				// the set is split again, so chance sets neither result nor time.
 				var pieces [][]byte
-				for pieces == nil || !recKDF && noiseIsTheCost(pieces[:2], custom) {
+				for pieces == nil || !recKDF && noiseUnfit(pieces[:2], custom) {
 					var err error
 					pieces, err = core.Split(input, core.SplitOptions{
 						N: 4, K: 2, Params: custom,
@@ -122,11 +124,13 @@ func TestRecordingMatrix(t *testing.T) {
 	}
 }
 
-// noiseIsTheCost reports whether a cost byte among pieces decodes to cost, as
-// noise in one that did not record it may.
-func noiseIsTheCost(pieces [][]byte, cost kdf.Params) bool {
+// noiseUnfit reports whether a cost byte among pieces, noise in a set that did
+// not record its cost, decodes to cost itself or to more work than 128 MiB at
+// one pass, which a combine without the cost spends deriving.
+func noiseUnfit(pieces [][]byte, cost kdf.Params) bool {
 	for _, p := range pieces {
-		if d, ok := format.PeekParams(p); ok && d == cost {
+		d, ok := format.PeekParams(p)
+		if ok && (d == cost || uint64(d.Memory)*uint64(d.Time) > 128*1024) {
 			return true
 		}
 	}
