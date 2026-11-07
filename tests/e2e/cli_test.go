@@ -293,7 +293,7 @@ func TestEmptyDirectoryIsRejected(t *testing.T) {
 	if err == nil {
 		t.Fatalf("an empty directory holds no pieces:\n%s", log)
 	}
-	if !strings.Contains(log, "no files to read") {
+	if !strings.Contains(oneLine(log), "holds no files to read") {
 		t.Errorf("the message should say the directory is empty:\n%s", log)
 	}
 }

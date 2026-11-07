@@ -57,6 +57,12 @@ func riven(t *testing.T, env []string, args ...string) (string, error) {
 	return buf.String(), err
 }
 
+// oneLine joins output into one line of single spaces. Messages wrap to the
+// terminal, and a path in one moves the breaks, so a phrase is matched in this.
+func oneLine(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
 func writeFile(t *testing.T, dir, name string, data []byte) string {
 	t.Helper()
 	p := filepath.Join(dir, name)
@@ -473,7 +479,7 @@ func TestMixedLayerCascade(t *testing.T) {
 	}
 	// The summary must list four layers in the order the flags were given. It
 	// wraps to the terminal, so it is read as one line.
-	flat := strings.Join(strings.Fields(o), " ")
+	flat := oneLine(o)
 	order := []string{"layers password (", "x-wing recipient key (", "ml-kem-1024 recipient key (",
 		"password (", "every private key is needed"}
 	at := 0
