@@ -6,10 +6,13 @@ package compact
 import (
 	"bytes"
 	"crypto/rand"
+	"math"
+	"strings"
 	"testing"
 
 	"golang.org/x/crypto/chacha20"
 
+	"github.com/secu-tools/riven/internal/ciphers"
 	"github.com/secu-tools/riven/internal/testkit"
 )
 
@@ -82,6 +85,25 @@ func TestSealRejectsASizeUnderThePackage(t *testing.T) {
 	}
 }
 
+// TestSealWipesWhatItRefuses checks the payload the caller wrote is wiped when
+// Seal refuses it, as it is when Seal fails later: for a set with no cascade
+// layer that payload is the content itself, left readable in the buffer.
+func TestSealWipesWhatItRefuses(t *testing.T) {
+	for name, payloadLen := range map[string]int{
+		"a buffer too small for the package": 40,
+		"a negative length":                  -1,
+		"a payload over the inner limit":     math.MaxInt,
+	} {
+		data := bytes.Repeat([]byte("secret! "), 8)
+		if _, err := Seal(data, payloadLen); err == nil {
+			t.Fatalf("%s: accepted", name)
+		}
+		if !bytes.Equal(data, make([]byte, len(data))) {
+			t.Fatalf("%s: the buffer was left as it was: %q", name, data)
+		}
+	}
+}
+
 // TestEveryByteMatters is the all-or-nothing property, and the integrity one: a
 // change anywhere in the data, including the transform's own tail and the fill,
 // stops it opening, rather than spoiling just the bytes nearby.
@@ -142,5 +164,20 @@ func TestPackageHidesTheContent(t *testing.T) {
 	}
 	if chi := testkit.ChiSquare(data); chi > 400 {
 		t.Fatalf("the package is not uniform (chi-square %.0f)", chi)
+	}
+}
+
+// TestSealRefusesWhatItsInnerLayerCannotSeal checks a payload over the inner
+// layer's one-call limit is refused by its length, where the AEAD would panic.
+func TestSealRefusesWhatItsInnerLayerCannotSeal(t *testing.T) {
+	inner, _ := ciphers.ByID(innerID)
+	if err := CheckLen(int(inner.MaxLen)); err != nil {
+		t.Fatalf("a payload at the limit was refused: %v", err)
+	}
+	if err := CheckLen(int(inner.MaxLen) + 1); err == nil {
+		t.Fatal("a payload over the limit was accepted")
+	}
+	if _, err := Seal(make([]byte, 64), int(inner.MaxLen)+1); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("Seal took a payload over the limit: %v", err)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/secu-tools/riven/internal/ciphers"
@@ -271,5 +272,61 @@ func TestRegressionKeylessPieceHidesTheLength(t *testing.T) {
 	long := mustSplit(t, bytes.Repeat([]byte("seed words "), 6), opts)
 	if len(short[0]) != len(long[0]) {
 		t.Fatalf("a 4-byte and a 66-byte secret gave pieces of %d and %d bytes", len(short[0]), len(long[0]))
+	}
+}
+
+// Defect: a share or fragment over 4 GiB was written with its u32 length
+// wrapped, so a split of a file that large wrote pieces that never parse. The
+// lengths now have room (TestCarriedLimitFitsTheEnvelope), and what a piece's
+// envelope cannot seal is refused before any piece is made, at exactly the
+// length a piece carries. The limit is lowered so a small input shows it: one
+// share of this input is over it, and so is a compact fragment at K=1, but not
+// one at K=2.
+func TestRegressionOversizedFieldIsRefused(t *testing.T) {
+	saved := format.MaxCarriedLen
+	t.Cleanup(func() { format.MaxCarriedLen = saved })
+	format.MaxCarriedLen = 16 << 10
+
+	if err := fitsPiece(format.Shape{Share: 16 << 10}); err != nil {
+		t.Fatalf("a field of the most a piece holds was refused: %v", err)
+	}
+	if err := fitsPiece(format.Shape{Share: 16<<10 + 1}); err == nil {
+		t.Fatal("a field one byte over the limit was accepted")
+	}
+
+	input := bytes.Repeat([]byte("x"), 24<<10)
+	pw := []byte("p")
+	for _, c := range []struct {
+		method  Method
+		k       int
+		refused bool
+	}{
+		{MethodFull, 2, true},
+		{MethodCompact, 1, true},
+		{MethodCompact, 2, false},
+	} {
+		opts := SplitOptions{N: 3, K: c.k, Method: c.method, Params: testParams, RecordAlgo: true, RecordKDF: true,
+			Layers: []LayerSpec{{Kind: PasswordLayer, Password: pw}}}
+		var pieces [][]byte
+		err := SplitTo(input, opts, func(_ int, p []byte) error {
+			pieces = append(pieces, bytes.Clone(p))
+			return nil
+		})
+		if c.refused {
+			if err == nil || !strings.Contains(err.Error(), "too large to split") {
+				t.Fatalf("%v at K=%d: %v, want it refused as too large", c.method, c.k, err)
+			}
+			if len(pieces) != 0 {
+				t.Fatalf("%v at K=%d made %d pieces before refusing", c.method, c.k, len(pieces))
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("%v at K=%d: %v", c.method, c.k, err)
+		}
+		got, err := Combine(pieces[:c.k], OpenOptions{Passwords: [][]byte{pw}})
+		if err != nil || !bytes.Equal(got, input) {
+			t.Fatalf("%v at K=%d did not rebuild: %v", c.method, c.k, err)
+		}
 	}
 }

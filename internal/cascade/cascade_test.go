@@ -6,6 +6,7 @@ package cascade
 import (
 	"bytes"
 	"errors"
+	"runtime"
 	"testing"
 
 	"github.com/secu-tools/riven/internal/ciphers"
@@ -88,6 +89,44 @@ func TestDecryptInPlace(t *testing.T) {
 	}
 	if !bytes.Contains(payload, pt) {
 		t.Fatal("the plaintext was not written into the payload")
+	}
+}
+
+// TestAKeyOfAnotherTypeCostsNoCopy checks a key that cannot decapsulate the
+// layer, as one of another type cannot, does not make the layer open through a
+// scratch copy of the payload: with one key left to try, it opens in place.
+func TestAKeyOfAnotherTypeCostsNoCopy(t *testing.T) {
+	right, err := kem.Generate(kem.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherType, err := kem.Generate(kem.X25519)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ss, ct, err := right.Public().Encapsulate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pt := bytes.Repeat([]byte("one key fits "), 1<<17)
+	payload, err := encrypt(pt, []Layer{{Kind: KEM, SchemeID: 1, KEMSecret: ss, KEMCiphertext: ct}}, fastProfile, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decaps := []Decapsulator{
+		func(c []byte) ([]byte, error) { return otherType.Decapsulate(c) },
+		func(c []byte) ([]byte, error) { return right.Decapsulate(c) },
+	}
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	got, err := Decrypt(payload, nil, decaps, fastProfile, nil)
+	runtime.ReadMemStats(&after)
+	if err != nil || !bytes.Equal(got, pt) {
+		t.Fatalf("decrypt: %v", err)
+	}
+	if n := after.TotalAlloc - before.TotalAlloc; n > uint64(len(payload)/2) {
+		t.Fatalf("opening a %d-byte payload allocated %d bytes", len(payload), n)
 	}
 }
 
@@ -295,5 +334,33 @@ func TestEncryptToNeedsTheExactLength(t *testing.T) {
 	}
 	if _, err := Len(10, []Layer{{Kind: Kind(7), SchemeID: 1}}); err == nil {
 		t.Fatal("Len accepted an unknown layer kind")
+	}
+}
+
+// TestLenRefusesWhatALayerCannotSeal checks a payload too large for one AEAD call
+// is refused by its length, before any buffer exists, where the AEAD would panic.
+// Each layer seals the tags of the layers inside it as well.
+func TestLenRefusesWhatALayerCannotSeal(t *testing.T) {
+	gcm, _ := ciphers.ByName("aes-256-gcm")
+	chacha, _ := ciphers.ByName("chacha20-poly1305")
+	layer := func(s ciphers.Scheme) Layer { return Layer{Kind: Password, SchemeID: s.ID, Password: []byte("pw")} }
+	n := int(gcm.MaxLen)
+	for _, c := range []struct {
+		name   string
+		n      int
+		layers []Layer
+		ok     bool
+	}{
+		{"gcm at its limit", n, []Layer{layer(gcm)}, true},
+		{"gcm one byte over", n + 1, []Layer{layer(gcm)}, false},
+		{"gcm inside chacha", n, []Layer{layer(chacha), layer(gcm)}, true},
+		{"gcm around chacha, sealing its tag", n, []Layer{layer(gcm), layer(chacha)}, false},
+		{"gcm around chacha, room for the tag", n - chacha.TagLen, []Layer{layer(gcm), layer(chacha)}, true},
+		{"chacha past gcm's limit", n + 1, []Layer{layer(chacha)}, true},
+		{"chacha one byte over its own", int(chacha.MaxLen) + 1, []Layer{layer(chacha)}, false},
+	} {
+		if _, err := Len(c.n, c.layers); (err == nil) != c.ok {
+			t.Errorf("%s: %v", c.name, err)
+		}
 	}
 }

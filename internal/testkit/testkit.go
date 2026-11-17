@@ -39,3 +39,35 @@ func Subsets(n, k int, fn func(idx []int)) {
 	}
 	rec(0, 0)
 }
+
+// GF16Mul multiplies in GF(2^16) modulo x^16 + x^12 + x^3 + x + 1, the field of
+// docs/format.md section 6, by shift and add. It is written from the definition
+// and shares no code with the field Riven uses, so tests can check that against
+// it.
+func GF16Mul(a, b uint16) uint16 {
+	var p uint16
+	for ; b != 0; b >>= 1 {
+		if b&1 != 0 {
+			p ^= a
+		}
+		carry := a & 0x8000
+		a <<= 1
+		if carry != 0 {
+			a ^= 0x100B
+		}
+	}
+	return p
+}
+
+// GF16Inv returns a^(2^16-2), the inverse of a non-zero a, since every non-zero
+// element to the power 2^16-1 is one.
+func GF16Inv(a uint16) uint16 {
+	r := uint16(1)
+	for e := 1<<16 - 2; e > 0; e >>= 1 {
+		if e&1 != 0 {
+			r = GF16Mul(r, a)
+		}
+		a = GF16Mul(a, a)
+	}
+	return r
+}

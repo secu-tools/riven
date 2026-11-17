@@ -4,9 +4,7 @@
 package app
 
 import (
-	"bytes"
-	"io"
-	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -16,31 +14,6 @@ import (
 	"github.com/secu-tools/riven/internal/kem"
 	"github.com/secu-tools/riven/internal/pieceio"
 )
-
-// capture returns whatever fn prints to standard output.
-func capture(t *testing.T, fn func()) string {
-	t.Helper()
-	old := os.Stdout
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout = w
-	// Drain while fn runs: the usage text is larger than a pipe buffer, so
-	// reading afterwards would deadlock.
-	done := make(chan string)
-	go func() {
-		var buf bytes.Buffer
-		io.Copy(&buf, r)
-		done <- buf.String()
-	}()
-	fn()
-	w.Close()
-	os.Stdout = old
-	out := <-done
-	r.Close()
-	return out
-}
 
 // TestUsageListsEveryChoice checks the help text is generated from the same
 // registries the code uses, so a newly registered algorithm, key type, preset or
@@ -124,24 +97,31 @@ func TestKeygenTypeListStatesTheCost(t *testing.T) {
 	}
 }
 
-func TestFormatNames(t *testing.T) {
-	got := formatNames()
+// TestUsageListsEveryFormat checks the help names every export format, in one
+// list under its heading.
+func TestUsageListsEveryFormat(t *testing.T) {
+	usage := capture(t, printUsage)
+	_, list, found := strings.Cut(usage, "EXPORT FORMATS\n")
+	if !found {
+		t.Fatalf("the help has no export formats section:\n%s", usage)
+	}
+	list, _, _ = strings.Cut(list, "\n")
 	for _, f := range pieceio.All() {
-		if !strings.Contains(got, f.String()) {
-			t.Fatalf("formatNames is missing %q", f)
+		if !slices.Contains(strings.Split(strings.TrimSpace(list), ", "), f.String()) {
+			t.Fatalf("the help's format list %q is missing %q", list, f)
 		}
 	}
 }
 
 func TestJoinHelpers(t *testing.T) {
-	if got := joinUint32([]uint32{1, 16, 1024}); got != "1/16/1024" {
-		t.Fatalf("joinUint32 gave %q", got)
+	if got := joinChoices([]uint32{1, 16, 1024}); got != "1/16/1024" {
+		t.Fatalf("joinChoices gave %q", got)
 	}
-	if got := joinUint8([]uint8{1, 2, 4}); got != "1/2/4" {
-		t.Fatalf("joinUint8 gave %q", got)
+	if got := joinChoices([]uint8{1, 2, 4}); got != "1/2/4" {
+		t.Fatalf("joinChoices gave %q", got)
 	}
-	if got := joinUint32(nil); got != "" {
-		t.Fatalf("joinUint32(nil) gave %q", got)
+	if got := joinChoices[uint32](nil); got != "" {
+		t.Fatalf("joinChoices(nil) gave %q", got)
 	}
 }
 

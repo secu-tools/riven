@@ -22,11 +22,11 @@ func TestPieceMatchesTheSpecification(t *testing.T) {
 	const (
 		specHeaderLen = 41 // salt 16 + cost 1 + nonce 24
 		specTagLen    = 16
-		specFixedBody = 79 // version 2 + set id 16 + k/n/serial/flags 4 + hash 32 + count 1 + six u32 prefixes 24 (name, creator version, creator commit, share, fragment, details)
+		specFixedBody = 82 // version 2 + set id 16 + k/n/serial 6 + flags 1 + hash 32 + count 1 + four u32 prefixes and a u64 24 (name, creator version, creator commit, details share, fragment)
 	)
 
 	setID := []byte("0123456789abcdef")
-	share := []byte{0x11, 0x22, 0x33, 0x44, 0x55}
+	share := []byte{0x11, 0x22, 0x33, 0x44, 0x55, 0x66}
 	fragment := []byte{0x07, 0x99, 0x98}
 	name := "spec.bin"
 	hash := blake2b.Sum256([]byte("payload"))
@@ -38,8 +38,8 @@ func TestPieceMatchesTheSpecification(t *testing.T) {
 
 	piece, err := Encode(EncodeInput{
 		Details: Details{
-			K:              3,
-			N:              5,
+			K:              300,
+			N:              1000,
 			Name:           name,
 			CreatorVersion: creatorVersion,
 			CreatorCommit:  creatorCommit,
@@ -53,18 +53,19 @@ func TestPieceMatchesTheSpecification(t *testing.T) {
 			Params: params,
 		},
 		SetID:       setID,
-		Serial:      2,
+		Serial:      777,
 		PayloadHash: hash[:],
 		Share:       share,
 		Fragment:    fragment,
 		Passwords:   [][]byte{password},
+		Pad:         true,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Section 2: the piece length formula.
-	wantLen := specHeaderLen + specFixedBody + 2*2 + len(name) + len(creatorVersion) + len(creatorCommit) + len(share) + len(fragment) + specTagLen
+	wantLen := specHeaderLen + specFixedBody + 2*2 + len(name) + len(creatorVersion) + len(creatorCommit) + len(share) + 1 + len(fragment) + specTagLen
 	if len(piece) != wantLen {
 		t.Fatalf("piece is %d bytes, the specification says %d", len(piece), wantLen)
 	}
@@ -116,9 +117,12 @@ func TestPieceMatchesTheSpecification(t *testing.T) {
 	blob := func() []byte {
 		n := int(binary.BigEndian.Uint32(body[pos:]))
 		pos += 4
-		v := body[pos : pos+n]
-		pos += n
-		return v
+		return raw(n)
+	}
+	blob64 := func() []byte {
+		n := int(binary.BigEndian.Uint64(body[pos:]))
+		pos += 8
+		return raw(n)
 	}
 
 	if v := u16(); v != 2 {
@@ -127,8 +131,8 @@ func TestPieceMatchesTheSpecification(t *testing.T) {
 	if got := raw(16); !bytes.Equal(got, setID) {
 		t.Fatalf("set id is %x", got)
 	}
-	if k, n, serial := u8(), u8(), u8(); k != 3 || n != 5 || serial != 2 {
-		t.Fatalf("k/n/serial are %d/%d/%d, want 3/5/2", k, n, serial)
+	if k, n, serial := u16(), u16(), u16(); k != 300 || n != 1000 || serial != 777 {
+		t.Fatalf("k/n/serial are %d/%d/%d, want 300/1000/777", k, n, serial)
 	}
 
 	// Section 3.1: the flag bits.
@@ -179,17 +183,16 @@ func TestPieceMatchesTheSpecification(t *testing.T) {
 	if got := blob(); string(got) != creatorCommit {
 		t.Fatalf("creator commit is %q, want %q", got, creatorCommit)
 	}
-	if got := blob(); !bytes.Equal(got, share) {
-		t.Fatalf("share is %x, want %x", got, share)
-	}
-	if got := blob(); !bytes.Equal(got, fragment) {
-		t.Fatalf("fragment is %x, want %x", got, fragment)
-	}
 	if got := blob(); len(got) != 0 {
 		t.Fatalf("details share is %x, want none when the details are shown", got)
 	}
-	if pos != len(body) {
-		t.Fatalf("%d bytes left after the documented fields", len(body)-pos)
+	if got := blob64(); !bytes.Equal(got, fragment) {
+		t.Fatalf("fragment is %x, want %x", got, fragment)
+	}
+	// The share runs to the end of the manifest, with no length of its own,
+	// except for a zero byte of padding when what is left is odd.
+	if got := body[pos:]; !bytes.Equal(got, append(share, 0)) {
+		t.Fatalf("share and padding are %x, want %x then a zero byte", got, share)
 	}
 }
 
@@ -205,7 +208,7 @@ func TestKeylessEnvelopeMatchesTheSpecification(t *testing.T) {
 		SetID:       make([]byte, 16),
 		Serial:      1,
 		PayloadHash: make([]byte, 32),
-		Share:       []byte{1, 2, 3, 4, 5},
+		Share:       []byte{1, 2, 3, 4, 5, 6},
 		Keyless:     true,
 	})
 	if err != nil {
@@ -225,7 +228,7 @@ func TestKeylessEnvelopeMatchesTheSpecification(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the keyless envelope did not open with the documented key: %v", err)
 	}
-	if flags := body[21]; flags&0x10 == 0 {
+	if flags := body[24]; flags&0x10 == 0 {
 		t.Fatalf("flags are %#02x, the keyless bit should be set", flags)
 	}
 }

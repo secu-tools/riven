@@ -196,3 +196,22 @@ func TestKeyFileIgnoresCommentsAndBlanks(t *testing.T) {
 		t.Fatal("wrong scheme after annotation")
 	}
 }
+
+// TestAKeyPairThatCannotBeWrittenLeavesNoPrivateKey checks a key pair is
+// written public key first, so a public key that cannot be written stops it
+// before a private key exists whose public half is nowhere.
+func TestAKeyPairThatCannotBeWrittenLeavesNoPrivateKey(t *testing.T) {
+	priv, err := kem.Generate(kem.X25519)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	pub := filepath.Join(dir, "missing", "k.pub")
+	key := filepath.Join(dir, "k.key")
+	if err := writeKeyPair(&cliOptions{yes: true}, priv, pub, key); err == nil {
+		t.Fatal("a public key in a folder that does not exist was written")
+	}
+	if _, err := os.Stat(key); err == nil {
+		t.Fatal("the private key was written although its public half was not")
+	}
+}

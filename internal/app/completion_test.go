@@ -166,6 +166,31 @@ func TestCompletionFlagKindsMatchTheParser(t *testing.T) {
 	}
 }
 
+// TestEveryFlagKindHasACase checks each kind a flag can be given either has a
+// list of values the scripts offer, or is one of the kinds each script handles
+// by hand. A kind with neither would leave its flags completing nothing.
+func TestEveryFlagKindHasACase(t *testing.T) {
+	listed := map[argKind]bool{}
+	for _, c := range choices() {
+		if len(c.values) == 0 {
+			t.Errorf("kind %d offers no values", c.kind)
+		}
+		if len(flagsOfKind(c.kind)) == 0 {
+			t.Errorf("kind %d has values but no flag uses it", c.kind)
+		}
+		listed[c.kind] = true
+	}
+	for flag, kind := range flagArgKinds {
+		switch kind {
+		case argFile, argFree, argEnv:
+		default:
+			if !listed[kind] {
+				t.Errorf("%s has a kind no script completes", flag)
+			}
+		}
+	}
+}
+
 // TestCompletionScriptsAreAscii keeps the scripts inside the character set the
 // rest of the project uses; a stray byte in a sourced file is hard to find.
 func TestCompletionScriptsAreAscii(t *testing.T) {
@@ -303,6 +328,96 @@ try() {
 		case c.want != "" && !strings.Contains(got, c.want):
 			t.Errorf("%v offered %q, which does not include %q", c.words, got, c.want)
 		}
+	}
+}
+
+// TestPowerShellCompletionQuotesFileNames runs the PowerShell completer over a
+// folder whose file names are built to break out of the argument, and parses,
+// without running, each line the user would get by pressing Tab: every one
+// must stay a single command with the file as one argument. Names from a
+// folder of pieces can come from anyone, and the completer once quoted a name
+// only when it held a space, leaving ; and $( live. It is skipped where
+// PowerShell is not installed.
+func TestPowerShellCompletionQuotesFileNames(t *testing.T) {
+	var ps string
+	for _, name := range []string{"pwsh", "powershell"} {
+		if p, err := exec.LookPath(name); err == nil {
+			ps = p
+			break
+		}
+	}
+	if ps == "" {
+		t.Skip("PowerShell is not installed")
+	}
+	dir := t.TempDir()
+	pieces := filepath.Join(dir, "pieces")
+	if err := os.Mkdir(pieces, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	names := []string{
+		"a' ; Write-Output INJECTED ; 'b",
+		"x;Write-Output(1+1)",
+		"y$(Write-Output 2)",
+		"z&Write-Output",
+		"-y",
+		// PowerShell takes the typographic quotes for quotes as well.
+		"curly" + string(rune(0x2019)) + " ; Write-Output INJECTED ; " + string(rune(0x2018)) + "q",
+		"plain.piece.1",
+	}
+	for _, n := range names {
+		if err := os.WriteFile(filepath.Join(pieces, n), nil, 0o600); err != nil {
+			// Not every file system takes every character.
+			t.Logf("cannot create %q here: %v", n, err)
+		}
+	}
+	script := filepath.Join(dir, "riven.ps1")
+	if err := os.WriteFile(script, []byte(scriptFor(t, shellPowerShell)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Each completion is put on the command line as Tab would, then parsed.
+	// A line that is one statement of riven and two plain words is safe; the
+	// file's own name must come back from the argument's value.
+	harness := filepath.Join(dir, "try.ps1")
+	body := `param($script, $dir)
+. $script
+Set-Location $dir
+$line = 'riven combine pieces\'
+$r = TabExpansion2 -inputScript $line -cursorColumn $line.Length
+foreach ($c in $r.CompletionMatches) {
+    $text = 'riven combine ' + $c.CompletionText
+    $tokens = $null; $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$tokens, [ref]$errors)
+    $statements = $ast.EndBlock.Statements
+    $elements = $statements[0].PipelineElements[0].CommandElements
+    $value = $elements[$elements.Count - 1].SafeGetValue()
+    "{0}|{1}|{2}|{3}|{4}" -f $c.ListItemText, $statements.Count, $errors.Count, $elements.Count, $value
+}
+`
+	if err := os.WriteFile(harness, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+		"-File", harness, script, dir).CombinedOutput()
+	if err != nil {
+		t.Fatalf("PowerShell: %v\n%s", err, out)
+	}
+	seen := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		f := strings.Split(strings.TrimRight(line, "\r"), "|")
+		if len(f) != 5 {
+			t.Fatalf("unexpected harness output: %q\n%s", line, out)
+		}
+		seen++
+		if f[1] != "1" || f[2] != "0" || f[3] != "3" {
+			t.Errorf("%q completes to a line of %s statement(s), %s parse error(s) and %s word(s); want 1, 0 and 3",
+				f[0], f[1], f[2], f[3])
+		}
+		if want := filepath.Join("pieces", f[0]); f[4] != want {
+			t.Errorf("%q completes to the argument %q, want %q", f[0], f[4], want)
+		}
+	}
+	if seen < 3 {
+		t.Fatalf("only %d completions came back:\n%s", seen, out)
 	}
 }
 

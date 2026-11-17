@@ -33,10 +33,15 @@ func resolveBuildInfo() {
 	if version != "dev" {
 		return // the build scripts injected real values
 	}
-	bi, ok := debug.ReadBuildInfo()
-	if !ok {
-		return
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		applyBuildInfo(bi)
 	}
+}
+
+// applyBuildInfo takes the version and commit from what Go recorded in the
+// binary: a tagged module version, and the VCS revision, marked when the tree
+// it was built from had changes.
+func applyBuildInfo(bi *debug.BuildInfo) {
 	if v := bi.Main.Version; v != "" && v != "(devel)" && !pseudoVersion(v) {
 		version = v
 	}

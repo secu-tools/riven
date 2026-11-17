@@ -85,11 +85,30 @@ func (r *specReader) u8() byte {
 	return 0
 }
 
+func (r *specReader) u16() uint16 {
+	if v := r.take(2); v != nil {
+		return binary.BigEndian.Uint16(v)
+	}
+	return 0
+}
+
 func (r *specReader) blob() []byte {
 	if n := r.take(4); n != nil {
 		return r.take(int(binary.BigEndian.Uint32(n)))
 	}
 	return nil
+}
+
+func (r *specReader) blob64() []byte {
+	if n := r.take(8); n != nil {
+		return r.take(int(binary.BigEndian.Uint64(n)))
+	}
+	return nil
+}
+
+// rest takes whatever is left.
+func (r *specReader) rest() []byte {
+	return r.take(len(r.b))
 }
 
 // specCost decodes the masked cost byte of section 4.
@@ -161,18 +180,22 @@ func openBySpec(piece []byte, passwords [][]byte, priv hpke.PrivateKey) (*specMa
 	r := &specReader{b: body}
 	r.take(2) // version
 	m := &specManifest{body: body, setID: r.take(16)}
-	m.k, m.n, m.serial = int(r.u8()), int(r.u8()), int(r.u8())
+	m.k, m.n, m.serial = int(r.u16()), int(r.u16()), int(r.u16())
 	m.flags = r.u8()
 	m.hash = r.take(32)
 	r.take(2 * int(r.u8())) // layer descriptors
 	r.blob()                // file name
 	r.blob()                // creator version
 	r.blob()                // creator commit
-	m.share = r.blob()
-	m.fragment = r.blob()
 	m.details = r.blob()
-	if r.err == nil && len(r.b) != 0 {
-		r.err = errors.New("bytes after the details share")
+	m.fragment = r.blob64()
+	m.share = r.rest() // the share runs to the end
+	// A share is even; an odd byte after it is padding, and padding is zero.
+	if n := len(m.share); n%2 != 0 {
+		if m.share[n-1] != 0 {
+			return nil, errors.New("the byte after the share is not zero (section 3)")
+		}
+		m.share = m.share[:n-1]
 	}
 	return m, r.err
 }
@@ -234,7 +257,7 @@ func detailsBySpec(shares [][]byte) (*specDetails, error) {
 		return nil, fmt.Errorf("details of %d bytes are not padded to a multiple of 256 (section 3.5)", len(secret))
 	}
 	r := &specReader{b: body}
-	d := &specDetails{flags: r.u8(), k: int(r.u8()), n: int(r.u8())}
+	d := &specDetails{flags: r.u8(), k: int(r.u16()), n: int(r.u16())}
 	d.cost = costFromByte(r.u8())
 	d.layers = int(r.u8())
 	r.take(2 * d.layers)
@@ -259,18 +282,21 @@ func compactKeysBySpec(t *testing.T, body []byte) (sealedLen int, key1, key2 []b
 	return int(binary.BigEndian.Uint64(body)), body[8:40], body[40:72]
 }
 
+// sym reads symbol i of b, after its two-byte coordinate.
+func sym(b []byte, i int) uint16 { return binary.BigEndian.Uint16(b[2+2*i:]) }
+
 // gatherBySpec rebuilds the dispersed data of section 6.3 from exactly k
 // fragments, solving the Vandermonde system for every group.
 func gatherBySpec(frags [][]byte) []byte {
 	k := len(frags)
 	// The augmented matrix [V | I], reduced to [I | V^-1].
-	a := make([][]byte, k)
+	a := make([][]uint16, k)
 	for r := range a {
-		a[r] = make([]byte, 2*k)
-		p := byte(1)
+		a[r] = make([]uint16, 2*k)
+		p := uint16(1)
 		for c := 0; c < k; c++ {
 			a[r][c] = p
-			p = gfMul(p, frags[r][0])
+			p = testkit.GF16Mul(p, binary.BigEndian.Uint16(frags[r]))
 		}
 		a[r][k+r] = 1
 	}
@@ -280,28 +306,28 @@ func gatherBySpec(frags [][]byte) []byte {
 			pivot++
 		}
 		a[col], a[pivot] = a[pivot], a[col]
-		inv := gfInv(a[col][col])
+		inv := testkit.GF16Inv(a[col][col])
 		for c := range a[col] {
-			a[col][c] = gfMul(a[col][c], inv)
+			a[col][c] = testkit.GF16Mul(a[col][c], inv)
 		}
 		for r := 0; r < k; r++ {
 			if r != col && a[r][col] != 0 {
 				f := a[r][col]
 				for c := range a[r] {
-					a[r][c] ^= gfMul(f, a[col][c])
+					a[r][c] ^= testkit.GF16Mul(f, a[col][c])
 				}
 			}
 		}
 	}
-	groups := len(frags[0]) - 1
-	out := make([]byte, groups*k)
+	groups := len(frags[0])/2 - 1
+	var out []byte
 	for j := 0; j < groups; j++ {
 		for t := 0; t < k; t++ {
-			var v byte
+			var v uint16
 			for r := 0; r < k; r++ {
-				v ^= gfMul(a[t][k+r], frags[r][1+j])
+				v ^= testkit.GF16Mul(a[t][k+r], sym(frags[r], j))
 			}
-			out[j*k+t] = v
+			out = binary.BigEndian.AppendUint16(out, v)
 		}
 	}
 	return out
@@ -336,58 +362,28 @@ func openPackageBySpec(data []byte, sealedLen int, key1, key2 []byte) ([]byte, e
 	return openLayerBySpec(1, key1, inner[:12], inner[12:], append([]byte("riven-compact-v1"), 1))
 }
 
-// gfMul multiplies in GF(2^8) modulo x^8 + x^4 + x^3 + x + 1, as section 6 states.
-func gfMul(a, b byte) byte {
-	var p byte
-	for ; b != 0; b >>= 1 {
-		if b&1 != 0 {
-			p ^= a
-		}
-		carry := a & 0x80
-		a <<= 1
-		if carry != 0 {
-			a ^= 0x1B
-		}
-	}
-	return p
-}
-
-// gfInv returns a^254, which is the inverse of a for non-zero a.
-func gfInv(a byte) byte {
-	r := byte(1)
-	for i := 0; i < 254; i++ {
-		r = gfMul(r, a)
-	}
-	return r
-}
-
-// interpolateBySpec rebuilds a payload from shares of threshold two or more, chunk
-// by chunk, with the formula of section 6. Given fewer shares than the threshold
-// it still returns bytes, which is what an attacker would work with.
+// interpolateBySpec rebuilds a payload from shares of threshold two or more with
+// the formula of section 6. Given fewer shares than the threshold it still
+// returns bytes, which is what an attacker would work with.
 func interpolateBySpec(shares [][]byte) []byte {
-	const chunkShare = 524288 + 1
-	total := len(shares[0])
+	coef := make([]uint16, len(shares))
+	for i := range shares {
+		xi := binary.BigEndian.Uint16(shares[i])
+		coef[i] = 1
+		for j := range shares {
+			if j != i {
+				xj := binary.BigEndian.Uint16(shares[j])
+				coef[i] = testkit.GF16Mul(coef[i], testkit.GF16Mul(xj, testkit.GF16Inv(xi^xj)))
+			}
+		}
+	}
 	var out []byte
-	for lo := 0; lo < total; lo += chunkShare {
-		hi := min(lo+chunkShare, total)
-		coef := make([]byte, len(shares))
-		for i := range shares {
-			xi := shares[i][hi-1]
-			coef[i] = 1
-			for j := range shares {
-				if j != i {
-					xj := shares[j][hi-1]
-					coef[i] = gfMul(coef[i], gfMul(xj, gfInv(xi^xj)))
-				}
-			}
+	for pos := 0; pos < len(shares[0])/2-1; pos++ {
+		var s uint16
+		for i, sh := range shares {
+			s ^= testkit.GF16Mul(sym(sh, pos), coef[i])
 		}
-		for pos := lo; pos < hi-1; pos++ {
-			var s byte
-			for i, sh := range shares {
-				s ^= gfMul(sh[pos], coef[i])
-			}
-			out = append(out, s)
-		}
+		out = binary.BigEndian.AppendUint16(out, s)
 	}
 	return out
 }
@@ -568,7 +564,7 @@ func readPieces(t *testing.T, dir, base string, serials ...int) [][]byte {
 
 // TestSpecAloneRebuildsTheFile splits with the binary and rebuilds with nothing
 // but the document: a cascade of every algorithm with a recipient layer among the
-// passwords, over more than one 512 KiB chunk, and a keyless set.
+// passwords, over more than one 512 KiB unit of work, and a keyless set.
 func TestSpecAloneRebuildsTheFile(t *testing.T) {
 	dir := t.TempDir()
 	input := randomBytes(600 << 10)
@@ -805,7 +801,7 @@ func TestBelowThresholdCompactRevealsNothing(t *testing.T) {
 				if bytes.Contains(m.body, marker) {
 					t.Fatalf("piece %d carries the content", i+1)
 				}
-				if chi := testkit.ChiSquare(m.fragment[1:]); chi > 400 {
+				if chi := testkit.ChiSquare(m.fragment[2:]); chi > 400 {
 					t.Fatalf("the fragment in piece %d is not uniform (chi-square %.0f)", i+1, chi)
 				}
 				opened[i] = m
@@ -818,7 +814,7 @@ func TestBelowThresholdCompactRevealsNothing(t *testing.T) {
 			// Hand them the true keys anyway, from three shares they do not hold.
 			sealedLen, key1, key2 := compactKeysBySpec(t,
 				unwrapBySpec(t, interpolateBySpec([][]byte{opened[0].share, opened[1].share, opened[2].share}), opened[0].hash))
-			forged := append([]byte{opened[2].fragment[0]}, randomBytes(len(opened[2].fragment)-1)...)
+			forged := append(opened[2].fragment[:2:2], randomBytes(len(opened[2].fragment)-2)...)
 			data := gatherBySpec([][]byte{opened[0].fragment, opened[1].fragment, forged})
 			if bytes.Contains(data, marker) {
 				t.Fatal("two fragments and a guess exposed the content")
@@ -890,7 +886,7 @@ func TestBelowThresholdRevealsNothingToAnAttacker(t *testing.T) {
 				if bytes.Equal(m.hash, blake(append([]byte{0, 1, 0}, input...))) {
 					t.Fatalf("piece %d confirms a guess of the content", i+1)
 				}
-				if chi := testkit.ChiSquare(m.share[:len(m.share)-1]); chi > 400 {
+				if chi := testkit.ChiSquare(m.share[2:]); chi > 400 {
 					t.Fatalf("the share in piece %d is not uniform (chi-square %.0f)", i+1, chi)
 				}
 				opened[i] = m

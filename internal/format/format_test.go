@@ -6,11 +6,13 @@ package format
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/binary"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/secu-tools/riven/internal/cascade"
+	"github.com/secu-tools/riven/internal/ciphers"
 	"github.com/secu-tools/riven/internal/kdf"
 )
 
@@ -86,7 +88,7 @@ func TestCreatorFieldsRoundTrip(t *testing.T) {
 	}
 
 	// Unset creator fields round-trip as empty.
-	bare := buildInput([]byte("no creator recorded"))
+	bare := buildInput([]byte("no creator recorded."))
 	piece, err = Encode(bare)
 	if err != nil {
 		t.Fatal(err)
@@ -103,7 +105,7 @@ func TestCreatorFieldsRoundTrip(t *testing.T) {
 // TestCreatorFieldsBounded checks an over-long creator string is refused rather
 // than silently truncated or overflowing the field.
 func TestCreatorFieldsBounded(t *testing.T) {
-	in := buildInput([]byte("share"))
+	in := buildInput([]byte("shares"))
 	in.CreatorVersion = strings.Repeat("v", MaxCreatorLen+1)
 	if _, err := Encode(in); err == nil {
 		t.Fatal("a creator version over the limit must be refused")
@@ -118,7 +120,7 @@ func TestKDFRecoveredFromPiece(t *testing.T) {
 		{Memory: 16 * 1024, Time: 8, Par: 8},
 		{Memory: 32 * 1024, Time: 3, Par: 2},
 	} {
-		in := buildInput([]byte("share"))
+		in := buildInput([]byte("shares"))
 		in.Params = p
 		piece, err := Encode(in)
 		if err != nil {
@@ -137,7 +139,7 @@ func TestKDFRecoveredFromPiece(t *testing.T) {
 // TestHiddenKDFNeedsOverride checks that a piece with an unrecorded cost cannot
 // be opened without being told the parameters.
 func TestHiddenKDFNeedsOverride(t *testing.T) {
-	in := buildInput([]byte("share bytes"))
+	in := buildInput([]byte("share bytes."))
 	in.KDFStored = false
 	// Use a non-default cost so a lucky mask cannot coincide with it.
 	in.Params = kdf.Params{Memory: 16 * 1024, Time: 5, Par: 2}
@@ -163,7 +165,7 @@ func TestHiddenKDFNeedsOverride(t *testing.T) {
 }
 
 func TestHiddenAlgoNotRecorded(t *testing.T) {
-	in := buildInput([]byte("share"))
+	in := buildInput([]byte("shares"))
 	in.AlgoStored = false
 	piece, err := Encode(in)
 	if err != nil {
@@ -185,7 +187,7 @@ func TestHiddenAlgoNotRecorded(t *testing.T) {
 }
 
 func TestWrongPassword(t *testing.T) {
-	piece, _ := Encode(buildInput([]byte("share")))
+	piece, _ := Encode(buildInput([]byte("shares")))
 	if _, _, err := Decode(piece, [][]byte{[]byte("WRONG")}, nil); err != ErrWrongPassword {
 		t.Fatalf("expected ErrWrongPassword, got %v", err)
 	}
@@ -204,7 +206,7 @@ func TestTamperDetected(t *testing.T) {
 }
 
 func TestTruncationRejected(t *testing.T) {
-	piece, _ := Encode(buildInput([]byte("share")))
+	piece, _ := Encode(buildInput([]byte("shares")))
 	for _, n := range []int{0, 1, MinPieceLen - 1, MinPieceLen, len(piece) - 1} {
 		if n > len(piece) {
 			continue
@@ -235,7 +237,7 @@ func TestPureSSSManifest(t *testing.T) {
 // TestKeylessEnvelope covers the no-password envelope: it opens with no
 // passwords, refuses a password, and does not pretend to record a cost.
 func TestKeylessEnvelope(t *testing.T) {
-	in := buildInput([]byte("keyless share"))
+	in := buildInput([]byte("keyless shares"))
 	in.Keyless = true
 	in.Encrypted = false
 	in.Layers = nil
@@ -252,7 +254,7 @@ func TestKeylessEnvelope(t *testing.T) {
 	if !m.Keyless || m.Encrypted || m.KDFStored {
 		t.Fatalf("bad flags: %+v", m)
 	}
-	if !bytes.Equal(m.Share, []byte("keyless share")) {
+	if !bytes.Equal(m.Share, []byte("keyless shares")) {
 		t.Fatal("share mismatch")
 	}
 
@@ -274,7 +276,7 @@ func TestKeylessEnvelope(t *testing.T) {
 }
 
 func TestKeylessRejectsPasswords(t *testing.T) {
-	in := buildInput([]byte("s"))
+	in := buildInput([]byte("ss"))
 	in.Keyless = true
 	// Passwords are still set by buildInput, which is a contradiction.
 	if _, err := Encode(in); err == nil {
@@ -283,7 +285,7 @@ func TestKeylessRejectsPasswords(t *testing.T) {
 }
 
 func TestPasswordPieceRequiresPassword(t *testing.T) {
-	in := buildInput([]byte("s"))
+	in := buildInput([]byte("ss"))
 	in.Passwords = nil
 	if _, err := Encode(in); err == nil {
 		t.Fatal("a non-keyless piece with no password should be rejected")
@@ -293,7 +295,7 @@ func TestPasswordPieceRequiresPassword(t *testing.T) {
 // TestKeylessIsCheap checks the keyless path performs no password hashing, which
 // is what lets combine open such a set without asking anything.
 func TestKeylessIsCheap(t *testing.T) {
-	in := buildInput([]byte("share"))
+	in := buildInput([]byte("shares"))
 	in.Keyless = true
 	in.Passwords = nil
 	// A cost that would take a noticeable amount of time if it were ever used.
@@ -312,22 +314,22 @@ func TestKeylessIsCheap(t *testing.T) {
 }
 
 func TestRejectsBadInput(t *testing.T) {
-	in := buildInput([]byte("s"))
+	in := buildInput([]byte("ss"))
 	in.SetID = []byte{1, 2, 3}
 	if _, err := Encode(in); err == nil {
 		t.Fatal("short set id should fail")
 	}
-	in = buildInput([]byte("s"))
+	in = buildInput([]byte("ss"))
 	in.PayloadHash = []byte{1}
 	if _, err := Encode(in); err == nil {
 		t.Fatal("short hash should fail")
 	}
-	in = buildInput([]byte("s"))
+	in = buildInput([]byte("ss"))
 	in.Serial = 9
 	if _, err := Encode(in); err == nil {
 		t.Fatal("serial past N should fail")
 	}
-	in = buildInput([]byte("s"))
+	in = buildInput([]byte("ss"))
 	in.Params = kdf.Params{Memory: 19 * 1024, Time: 1, Par: 1}
 	if _, err := Encode(in); err == nil {
 		t.Fatal("unencodable params should fail")
@@ -386,7 +388,7 @@ func FuzzDecode(f *testing.F) {
 // callers can warn before an expensive open.
 func TestPeekParams(t *testing.T) {
 	want := kdf.Params{Memory: 32 * 1024, Time: 4, Par: 2}
-	in := buildInput([]byte("share"))
+	in := buildInput([]byte("shares"))
 	in.Params = want
 	piece, err := Encode(in)
 	if err != nil {
@@ -416,18 +418,19 @@ func TestPeekParams(t *testing.T) {
 
 // TestPieceLenMatchesAnEncodedPiece checks the length formula the padding is
 // computed from against a real piece, for a range of share lengths and layer
-// counts, with and without a fragment and hidden details. A drift here would
-// misplace every piece in the wrong size class.
+// counts, with and without a fragment, hidden details and the padding byte. A
+// drift here would misplace every piece in the wrong size class.
 func TestPieceLenMatchesAnEncodedPiece(t *testing.T) {
 	for _, layers := range []int{0, 1, 3} {
 		descs := make([]cascade.Descriptor, layers)
 		for i := range descs {
 			descs[i] = cascade.Descriptor{Kind: cascade.Password, SchemeID: 1, Recorded: true}
 		}
-		for _, shareLen := range []int{1, 64, 1000} {
+		for _, shareLen := range []int{2, 64, 1000} {
 			for _, name := range []string{"", "secret.pdf"} {
 				for _, fragLen := range []int{0, 1, 300} {
-					for _, detailsLen := range []int{0, 90} {
+					for i, detailsLen := range []int{0, 90, 0, 90} {
+						pad := i >= 2
 						in := EncodeInput{
 							Details: Details{
 								K:      1,
@@ -443,19 +446,24 @@ func TestPieceLenMatchesAnEncodedPiece(t *testing.T) {
 							Passwords:    [][]byte{[]byte("p")},
 							Fragment:     make([]byte, fragLen),
 							DetailsShare: make([]byte, detailsLen),
+							Pad:          pad,
 						}
-						shape := Shape{Share: shareLen, Layers: layers, Meta: len(name), Fragment: fragLen}
+						shape := Shape{Share: shareLen, Layers: layers, Meta: len(name), Fragment: fragLen, Pad: pad}
 						if detailsLen > 0 {
 							in.Keyless, in.Passwords = true, nil
-							shape = Shape{Share: shareLen, Fragment: fragLen, Details: detailsLen}
+							shape = Shape{Share: shareLen, Fragment: fragLen, Details: detailsLen, Pad: pad}
 						}
 						piece, err := Encode(in)
 						if err != nil {
 							t.Fatal(err)
 						}
 						if want := PieceLen(shape); len(piece) != want {
-							t.Fatalf("layers=%d share=%d name=%q fragment=%d details=%d: piece is %d bytes, PieceLen says %d",
-								layers, shareLen, name, fragLen, detailsLen, len(piece), want)
+							t.Fatalf("layers=%d share=%d name=%q fragment=%d details=%d pad=%v: piece is %d bytes, PieceLen says %d",
+								layers, shareLen, name, fragLen, detailsLen, pad, len(piece), want)
+						}
+						m, _, err := Decode(piece, in.Passwords, &fast)
+						if err != nil || len(m.Share) != shareLen {
+							t.Fatalf("pad=%v: the share did not come back whole: %v", pad, err)
 						}
 					}
 				}
@@ -468,7 +476,7 @@ func TestPieceLenMatchesAnEncodedPiece(t *testing.T) {
 // of them: whatever the input says about the set, the piece opens with the public
 // key to a set id, a hash, and the shares, and nothing that names the set.
 func TestHiddenDetailsShowNothing(t *testing.T) {
-	in := buildInput([]byte("a share"))
+	in := buildInput([]byte("a share."))
 	in.Keyless, in.Passwords, in.Stretched = true, nil, true
 	in.Name, in.CreatorVersion, in.CreatorCommit = "wallet-seed.txt", "9.9.9", "feedface"
 	in.DetailsShare = []byte("the details share")
@@ -497,7 +505,7 @@ func TestHiddenDetailsShowNothing(t *testing.T) {
 // TestHiddenDetailsNeedTheKeylessEnvelope refuses hidden details behind a
 // password, which would bring back the guessing they exist to prevent.
 func TestHiddenDetailsNeedTheKeylessEnvelope(t *testing.T) {
-	in := buildInput([]byte("s"))
+	in := buildInput([]byte("ss"))
 	in.DetailsShare = []byte("details")
 	if _, err := Encode(in); err == nil {
 		t.Fatal("hidden details behind a password envelope were accepted")
@@ -508,7 +516,7 @@ func TestHiddenDetailsNeedTheKeylessEnvelope(t *testing.T) {
 // envelope: it opens with no password at all, still says it is encrypted, and
 // keeps its recorded cost readable, since the cascade needs it.
 func TestPublicDetailsWithAPassword(t *testing.T) {
-	in := buildInput([]byte("share"))
+	in := buildInput([]byte("shares"))
 	in.Keyless, in.Passwords, in.Stretched = true, nil, true
 	in.Params = kdf.Params{Memory: 32 * 1024, Time: 2, Par: 2}
 	piece, err := Encode(in)
@@ -532,7 +540,7 @@ func TestPublicDetailsWithAPassword(t *testing.T) {
 }
 
 func TestFragmentRoundTrip(t *testing.T) {
-	in := buildInput([]byte("share"))
+	in := buildInput([]byte("shares"))
 	in.Fragment = []byte{7, 1, 2, 3}
 	piece, err := Encode(in)
 	if err != nil {
@@ -555,16 +563,26 @@ func TestFragmentRoundTrip(t *testing.T) {
 	}
 }
 
+// manifest is the whole manifest EncodeTo seals for in.
+func manifest(in EncodeInput) []byte {
+	m := append(in.manifestHead(), in.Fragment...)
+	m = append(m, in.Share...)
+	if in.Pad {
+		m = append(m, 0)
+	}
+	return m
+}
+
 // TestManifestChecks feeds parseManifest bodies that contradict themselves, the
 // way a crafted keyless piece could: each must be refused rather than read.
 func TestManifestChecks(t *testing.T) {
-	base := buildInput([]byte("share"))
+	base := buildInput([]byte("shares"))
 	base.Keyless, base.Passwords = true, nil
-	good := base.manifest()
+	good := manifest(base)
 	if _, err := parseManifest(good); err != nil {
 		t.Fatalf("a good manifest was refused: %v", err)
 	}
-	flagsAt := 2 + setIDLen + 3
+	flagsAt := 2 + setIDLen + 6
 	mutate := func(f func(b []byte)) []byte {
 		b := append([]byte(nil), good...)
 		f(b)
@@ -575,8 +593,15 @@ func TestManifestChecks(t *testing.T) {
 		"compact, no fragment":  mutate(func(b []byte) { b[flagsAt] |= flagCompact }),
 		"hidden, details shown": mutate(func(b []byte) { b[flagsAt] |= flagHidden }),
 		"serial past n":         mutate(func(b []byte) { b[flagsAt-1] = 9 }),
-		"trailing bytes":        append(append([]byte(nil), good...), 0),
 		"wrong version":         mutate(func(b []byte) { b[1] = 9 }),
+		// The fragment's length claims the share and 4 GiB more. Read as a u32 it
+		// would be the share alone.
+		"fragment past the end": mutate(func(b []byte) {
+			binary.BigEndian.PutUint64(b[len(b)-len("shares")-8:], 1<<32+uint64(len("shares")))
+		}),
+		// A share is whole symbols, so an odd byte after it is padding, and
+		// padding is a zero.
+		"padding not zero": append(append([]byte(nil), good...), 1),
 	}
 	for name, body := range cases {
 		if _, err := parseManifest(body); err == nil {
@@ -626,5 +651,105 @@ func TestWipeClearsTheShare(t *testing.T) {
 	}
 	if m.K != 3 || len(m.SetID) != SetIDLen {
 		t.Fatalf("Wipe cleared the details: %+v", m)
+	}
+}
+
+// TestEncodeRefusesMoreThanTheEnvelopeSeals checks a piece carrying more than
+// its envelope seals in one call is refused rather than handed to Seal, which
+// panics. The limit covers the share and fragment together, as both sit in the
+// one manifest. It is lowered so a small share shows it.
+func TestEncodeRefusesMoreThanTheEnvelopeSeals(t *testing.T) {
+	saved := MaxCarriedLen
+	t.Cleanup(func() { MaxCarriedLen = saved })
+	MaxCarriedLen = 64
+
+	if _, err := Encode(buildInput(make([]byte, 64))); err != nil {
+		t.Fatalf("a share of the most a piece carries was refused: %v", err)
+	}
+	if _, err := Encode(buildInput(make([]byte, 65))); err == nil {
+		t.Fatal("a share one byte over the limit was encoded")
+	}
+	in := buildInput(make([]byte, 32))
+	in.Fragment = make([]byte, 33)
+	if _, err := Encode(in); err == nil {
+		t.Fatal("a share and a fragment over the limit together were encoded")
+	}
+}
+
+// TestCarriedLimitFitsTheEnvelope checks the limit against the longest manifest
+// a piece can have, measured on a real encoding with the most layers, the
+// longest strings and the padding byte: with the most a piece carries, it is
+// exactly what one XChaCha20-Poly1305 call seals. That is far past the 4 GiB a
+// u32 length once allowed, so the ciphers, not the format, limit a split.
+func TestCarriedLimitFitsTheEnvelope(t *testing.T) {
+	xchacha, _ := ciphers.ByName("xchacha20-poly1305")
+	if envelopeMaxLen != xchacha.MaxLen {
+		t.Fatalf("the envelope limit is %d, but XChaCha20-Poly1305 seals %d", int64(envelopeMaxLen), xchacha.MaxLen)
+	}
+	if MaxCarriedLen+maxManifestRest != envelopeMaxLen {
+		t.Fatalf("a piece carries %d and the rest of its manifest %d, which is not the %d the envelope seals",
+			MaxCarriedLen, maxManifestRest, int64(envelopeMaxLen))
+	}
+	if MaxCarriedLen < 64<<30 {
+		t.Fatalf("a piece carries at most %d bytes, under the 64 GiB the ciphers allow", MaxCarriedLen)
+	}
+
+	in := buildInput([]byte("shares"))
+	in.Name = strings.Repeat("n", MaxNameLen)
+	in.CreatorVersion = strings.Repeat("v", MaxCreatorLen)
+	in.CreatorCommit = strings.Repeat("c", MaxCreatorLen)
+	in.Layers = make([]cascade.Descriptor, 255)
+	in.Pad = true
+	piece, err := Encode(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rest := len(piece) - headerLen - tagLen - len(in.Share); rest != maxManifestRest {
+		t.Fatalf("the longest manifest is %d bytes besides its share, not %d", rest, maxManifestRest)
+	}
+}
+
+// TestEncodeRefusesCountsTwoBytesCannotHold checks k, n and the serial are
+// bounded before each is written as two bytes, where an n of 65536 would be
+// written as 0.
+func TestEncodeRefusesCountsTwoBytesCannotHold(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		edit func(*EncodeInput)
+	}{
+		{"n of 65536", func(in *EncodeInput) { in.N = MaxPieces + 1 }},
+		{"k over n", func(in *EncodeInput) { in.K = in.N + 1 }},
+		{"serial 0", func(in *EncodeInput) { in.Serial = 0 }},
+		{"serial over n", func(in *EncodeInput) { in.Serial = in.N + 1 }},
+	} {
+		in := buildInput([]byte("shares"))
+		c.edit(&in)
+		if _, err := Encode(in); err == nil {
+			t.Errorf("%s was encoded", c.name)
+		}
+	}
+	d := buildInput(nil).Details
+	d.N = MaxPieces + 1
+	if _, err := EncodeDetails(d); err == nil {
+		t.Error("details with n of 65536 were encoded")
+	}
+}
+
+// TestManifestFieldsMustAgreeWithHidden checks the two ways a manifest can
+// contradict whether it hides its details: a details share in one that shows
+// them, and a serial or count in one that hides them. Either would let a piece
+// say one thing to info and another to combine.
+func TestManifestFieldsMustAgreeWithHidden(t *testing.T) {
+	shown := &Manifest{Details: Details{K: 2, N: 3}, Serial: 1, DetailsShare: []byte{1, 2}}
+	if err := shown.check(); err == nil {
+		t.Error("a manifest that shows its details was taken with a details share")
+	}
+	hidden := &Manifest{Hidden: true, Keyless: true, DetailsShare: []byte{1, 2}, Serial: 2}
+	if err := hidden.check(); err == nil {
+		t.Error("a manifest that hides its details was taken with a serial")
+	}
+	hidden.Serial = 0
+	if err := hidden.check(); err != nil {
+		t.Errorf("a manifest that hides everything was refused: %v", err)
 	}
 }

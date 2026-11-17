@@ -27,6 +27,7 @@ import (
 	"golang.org/x/crypto/blake2b"
 	"golang.org/x/crypto/chacha20poly1305"
 
+	"github.com/secu-tools/riven/internal/gf16"
 	"github.com/secu-tools/riven/internal/kdf"
 	"github.com/secu-tools/riven/internal/kem"
 	"github.com/secu-tools/riven/internal/memory"
@@ -46,6 +47,10 @@ const MinFill = 32
 // 8-byte big-endian count.
 const PayloadAt = 8
 
+// MaxPieces is the most pieces a set can have: the field Shamir sharing and
+// dispersal work over has 65535 non-zero x-coordinates (section 6.2).
+const MaxPieces = gf16.MaxPoints
+
 // MaxNameLen bounds the recorded file name. Every piece carries it, so it is kept
 // short enough that recording a name never decides whether a piece fits a QR code.
 const MaxNameLen = 255
@@ -53,6 +58,13 @@ const MaxNameLen = 255
 // MaxCreatorLen bounds the recorded program version and commit hash. They are
 // small, fixed-shape build identifiers, not user data.
 const MaxCreatorLen = 64
+
+// MaxCarriedLen bounds what one piece carries for its set: its share, fragment
+// and details share together. The manifest holding them is sealed in one
+// XChaCha20-Poly1305 call, which takes at most about 256 GiB, and this leaves
+// room for the rest of the manifest. It is a variable only so tests can show the
+// refusal without a 256 GiB input; nothing else assigns it.
+var MaxCarriedLen int64 = envelopeMaxLen - maxManifestRest
 
 const (
 	saltLen  = kdf.SaltLen
@@ -63,6 +75,14 @@ const (
 	hashLen  = 32
 
 	headerLen = saltLen + kdfLen + nonceLen
+
+	// envelopeMaxLen is the most XChaCha20-Poly1305 seals in one call, (2^32 - 1)
+	// 64-byte blocks; Seal panics past it.
+	envelopeMaxLen = (1<<32 - 1) * 64
+	// maxManifestRest is the longest a manifest can be apart from what it
+	// carries: the fixed part, 255 layer descriptors, the longest strings and the
+	// padding byte.
+	maxManifestRest = fixedManifestLen + 2*255 + MaxNameLen + 2*MaxCreatorLen + 1
 
 	// MinPieceLen is the smallest possible valid piece (empty manifest).
 	MinPieceLen = headerLen + tagLen
@@ -167,6 +187,11 @@ type EncodeInput struct {
 	// flags that describe the set are all written as zero.
 	DetailsShare []byte
 
+	// Pad adds one zero byte after the share. A share is whole 16-bit symbols,
+	// so this is how a piece reaches a size class an odd number of bytes past
+	// the rest of it.
+	Pad bool
+
 	Passwords [][]byte // envelope passwords (all cascade passwords, in order)
 }
 
@@ -195,6 +220,12 @@ func (in EncodeInput) validate() error {
 	}
 	if in.Serial < 1 || in.Serial > in.N {
 		return errors.New("format: invalid k/n/serial")
+	}
+	if len(in.Share)%gf16.Size != 0 {
+		return errors.New("format: a share must be whole 16-bit symbols")
+	}
+	if int64(len(in.Share))+int64(len(in.Fragment))+int64(len(in.DetailsShare)) > MaxCarriedLen {
+		return errors.New("format: a share or fragment is longer than a piece can hold")
 	}
 	if in.hidden() && !in.Keyless {
 		return errors.New("format: hidden details need the keyless envelope")
@@ -234,27 +265,44 @@ func (in EncodeInput) costByte(salt []byte) (byte, error) {
 
 // Encode produces the on-disk bytes for one piece.
 func Encode(in EncodeInput) ([]byte, error) {
+	piece := make([]byte, PieceLen(in.Shape()))
+	if err := EncodeTo(piece, in); err != nil {
+		return nil, err
+	}
+	return piece, nil
+}
+
+// EncodeTo is Encode writing the piece into piece, which must be exactly
+// PieceLen(in.Shape()) bytes. The share and the fragment, which are nearly all
+// of a piece, may already be in it, at Shape.ShareAt and Shape.FragmentAt: a
+// caller that makes them there has the piece sealed in place, and never holds
+// them twice. Anywhere else they must not overlap piece. On an error piece is
+// wiped.
+func EncodeTo(piece []byte, in EncodeInput) error {
+	fail := func(err error) error {
+		memory.Zero(piece)
+		return err
+	}
 	if err := in.validate(); err != nil {
-		return nil, err
+		return fail(err)
 	}
-
-	salt := make([]byte, saltLen)
-	nonce := make([]byte, nonceLen)
-	if _, err := rand.Read(salt); err != nil {
-		return nil, err
-	}
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, err
-	}
-
-	kdfByte, err := in.costByte(salt)
-	if err != nil {
-		return nil, err
+	shape := in.Shape()
+	if len(piece) != PieceLen(shape) {
+		return fail(fmt.Errorf("format: a piece of this shape is %d bytes, not %d", PieceLen(shape), len(piece)))
 	}
 
 	// The header is everything before the nonce: the salt, the cost byte and, for
 	// an envelope sealed to recipient keys, their masked encapsulations.
-	header := append(append([]byte{}, salt...), kdfByte)
+	salt := piece[:saltLen]
+	if _, err := rand.Read(salt); err != nil {
+		return fail(err)
+	}
+	kdfByte, err := in.costByte(salt)
+	if err != nil {
+		return fail(err)
+	}
+	piece[saltLen] = kdfByte
+	header := saltLen + kdfLen
 	var key []byte
 	switch {
 	case in.Keyless:
@@ -262,31 +310,62 @@ func Encode(in EncodeInput) ([]byte, error) {
 	case len(in.Recipients) > 0:
 		masked, k, err := sealTo(in.Recipients, in.Passwords, salt, in.Params)
 		if err != nil {
-			return nil, err
+			return fail(err)
 		}
-		header, key = append(header, masked...), k
+		header, key = header+copy(piece[header:header+shape.Encaps], masked), k
 	default:
 		key = envelopeKey(in.Passwords, salt, in.Params)
 	}
 	aead, err := chacha20poly1305.NewX(key)
 	memory.Zero(key)
 	if err != nil {
-		return nil, err
+		return fail(err)
+	}
+	nonce := piece[header : header+nonceLen]
+	if _, err := rand.Read(nonce); err != nil {
+		return fail(err)
 	}
 
-	body := in.manifest()
-	out := make([]byte, 0, len(header)+nonceLen+len(body)+tagLen)
-	out = append(out, header...)
-	out = append(out, nonce...)
-	out = aead.Seal(out, nonce, body, envelopeAD(header))
-	memory.Zero(body)
-	return out, nil
+	body := piece[header+nonceLen : len(piece)-tagLen]
+	head := in.manifestHead()
+	defer memory.Zero(head)
+	if header+nonceLen+len(head) != shape.FragmentAt() {
+		return fail(errors.New("format: the manifest does not match its shape"))
+	}
+	copy(body, head)
+	place(piece[shape.FragmentAt():shape.ShareAt()], in.Fragment)
+	place(piece[shape.ShareAt():shape.ShareAt()+shape.Share], in.Share)
+	if in.Pad {
+		piece[shape.ShareAt()+shape.Share] = 0
+	}
+	aead.Seal(body[:0], nonce, body, envelopeAD(piece[:header]))
+	return nil
 }
 
-// manifest writes the manifest of section 3. With hidden details, everything that
+// place puts src at dst, unless it is already there.
+func place(dst, src []byte) {
+	if len(src) > 0 && &dst[0] != &src[0] {
+		copy(dst, src)
+	}
+}
+
+// Shape returns the shape of the piece in encodes.
+func (in EncodeInput) Shape() Shape {
+	s := Shape{
+		Encaps: EncapsLen(in.Recipients), Share: len(in.Share), Fragment: len(in.Fragment),
+		Details: len(in.DetailsShare), Pad: in.Pad,
+	}
+	if !in.hidden() {
+		s.Layers, s.Meta = len(in.Layers), in.Details.TextLen()
+	}
+	return s
+}
+
+// manifestHead writes the manifest of section 3 up to the fragment, which the
+// share and the padding byte follow. With hidden details, everything that
 // describes the set is written as zero or empty, so a piece shows only that it
 // belongs to a set and what it carries for it.
-func (in EncodeInput) manifest() []byte {
+func (in EncodeInput) manifestHead() []byte {
 	d, serial := in.Details, in.Serial
 	d.KDFStored = in.recordsCost()
 	flags := d.flags()
@@ -303,18 +382,17 @@ func (in EncodeInput) manifest() []byte {
 		flags |= flagCompact
 	}
 
-	w := wire.NewWriter(len(in.Share) + len(in.Fragment) + len(in.DetailsShare) + 128)
+	w := wire.NewWriter(fixedManifestLen + 2*len(d.Layers) + d.TextLen() + len(in.DetailsShare))
 	w.U16(Version)
 	w.Raw(in.SetID)
-	w.U8(uint8(d.K))
-	w.U8(uint8(d.N))
-	w.U8(uint8(serial))
+	w.U16(uint16(d.K))
+	w.U16(uint16(d.N))
+	w.U16(uint16(serial))
 	w.U8(flags)
 	w.Raw(in.PayloadHash)
 	d.writeMeta(w)
-	w.Bytes(in.Share)
-	w.Bytes(in.Fragment)
 	w.Bytes(in.DetailsShare)
+	w.U64(uint64(len(in.Fragment)))
 	return w.Result()
 }
 
@@ -324,9 +402,12 @@ var ErrWrongPassword = errors.New("format: wrong password, key or parameters, or
 
 // fixedManifestLen is the manifest overhead that does not depend on the share,
 // the name, the creator strings, or the number of layers: version(2) + set
-// id(16) + k/n/serial/flags(4) + payload hash(32) + layer count(1) + six length
-// prefixes(24): name, creator version, creator commit, share, fragment, details.
-const fixedManifestLen = 2 + setIDLen + 4 + hashLen + 1 + 24
+// id(16) + k/n/serial(6) + flags(1) + payload hash(32) + layer count(1) + the length
+// prefixes(24): a u32 each for the name, creator version, creator commit and
+// details share, and a u64 for the fragment. The share runs to the end of the
+// manifest, so its length is not written: it is the rest, less a final zero
+// byte of padding when the rest is odd, as a share never is.
+const fixedManifestLen = 2 + setIDLen + 7 + hashLen + 1 + 24
 
 // Shape is what decides a piece's length: the lengths of its variable fields.
 // With hidden details the manifest carries no layers and no strings, so Layers
@@ -338,6 +419,13 @@ type Shape struct {
 	Meta     int // name, creator version and creator commit together
 	Fragment int
 	Details  int
+	Pad      bool // a zero byte after the share
+}
+
+// Carried is what a piece of this shape carries for its set, its share, fragment
+// and details share together, which MaxCarriedLen bounds.
+func (s Shape) Carried() int64 {
+	return int64(s.Share) + int64(s.Fragment) + int64(s.Details)
 }
 
 // PieceLen returns the exact encoded length of a piece of the given shape, without
@@ -345,8 +433,21 @@ type Shape struct {
 // be known before the piece is built. The package tests assert this against real
 // encodings.
 func PieceLen(s Shape) int {
-	return headerLen + s.Encaps + fixedManifestLen + 2*s.Layers + s.Meta + s.Share + s.Fragment + s.Details + tagLen
+	n := s.ShareAt() + s.Share + tagLen
+	if s.Pad {
+		n++
+	}
+	return n
 }
+
+// FragmentAt is where in a piece of this shape its fragment starts, after the
+// envelope header and the rest of the manifest.
+func (s Shape) FragmentAt() int {
+	return headerLen + s.Encaps + fixedManifestLen + 2*s.Layers + s.Meta + s.Details
+}
+
+// ShareAt is where in a piece of this shape its share starts, after the fragment.
+func (s Shape) ShareAt() int { return s.FragmentAt() + s.Fragment }
 
 // PeekParams reports the cost parameters a piece declares, without deriving a
 // key. The value is unauthenticated: for a file of unknown origin it is simply
@@ -374,7 +475,8 @@ func Decode(piece []byte, passwords [][]byte, override *kdf.Params) (*Manifest, 
 	if err := checkDecode(piece, override); err != nil {
 		return nil, kdf.Params{}, err
 	}
-	m, err := openAt(piece, 0, keylessKey(piece[:saltLen]))
+	var buf []byte
+	m, err := openAt(piece, 0, keylessKey(piece[:saltLen]), &buf)
 	if err == nil {
 		if !m.Keyless {
 			m.Wipe()
@@ -389,7 +491,7 @@ func Decode(piece []byte, passwords [][]byte, override *kdf.Params) (*Manifest, 
 	if !errors.Is(err, ErrWrongPassword) || len(passwords) == 0 {
 		return nil, kdf.Params{}, err
 	}
-	return DecodePassword(piece, passwords, override)
+	return decodePassword(piece, passwords, override, &buf)
 }
 
 // DecodePassword is Decode without the keyless attempt, for a piece of a set
@@ -402,20 +504,41 @@ func DecodePassword(piece []byte, passwords [][]byte, override *kdf.Params) (*Ma
 	if err := checkDecode(piece, override); err != nil {
 		return nil, kdf.Params{}, err
 	}
+	var buf []byte
+	return decodePassword(piece, passwords, override, &buf)
+}
+
+// decodePassword is DecodePassword once the piece and the override are checked,
+// opening into buf: see openAt.
+func decodePassword(piece []byte, passwords [][]byte, override *kdf.Params, buf *[]byte) (*Manifest, kdf.Params, error) {
 	params, _ := PeekParams(piece)
 	if override != nil {
 		params = *override
 	}
-	m, err := openAt(piece, 0, envelopeKey(passwords, piece[:saltLen], params))
+	m, err := openWithPassword(piece, envelopeKey(passwords, piece[:saltLen], params), buf)
 	if err != nil {
 		return nil, kdf.Params{}, err
 	}
+	return m, params, nil
+}
+
+// errNotPasswordSealed is a piece that opened with the password key alone while
+// its manifest says its envelope is sealed another way.
+var errNotPasswordSealed = errors.New("format: the piece opened with the password alone but is not marked so")
+
+// openWithPassword opens a piece whose envelope the password key alone seals,
+// refusing one that opens so but is marked otherwise. It takes over key.
+func openWithPassword(piece, key []byte, buf *[]byte) (*Manifest, error) {
+	m, err := openAt(piece, 0, key, buf)
+	if err != nil {
+		return nil, err
+	}
 	if m.Keyless || m.SealedToKeys {
 		m.Wipe()
-		return nil, kdf.Params{}, errors.New("format: the piece opened with the password alone but is not marked so")
+		return nil, errNotPasswordSealed
 	}
 	m.PasswordOpened = true
-	return m, params, nil
+	return m, nil
 }
 
 // checkDecode rejects what no decode can use: a piece too short to be one, and
@@ -434,7 +557,12 @@ func checkDecode(piece []byte, override *kdf.Params) error {
 // encLen is how many bytes of encapsulated keys sit between the cost byte and the
 // nonce: none but for an envelope sealed to recipient keys. The manifest keeps
 // the opened bytes, which its share points into.
-func openAt(piece []byte, encLen int, key []byte) (*Manifest, error) {
+//
+// buf is what the attempts one decode makes on a piece open into. A wrong key
+// leaves it there, wiped by Open, for the next attempt to reuse, so trying a
+// piece several ways holds one piece's worth of memory rather than one per way.
+// The attempt that opens hands it to the manifest.
+func openAt(piece []byte, encLen int, key []byte, buf *[]byte) (*Manifest, error) {
 	defer memory.Zero(key)
 	header := saltLen + kdfLen + encLen
 	if len(piece) < header+nonceLen+tagLen {
@@ -444,10 +572,17 @@ func openAt(piece []byte, encLen int, key []byte) (*Manifest, error) {
 	if err != nil {
 		return nil, err
 	}
-	pt, err := aead.Open(nil, piece[header:header+nonceLen], piece[header+nonceLen:], envelopeAD(piece[:header]))
+	ct := piece[header+nonceLen:]
+	if *buf == nil {
+		// Sized for the longest ciphertext any attempt can find, the one with no
+		// encapsulations before it, so every later attempt fits.
+		*buf = make([]byte, len(piece)-saltLen-kdfLen-nonceLen)
+	}
+	pt, err := aead.Open((*buf)[:0], piece[header:header+nonceLen], ct, envelopeAD(piece[:header]))
 	if err != nil {
 		return nil, ErrWrongPassword
 	}
+	*buf = nil
 	m, err := parseManifest(pt)
 	if err != nil {
 		memory.Zero(pt)
@@ -466,7 +601,7 @@ func parseManifest(pt []byte) (*Manifest, error) {
 		return nil, fmt.Errorf("format: unsupported piece version %d (this build writes and reads version %d)", ver, Version)
 	}
 	m := &Manifest{Version: ver, SetID: r.raw(setIDLen), plain: pt}
-	k, n, serial, flags := r.u8(), r.u8(), r.u8(), r.u8()
+	k, n, serial, flags := r.u16(), r.u16(), r.u16(), r.u8()
 	m.Details = Details{K: int(k), N: int(n)}
 	m.setFlags(flags)
 	m.Serial = int(serial)
@@ -476,12 +611,16 @@ func parseManifest(pt []byte) (*Manifest, error) {
 	m.Hidden = flags&flagHidden != 0
 	m.PayloadHash = r.raw(hashLen)
 	r.meta(&m.Details)
-	m.Share, m.Fragment, m.DetailsShare = r.view(0), r.view(0), r.view(0)
+	m.DetailsShare, m.Fragment = r.view(0), r.view64()
+	m.Share = r.rest()
 	if r.err != nil {
 		return nil, r.err
 	}
-	if r.Remaining() != 0 {
-		return nil, errors.New("format: unexpected bytes after the details")
+	if n := len(m.Share); n%gf16.Size != 0 {
+		if m.Share[n-1] != 0 {
+			return nil, errors.New("format: the padding after the share is not zero")
+		}
+		m.Share = m.Share[:n-1]
 	}
 	return m, m.check()
 }
@@ -558,14 +697,21 @@ func SharedLen(payloadLen, fill int) int { return PayloadAt + payloadLen + fill 
 // of the content alone: a keyless piece would then let anyone confirm a guess of
 // the content, reading a PIN or a short password straight off a single piece.
 func Wrap(shared []byte, payloadLen int) (hash []byte, err error) {
-	if fill := len(shared) - SharedLen(payloadLen, 0); payloadLen < 0 || fill < MinFill {
-		return nil, fmt.Errorf("format: %d shared bytes leave under %d of fill after %d", len(shared), MinFill, payloadLen)
-	}
-	binary.BigEndian.PutUint64(shared, uint64(payloadLen))
-	if _, err := rand.Read(shared[PayloadAt+payloadLen:]); err != nil {
+	if err := Frame(shared, payloadLen); err != nil {
 		return nil, err
 	}
 	return Hash(shared), nil
+}
+
+// Frame is Wrap without the hash, for a caller that hashes the shared bytes
+// while it does something else with them.
+func Frame(shared []byte, payloadLen int) error {
+	if fill := len(shared) - SharedLen(payloadLen, 0); payloadLen < 0 || fill < MinFill {
+		return fmt.Errorf("format: %d shared bytes leave under %d of fill after %d", len(shared), MinFill, payloadLen)
+	}
+	binary.BigEndian.PutUint64(shared, uint64(payloadLen))
+	_, err := rand.Read(shared[PayloadAt+payloadLen:])
+	return err
 }
 
 // WrapPayload is Wrap for a payload held elsewhere: it returns new shared bytes

@@ -52,7 +52,7 @@ func validateKeylessConflicts(opts *cliOptions) error {
 	switch {
 	case len(opts.passwordEnvs()) > 0:
 		return fmt.Errorf("--keyless takes no password: drop --password-env, or drop --keyless")
-	case countRecipientSources(opts) > 0:
+	case hasRecipientSource(opts):
 		return fmt.Errorf("--keyless takes no recipient key: drop --recipient, or drop --keyless")
 	case opts.algoSet:
 		return fmt.Errorf("--keyless does not encrypt, so --algo does not apply")
@@ -91,9 +91,18 @@ func validateAlgorithms(opts *cliOptions) error {
 	if err != nil {
 		return err
 	}
-	if n := len(opts.layerSources); n > 0 && len(ids) > n {
+	if n := len(opts.layerSources); n > 0 {
+		return checkAlgoCount(len(ids), n)
+	}
+	return nil
+}
+
+// checkAlgoCount refuses more algorithms than the layers given, rather than
+// dropping the extra ones.
+func checkAlgoCount(algos, layers int) error {
+	if algos > layers {
 		return fmt.Errorf("--algo names %d algorithms but only %d layers were given; add more --password-env or --recipient flags",
-			len(ids), n)
+			algos, layers)
 	}
 	return nil
 }
@@ -134,11 +143,11 @@ func validatePaddingChoice(opts *cliOptions) error {
 
 // validateCounts checks the piece count, threshold and QR scale.
 func validateCounts(opts *cliOptions) error {
-	if opts.qrScale < 0 {
-		return fmt.Errorf("--qr-scale must be positive")
+	if opts.qrScale < 0 || opts.qrScale > pieceio.QRMaxScale {
+		return fmt.Errorf("--qr-scale must be between 1 and %d: a larger code would be too large to read back", pieceio.QRMaxScale)
 	}
-	if opts.nSet && (opts.n < 1 || opts.n > 255) {
-		return fmt.Errorf("-n must be between 1 and 255")
+	if opts.nSet && (opts.n < 1 || opts.n > core.MaxPieces) {
+		return fmt.Errorf("-n must be between 1 and %d", core.MaxPieces)
 	}
 	if opts.kSet && opts.k < 1 {
 		return fmt.Errorf("-k must be at least 1")
@@ -157,7 +166,7 @@ func validateOpenOptions(opts *cliOptions) error {
 	if opts.textSet {
 		return fmt.Errorf("--text applies to splitting, not to opening pieces")
 	}
-	if countRecipientSources(opts) > 0 {
+	if hasRecipientSource(opts) {
 		return fmt.Errorf("--recipient names a public key for splitting; use --identity with your private key to open pieces")
 	}
 	if opts.generate {
@@ -187,7 +196,7 @@ func validateKeygenOptions(opts *cliOptions) error {
 		return fmt.Errorf("--pub and --priv already name both files, so --out has nothing to place")
 	case len(opts.passwordEnvs()) > 0:
 		return fmt.Errorf("keygen takes no password: a key pair is not password-protected")
-	case countRecipientSources(opts) > 0:
+	case hasRecipientSource(opts):
 		return fmt.Errorf("--recipient names a key for splitting; keygen creates one instead")
 	case opts.keyless:
 		return fmt.Errorf("--keyless applies to splitting, not to generating a key pair")

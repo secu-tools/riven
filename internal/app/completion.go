@@ -6,8 +6,9 @@ package app
 import (
 	"fmt"
 	"io"
+	"maps"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/secu-tools/riven/internal/ciphers"
@@ -42,6 +43,7 @@ const (
 	argPad
 	argMethod
 	argInfo
+	argVerify
 	argBool
 	argEnv
 )
@@ -57,7 +59,7 @@ var flagArgKinds = map[string]argKind{
 	"--method":      argMethod,
 	"--info":        argInfo,
 	"--record-algo": argBool, "--record-kdf": argBool, "--record-name": argBool,
-	"--verify":       argBool,
+	"--verify":       argVerify,
 	"--password-env": argEnv, "--text-env": argEnv,
 	"-n": argFree, "--parts": argFree,
 	"-k": argFree, "--threshold": argFree,
@@ -76,32 +78,21 @@ func flagsOfKind(want argKind) []string {
 			out = append(out, name)
 		}
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out
 }
 
 // allFlags lists every flag the parser accepts, sorted.
 func allFlags() []string {
-	out := make([]string, 0, len(valueFlags)+len(switchFlags))
-	for name := range valueFlags {
-		out = append(out, name)
-	}
-	for name := range switchFlags {
-		out = append(out, name)
-	}
-	sort.Strings(out)
+	out := slices.AppendSeq(slices.Collect(maps.Keys(valueFlags)), maps.Keys(switchFlags))
+	slices.Sort(out)
 	return out
 }
 
 // sortedCommands lists the commands, sorted, so the script is the same on every
 // run and a diff of two versions shows only real changes.
 func sortedCommands() []string {
-	out := make([]string, 0, len(knownCommands))
-	for name := range knownCommands {
-		out = append(out, name)
-	}
-	sort.Strings(out)
-	return out
+	return slices.Sorted(maps.Keys(knownCommands))
 }
 
 // commandHelp is the one-line description shown beside a command by the shells
@@ -118,30 +109,21 @@ var commandHelp = map[string]string{
 }
 
 // completionFormats are the export format names plus "all", which -f accepts.
-func completionFormats() []string {
-	out := make([]string, 0, len(pieceio.All())+1)
-	for _, f := range pieceio.All() {
-		out = append(out, f.String())
-	}
-	return append(out, "all")
-}
+func completionFormats() []string { return append(names(pieceio.All()), "all") }
 
-func completionKeyTypes() []string {
-	out := make([]string, 0, len(kem.All()))
-	for _, s := range kem.All() {
-		out = append(out, s.Name())
-	}
-	return out
-}
+func completionKeyTypes() []string { return kem.Names() }
 
 // completionPads are the padding answers worth suggesting. Any percent is legal,
 // so this is a starting point rather than the set of valid values.
 func completionPads() []string { return []string{"none", "0", "1", "2", "5", "10", "25", "50"} }
 
-// completionMethods and completionInfos are the values --method and --info take.
+// completionMethods, completionInfos and completionVerifies are the values
+// --method, --info and --verify take.
 func completionMethods() []string { return names(splitMethods) }
 
 func completionInfos() []string { return names(infoModes) }
+
+func completionVerifies() []string { return names(verifyModes) }
 
 // cmdCompletion prints a completion script for one shell.
 func cmdCompletion(opts *cliOptions) error {
@@ -196,6 +178,38 @@ func writeCompletion(w io.Writer, shell string) error {
 	return fmt.Errorf("unknown shell %q (use %s)", shell, strings.Join(completionShells(), ", "))
 }
 
+// choice is one kind of flag value the shells complete from a fixed list.
+type choice struct {
+	kind   argKind
+	values []string
+}
+
+// choices lists every kind of flag value that completes from a fixed list. The
+// bash and PowerShell scripts build one case from each, so a kind added here
+// needs no edit to either template.
+func choices() []choice {
+	return []choice{
+		{argFormat, completionFormats()},
+		{argAlgo, ciphers.Names()},
+		{argKDF, kdf.PresetNames()},
+		{argPad, completionPads()},
+		{argMethod, completionMethods()},
+		{argInfo, completionInfos()},
+		{argVerify, completionVerifies()},
+		{argBool, []string{"true", "false"}},
+	}
+}
+
+// choiceCases renders one case per choice, filling line with the flags of
+// that kind and then the values.
+func choiceCases(line string, list func([]string) string, values func([]string) string) string {
+	var b strings.Builder
+	for _, c := range choices() {
+		fmt.Fprintf(&b, line, list(flagsOfKind(c.kind)), values(c.values))
+	}
+	return b.String()
+}
+
 // words joins a list for a shell script, where every value is a bare word.
 func words(v []string) string { return strings.Join(v, " ") }
 
@@ -218,21 +232,7 @@ _riven() {
 
     # A flag's value depends only on the flag, so it is settled first.
     case "$prev" in
-        %s)
-            COMPREPLY=( $(compgen -W "%s" -- "$cur") ); return 0 ;;
-        %s)
-            COMPREPLY=( $(compgen -W "%s" -- "$cur") ); return 0 ;;
-        %s)
-            COMPREPLY=( $(compgen -W "%s" -- "$cur") ); return 0 ;;
-        %s)
-            COMPREPLY=( $(compgen -W "%s" -- "$cur") ); return 0 ;;
-        %s)
-            COMPREPLY=( $(compgen -W "%s" -- "$cur") ); return 0 ;;
-        %s)
-            COMPREPLY=( $(compgen -W "%s" -- "$cur") ); return 0 ;;
-        %s)
-            COMPREPLY=( $(compgen -W "true false" -- "$cur") ); return 0 ;;
-        %s)
+%s        %s)
             COMPREPLY=( $(compgen -v -- "$cur") ); return 0 ;;
         %s)
             return 0 ;;
@@ -268,13 +268,8 @@ _riven() {
 complete -o default -F _riven riven
 `,
 		words(sortedCommands()),
-		alternatives(flagsOfKind(argFormat)), words(completionFormats()),
-		alternatives(flagsOfKind(argAlgo)), words(ciphers.Names()),
-		alternatives(flagsOfKind(argKDF)), words(kdf.PresetNames()),
-		alternatives(flagsOfKind(argPad)), words(completionPads()),
-		alternatives(flagsOfKind(argMethod)), words(completionMethods()),
-		alternatives(flagsOfKind(argInfo)), words(completionInfos()),
-		alternatives(flagsOfKind(argBool)),
+		choiceCases("        %s)\n            COMPREPLY=( $(compgen -W \"%s\" -- \"$cur\") ); return 0 ;;\n",
+			alternatives, words),
 		alternatives(flagsOfKind(argEnv)),
 		alternatives(flagsOfKind(argFree)),
 		words(allFlags()),
@@ -336,9 +331,10 @@ _riven() {
     '--record-algo[write the algorithms into each piece]:choice:(true false)' \
     '--record-kdf[write the Argon2id cost into each piece]:choice:(true false)' \
     '--record-name[write the input file name into each piece]:choice:(true false)' \
-    '--verify[re-read and rebuild the pieces after writing]:choice:(true false)' \
+    '--verify[how to check the pieces after writing]:mode:(%s)' \
     '-v[re-read and rebuild the pieces after writing]' \
-    '--no-verify[skip the post-split self-check]'     '--no-color[plain output, without colour]' \
+    '--no-verify[skip the post-split self-check]' \
+    '--no-color[plain output, without colour]' \
     '--password-env[environment variable holding a password]:variable:_parameters' \
     '--text-env[environment variable holding the data]:variable:_parameters' \
     '(-t --text)'{-t,--text}'[split this string]:text:' \
@@ -383,6 +379,7 @@ fi
 		words(completionShells()),
 		words(completionMethods()),
 		words(completionInfos()),
+		words(completionVerifies()),
 	)
 	return err
 }
@@ -430,7 +427,7 @@ func writeFishCompletion(w io.Writer) error {
 		{"--record-algo", "-x -a 'true false'", "write the algorithms into each piece"},
 		{"--record-kdf", "-x -a 'true false'", "write the Argon2id cost into each piece"},
 		{"--record-name", "-x -a 'true false'", "write the input file name into each piece"},
-		{"--verify", "-x -a 'true false'", "re-read and rebuild the pieces after writing"},
+		{"--verify", "-x -a '" + words(completionVerifies()) + "'", "how to check the pieces after writing"},
 		{"-v", "", "re-read and rebuild the pieces after writing"},
 		{"--no-verify", "", "skip the post-split self-check"},
 		{"--no-color", "", "plain output, without colour"},
@@ -486,14 +483,7 @@ Register-ArgumentCompleter -Native -CommandName riven -ScriptBlock {
     if ($wordToComplete -eq '') { $previous = $words[$words.Count - 1] }
 
     $values = switch -Exact ($previous) {
-        { $_ -in @(%s) } { @(%s); break }
-        { $_ -in @(%s) } { @(%s); break }
-        { $_ -in @(%s) } { @(%s); break }
-        { $_ -in @(%s) } { @(%s); break }
-        { $_ -in @(%s) } { @(%s); break }
-        { $_ -in @(%s) } { @(%s); break }
-        { $_ -in @(%s) } { @('true', 'false'); break }
-        { $_ -in @(%s) } { Get-ChildItem env: | ForEach-Object { $_.Name }; break }
+%s        { $_ -in @(%s) } { Get-ChildItem env: | ForEach-Object { $_.Name }; break }
         default { $null }
     }
     if ($null -ne $values) {
@@ -544,7 +534,13 @@ Register-ArgumentCompleter -Native -CommandName riven -ScriptBlock {
         ForEach-Object {
             $path = Join-Path $parent $_.Name
             if ($parent -eq '.') { $path = $_.Name }
-            if ($path -match '\s') { $path = "'$path'" }
+            # The name is whatever is in the folder, which may have come from
+            # anyone: a ; or a $( in it would run as a command once the line is
+            # entered, and a leading - would be read as a flag. So it is quoted,
+            # quotes in it doubled, unless every character is plainly a name.
+            if ($path -cnotmatch '^[A-Za-z0-9_.\\/:][A-Za-z0-9_.\\/:-]*$') {
+                $path = "'" + [System.Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($path) + "'"
+            }
             [System.Management.Automation.CompletionResult]::new(
                 $path, $_.Name, 'ProviderItem', $_.FullName)
         }
@@ -552,13 +548,7 @@ Register-ArgumentCompleter -Native -CommandName riven -ScriptBlock {
 }
 `,
 		psList(sortedCommands()),
-		psList(flagsOfKind(argFormat)), psList(completionFormats()),
-		psList(flagsOfKind(argAlgo)), psList(ciphers.Names()),
-		psList(flagsOfKind(argKDF)), psList(kdf.PresetNames()),
-		psList(flagsOfKind(argPad)), psList(completionPads()),
-		psList(flagsOfKind(argMethod)), psList(completionMethods()),
-		psList(flagsOfKind(argInfo)), psList(completionInfos()),
-		psList(flagsOfKind(argBool)),
+		choiceCases("        { $_ -in @(%s) } { @(%s); break }\n", psList, psList),
 		psList(flagsOfKind(argEnv)),
 		psList(allFlags()),
 		psList(completionKeyTypes()),

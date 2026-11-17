@@ -4,8 +4,6 @@
 package app
 
 import (
-	"bytes"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,29 +11,6 @@ import (
 
 	"golang.org/x/text/unicode/norm"
 )
-
-// captureOutput runs fn with os.Stdout and os.Stderr redirected to a pipe, so a
-// command's human-readable output can be inspected. A goroutine drains the pipe
-// to avoid blocking on a full buffer.
-func captureOutput(t *testing.T, fn func() error) (string, error) {
-	t.Helper()
-	oldOut, oldErr := os.Stdout, os.Stderr
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout, os.Stderr = w, w
-	done := make(chan string, 1)
-	go func() {
-		var buf bytes.Buffer
-		io.Copy(&buf, r)
-		done <- buf.String()
-	}()
-	runErr := fn()
-	w.Close()
-	os.Stdout, os.Stderr = oldOut, oldErr
-	return <-done, runErr
-}
 
 // runSplit runs a non-interactive split with the given extra args, returning the
 // output directory.
@@ -62,9 +37,13 @@ func TestSplitVerifyReporting(t *testing.T) {
 		want    string
 		notWant string
 	}{
-		{"default verifies", nil, verifiedYes, ""},
-		{"--no-verify skips", []string{"--no-verify"}, verifiedSkipped, verifiedYes},
+		{"default verifies fully", nil, verifiedFull, ""},
+		{"--verify full", []string{"--verify", "full"}, verifiedFull, ""},
+		{"--verify true is full", []string{"--verify", "true"}, verifiedFull, ""},
+		{"--verify fast", []string{"--verify", "fast"}, verifiedFast, verifiedFull},
+		{"--verify off skips", []string{"--verify", "off"}, verifiedSkipped, ""},
 		{"--verify false skips", []string{"--verify", "false"}, verifiedSkipped, ""},
+		{"--no-verify skips", []string{"--no-verify"}, verifiedSkipped, verifiedFull},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -17,12 +17,12 @@ import (
 func TestWordsRoundTrip(t *testing.T) {
 	for size := format.MinPieceLen; size < format.MinPieceLen+24; size++ {
 		piece := samplePiece(t, size)
-		data, note, err := Encode(piece, Words, 0)
+		data, err := Encode(piece, Words, 0)
 		if err != nil {
 			t.Fatalf("%d bytes: %v", size, err)
 		}
-		if !strings.Contains(note, "words") {
-			t.Fatalf("%d bytes: the note should state the word count, got %q", size, note)
+		if got := len(strings.Fields(string(data))); got != Bip39Words(size) {
+			t.Fatalf("%d bytes: %d words written, Bip39Words says %d", size, got, Bip39Words(size))
 		}
 		got, det, err := decodeDetail(data)
 		if err != nil {
@@ -43,7 +43,7 @@ func TestWordsRoundTrip(t *testing.T) {
 // TestWordsAreFromTheList checks the output is nothing but list words, which is
 // what makes it transcribable and what detection relies on.
 func TestWordsAreFromTheList(t *testing.T) {
-	data, _, err := Encode(samplePiece(t, 200), Words, 0)
+	data, err := Encode(samplePiece(t, 200), Words, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestWordsAreFromTheList(t *testing.T) {
 // case, ragged spacing, commas, and everything on one line.
 func TestWordsSurviveHandCopying(t *testing.T) {
 	piece := samplePiece(t, 120)
-	data, _, err := Encode(piece, Words, 0)
+	data, err := Encode(piece, Words, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestWordsSurviveHandCopying(t *testing.T) {
 // wrong word has to be reported rather than passed on.
 func TestWordsCatchAMisreadWord(t *testing.T) {
 	piece := samplePiece(t, 150)
-	data, _, err := Encode(piece, Words, 0)
+	data, err := Encode(piece, Words, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestWordsCatchAMisreadWord(t *testing.T) {
 func TestWordsAreNotConfusedWithOtherText(t *testing.T) {
 	piece := samplePiece(t, 200)
 	for _, f := range []Format{Base64, Base32} {
-		data, _, err := Encode(piece, f, 0)
+		data, err := Encode(piece, f, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -155,10 +155,10 @@ func TestWordsAreNotConfusedWithOtherText(t *testing.T) {
 // TestWordsRefusesLargePieces checks the format declines rather than producing a
 // list nobody would transcribe.
 func TestWordsRefusesLargePieces(t *testing.T) {
-	if _, _, err := Encode(samplePiece(t, Bip39MaxPiece+1), Words, 0); err == nil {
+	if _, err := Encode(samplePiece(t, Bip39MaxPiece+1), Words, 0); err == nil {
 		t.Fatal("an oversized piece should be refused")
 	}
-	if _, _, err := Encode(samplePiece(t, Bip39MaxPiece), Words, 0); err != nil {
+	if _, err := Encode(samplePiece(t, Bip39MaxPiece), Words, 0); err != nil {
 		t.Fatalf("a piece at the limit should encode: %v", err)
 	}
 }
@@ -204,7 +204,7 @@ func TestWordListIsTheStandardOne(t *testing.T) {
 // actually written, since that number is the reason to pick another format.
 func TestBip39ExpansionIsHonest(t *testing.T) {
 	piece := samplePiece(t, 512)
-	data, _, err := Encode(piece, Words, 0)
+	data, err := Encode(piece, Words, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

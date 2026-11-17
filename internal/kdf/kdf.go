@@ -11,8 +11,10 @@
 package kdf
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -92,9 +94,7 @@ func MemoryChoices() []uint32 {
 
 // ParChoices returns the selectable parallelism degrees, ascending.
 func ParChoices() []uint8 {
-	out := make([]uint8, len(parTable))
-	copy(out[:], parTable[:])
-	return out
+	return slices.Clone(parTable[:])
 }
 
 // MaxTime is the highest number of passes that can be encoded.
@@ -205,7 +205,7 @@ func Parse(s string) (Params, error) {
 	if p, ok := presets[s]; ok {
 		return p, nil
 	}
-	if !strings.ContainsAny(s, "=") {
+	if !strings.Contains(s, "=") {
 		return Params{}, fmt.Errorf("kdf: unknown preset %q (choose from %v, or use m=..,t=..,p=..)", s, PresetNames())
 	}
 	p := Default()
@@ -249,10 +249,7 @@ func MixPasswords(passwords [][]byte) []byte {
 	// so {"ab","c"} and {"a","bc"} never collide.
 	h.Write([]byte("riven-pw-mix-v1"))
 	for _, pw := range passwords {
-		lenbuf[0] = byte(len(pw) >> 24)
-		lenbuf[1] = byte(len(pw) >> 16)
-		lenbuf[2] = byte(len(pw) >> 8)
-		lenbuf[3] = byte(len(pw))
+		binary.BigEndian.PutUint32(lenbuf[:], uint32(len(pw)))
 		h.Write(lenbuf[:])
 		h.Write(pw)
 	}

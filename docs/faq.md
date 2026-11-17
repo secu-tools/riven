@@ -310,4 +310,7 @@ Enough that losing a location does not lose the data, and few enough that
 gathering K is realistic. 3-of-5 is a reasonable default: any two pieces can be
 lost, and any two holders working together still have nothing.
 
+A set can have up to 65535 pieces; [large inputs](usage.md#large-inputs) says
+what many pieces cost.
+
 </details>

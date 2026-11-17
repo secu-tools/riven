@@ -244,8 +244,8 @@ func TestMatrixModesAndRecording(t *testing.T) {
 }
 
 // TestMatrixContentShapes runs the shapes that break byte pipelines through the
-// binary, including the sizes either side of the internal chunk boundary, which
-// is where a large split changes shape.
+// binary, including the sizes either side of the 512 KiB units the cores share a
+// large split out in, which is where it changes shape.
 func TestMatrixContentShapes(t *testing.T) {
 	const chunk = 512 << 10
 	cases := map[string][]byte{

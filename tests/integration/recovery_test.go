@@ -160,7 +160,7 @@ func TestRecoveryThroughEveryTransport(t *testing.T) {
 
 				decoded := make([][]byte, 0, len(pieces))
 				for _, p := range pieces {
-					data, _, err := pieceio.Encode(p, f, 3)
+					data, err := pieceio.Encode(p, f, 3)
 					if err != nil {
 						t.Fatalf("encode: %v", err)
 					}
@@ -343,7 +343,7 @@ func TestPaddingNeverBreaksQRFeasibility(t *testing.T) {
 			}
 			// Every piece fits, so every piece must encode and decode.
 			for i, p := range pieces {
-				data, _, err := pieceio.Encode(p, pieceio.QR, 2)
+				data, err := pieceio.Encode(p, pieceio.QR, 2)
 				if err != nil {
 					t.Fatalf("size=%d run=%d piece=%d fits but did not encode: %v", size, run, i+1, err)
 				}
@@ -383,7 +383,7 @@ func TestPadNoneMakesQRDeterministic(t *testing.T) {
 		// The QR verdict must be the same every run, being size-determined.
 		if pieceio.QRFits(want) {
 			for _, p := range pieces {
-				if _, _, err := pieceio.Encode(p, pieceio.QR, 2); err != nil {
+				if _, err := pieceio.Encode(p, pieceio.QR, 2); err != nil {
 					t.Fatalf("run %d: piece fits but did not encode: %v", run, err)
 				}
 			}
@@ -417,7 +417,7 @@ func TestRecoveryAtEveryPaddingWidth(t *testing.T) {
 				skipIfOverCapacity(t, f, len(pieces[0]))
 				decoded := make([][]byte, 0, len(pieces))
 				for _, p := range pieces {
-					data, _, err := pieceio.Encode(p, f, 3)
+					data, err := pieceio.Encode(p, f, 3)
 					if err != nil {
 						t.Fatalf("encode: %v", err)
 					}

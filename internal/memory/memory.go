@@ -24,12 +24,7 @@ import (
 // Zero overwrites b with zeros. The trailing runtime.KeepAlive prevents the
 // compiler from eliminating the writes as dead stores.
 func Zero(b []byte) {
-	if len(b) == 0 {
-		return
-	}
-	for i := range b {
-		b[i] = 0
-	}
+	clear(b)
 	runtime.KeepAlive(b)
 }
 

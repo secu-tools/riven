@@ -17,7 +17,8 @@ type LockedBuffer struct {
 	destroyed bool
 }
 
-// NewLocked allocates a zeroed locked buffer of size bytes.
+// NewLocked allocates a zeroed locked buffer of size bytes. Every sysAlloc
+// returns memory the system has already zeroed.
 func NewLocked(size int) (*LockedBuffer, error) {
 	if size <= 0 {
 		return &LockedBuffer{destroyed: true}, nil
@@ -25,9 +26,6 @@ func NewLocked(size int) (*LockedBuffer, error) {
 	mem, err := sysAlloc(size)
 	if err != nil {
 		return nil, err
-	}
-	for i := range mem {
-		mem[i] = 0
 	}
 	b := &LockedBuffer{mem: mem, n: size}
 	if err := sysLock(mem); err == nil {
@@ -106,9 +104,6 @@ func Bytes(n int) []byte {
 		return make([]byte, n)
 	}
 	s := b.Bytes()
-	if len(s) == 0 {
-		return make([]byte, n)
-	}
 	regMu.Lock()
 	byBase[&s[0]] = b
 	regMu.Unlock()

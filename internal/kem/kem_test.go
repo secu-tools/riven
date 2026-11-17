@@ -5,6 +5,7 @@ package kem
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -282,5 +283,23 @@ func TestSchemeDescription(t *testing.T) {
 	}
 	if unknown.PublicKeySize() != 0 || unknown.CiphertextSize() != 0 {
 		t.Fatal("an unknown scheme should report no sizes")
+	}
+}
+
+// TestAKeyOfTheRightLengthCanStillBeRefused checks the length check is not the
+// only one: bytes of the right length that are not a key, a point off the
+// curve or a scalar past the group order, are refused by name.
+func TestAKeyOfTheRightLengthCanStillBeRefused(t *testing.T) {
+	pub := make([]byte, P256.PublicKeySize())
+	pub[0] = 4 // uncompressed, then a point that is not on the curve
+	for i := 1; i < len(pub); i++ {
+		pub[i] = 0xff
+	}
+	if _, err := PublicFromBytes(pub, P256); err == nil || !strings.Contains(err.Error(), "invalid p256 public key") {
+		t.Fatalf("a point off the curve: %v", err)
+	}
+	priv := bytes.Repeat([]byte{0xff}, P256.PrivateKeySize())
+	if _, err := PrivateFromBytes(priv, P256); err == nil || !strings.Contains(err.Error(), "invalid p256 private key") {
+		t.Fatalf("a scalar past the order: %v", err)
 	}
 }

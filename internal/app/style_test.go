@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -319,6 +320,39 @@ func TestErrorsReadAsSentences(t *testing.T) {
 	}
 }
 
+// TestVerifyFailuresFoldByVisibleWidth checks a failure verify reports folds
+// the same with colour as without: the escape codes around the label once
+// counted towards the width, so every coloured line broke short of it.
+func TestVerifyFailuresFoldByVisibleWidth(t *testing.T) {
+	body := strings.Repeat("the piece did not open with the key that was given ", 4)
+	lines := func(colour bool) []string {
+		t.Helper()
+		f := tempFile(t)
+		if colour {
+			withColor(t, f)
+		}
+		withLineWidth(t, 50, func() { reportFailed(f, "FAILED:", body) })
+		raw, err := os.ReadFile(f.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Split(strings.TrimRight(escapes.ReplaceAllString(string(raw), ""), "\n"), "\n")
+	}
+	plain, coloured := lines(false), lines(true)
+	if !slices.Equal(plain, coloured) {
+		t.Fatalf("colour changed the folding:\nplain:\n%s\ncoloured:\n%s",
+			strings.Join(plain, "\n"), strings.Join(coloured, "\n"))
+	}
+	for _, l := range plain {
+		if utf8.RuneCountInString(l) > 50 {
+			t.Fatalf("a line is wider than 50 columns: %q", l)
+		}
+	}
+	if !strings.HasPrefix(plain[0], "  FAILED: the piece") || len(plain) < 3 {
+		t.Fatalf("the report does not start as it should, or did not fold:\n%s", strings.Join(plain, "\n"))
+	}
+}
+
 // TestHumanizeDropsPackageNames checks the prefixes come off wherever they sit
 // in a chain of wrapped errors, and that nothing else does.
 func TestHumanizeDropsPackageNames(t *testing.T) {
@@ -332,6 +366,33 @@ func TestHumanizeDropsPackageNames(t *testing.T) {
 		if got := humanize(errorString(in)); got != want {
 			t.Errorf("%q became %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestHumanizeKnowsEveryInternalPackage checks the list of prefixes taken off an
+// error has every package under internal/ whose errors can reach a user, so a
+// package added later is not left to print its own name.
+func TestHumanizeKnowsEveryInternalPackage(t *testing.T) {
+	entries, err := os.ReadDir("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := 0
+	for _, e := range entries {
+		// This package's errors carry no prefix, and testkit is only for tests.
+		if !e.IsDir() || e.Name() == "app" || e.Name() == "testkit" {
+			continue
+		}
+		found++
+		if !slices.Contains(internalPackages, e.Name()) {
+			t.Errorf("internal/%s is not in internalPackages, so its errors would name it", e.Name())
+		}
+		if got := humanize(errorString(e.Name() + ": it failed")); got != "it failed" {
+			t.Errorf("the %s prefix was not taken off: %q", e.Name(), got)
+		}
+	}
+	if found != len(internalPackages) {
+		t.Errorf("internalPackages lists %d packages, internal/ has %d", len(internalPackages), found)
 	}
 }
 

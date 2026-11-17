@@ -234,6 +234,23 @@ func TestFormatNoteWarnsBeforeTheChoice(t *testing.T) {
 	if !strings.Contains(note, "NOT AVAILABLE") {
 		t.Errorf("a piece past the word limit must be marked unavailable: %q", note)
 	}
+
+	// A piece that fits a code can still take more than a page of text, which
+	// is worth knowing before printing a set; past the page limit there is no
+	// sheet at all, and choosing one anyway is refused.
+	note = formatNote(pieceio.Sheet, pieceio.QRMaxBytes)
+	if pages := pieceio.SheetPages(pieceio.QRMaxBytes); pages < 2 || !strings.Contains(note, strconv.Itoa(pages)+" printed pages") {
+		t.Errorf("a sheet of %d pages should say so: %q", pages, note)
+	}
+	tooBigForSheet := pieceio.SheetMaxPiece + 1
+	if note := formatNote(pieceio.Sheet, tooBigForSheet); !strings.Contains(note, "NOT AVAILABLE") {
+		t.Errorf("a piece past the page limit must mark the sheet unavailable: %q", note)
+	}
+	plan := planFor(t, "--keyless", "-n", "2", "-k", "2")
+	if err := checkFormatsFit(plan, []pieceio.Format{pieceio.Sheet}, tooBigForSheet); err == nil ||
+		!strings.Contains(err.Error(), "sheet") {
+		t.Errorf("a sheet past the page limit was not refused: %v", err)
+	}
 }
 
 // TestCheckWordsFeasible checks the same limit is enforced, not only announced,
@@ -326,5 +343,73 @@ func TestChooseKDFReadsTheAnswer(t *testing.T) {
 	})
 	if got.Memory != 8*1024 || got.Time != 1 || got.Par != 1 {
 		t.Fatalf("custom cost gave %+v", got)
+	}
+}
+
+// TestSerialRunsFoldConsecutivePieces checks info names a folder's pieces by
+// runs, so a set of thousands does not print every number, and copies and gaps
+// still read correctly.
+func TestSerialRunsFoldConsecutivePieces(t *testing.T) {
+	for _, c := range []struct {
+		serials []int
+		want    string
+	}{
+		{[]int{3}, "3"},
+		{[]int{3, 1, 2}, "1-3"},
+		{[]int{1, 2, 2, 4, 6, 7, 8, 10}, "1-2, 4, 6-8, 10"},
+	} {
+		if got := serialRuns(c.serials); got != c.want {
+			t.Errorf("serialRuns(%v) = %q, want %q", c.serials, got, c.want)
+		}
+	}
+	all := make([]int, 65535)
+	for i := range all {
+		all[i] = len(all) - i
+	}
+	if got := serialRuns(all); got != "1-65535" {
+		t.Errorf("every piece of the largest set reads %q", got)
+	}
+}
+
+// TestStandardInputCannotBothCarryDataAndAnswer checks a split of standard
+// input is refused where it would also be asked questions, since the answers
+// would be read as data; -y is what makes it possible.
+func TestStandardInputCannotBothCarryDataAndAnswer(t *testing.T) {
+	var err error
+	withTerminal(t, "", func() { _, err = readSplitInput(&cliOptions{files: []string{"-"}}) })
+	if err == nil || !strings.Contains(err.Error(), "needs -y") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// TestCombineNamesTheDamagedPiece checks a combine that sets a damaged piece
+// aside says which file it was, and still writes what the rest rebuild.
+func TestCombineNamesTheDamagedPiece(t *testing.T) {
+	t.Setenv("RIVEN_UNIT_DMG", "damaged")
+	dir := t.TempDir()
+	paths := writePieces(t, dir, makePieces(t, core.SplitOptions{N: 3, K: 2,
+		Layers: []core.LayerSpec{{Kind: core.PasswordLayer, Password: []byte("damaged")}}}, []byte("despite it")))
+	raw, err := os.ReadFile(paths[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw[len(raw)-1] ^= 1
+	if err := os.WriteFile(paths[1], raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "back")
+	opts, err := parseArgs(append([]string{"combine", "-y", "-o", out, "--password-env", "RIVEN_UNIT_DMG"}, paths...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr := captureBoth(t, func() { err = cmdCombine(opts) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(out); string(got) != "despite it" {
+		t.Fatalf("rebuilt %q", got)
+	}
+	if said := stdout + stderr; !strings.Contains(said, "is damaged") || !strings.Contains(said, filepath.Base(paths[1])) {
+		t.Fatalf("the damaged piece was not named:\n%s", said)
 	}
 }

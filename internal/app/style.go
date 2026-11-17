@@ -8,9 +8,7 @@ import (
 	"io"
 	"os"
 	"runtime"
-	"strings"
 	"sync"
-	"unicode/utf8"
 
 	"golang.org/x/term"
 
@@ -132,22 +130,9 @@ func paint(w io.Writer, t tone, s string) string {
 
 // writeLabeled prints a message that starts with a label such as "warning:",
 // folded at the line width with every line after the first indented past the
-// label, and with only the label coloured. The fold is worked out on the plain
-// text, so the escape codes never count towards the width.
+// label, and with only the label coloured.
 func writeLabeled(out io.Writer, label string, t tone, body string) {
-	lead := label + " "
-	indent := utf8.RuneCountInString(lead)
-	avail := max(lineWidth()-indent, minTextWidth)
-	lines := wrapWords(body, avail)
-	if len(lines) == 0 {
-		fmt.Fprintln(out, paint(out, t, label))
-		return
-	}
-	fmt.Fprintln(out, paint(out, t, label)+" "+lines[0])
-	pad := strings.Repeat(" ", indent)
-	for _, l := range lines[1:] {
-		fmt.Fprintln(out, pad+l)
-	}
+	writeFolded(out, label+" ", paint(out, t, label)+" ", body)
 }
 
 // warn prints a warning: something the user should act on, or know before

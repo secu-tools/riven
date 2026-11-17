@@ -67,9 +67,9 @@ func SafeName(raw string) string {
 	if i := strings.LastIndex(name, ":"); i >= 0 {
 		name = name[i+1:]
 	}
+	// Trimming trailing dots also turns "." and ".." into nothing.
 	name = strings.TrimRight(name, " .")
-
-	if name == "" || name == "." || name == ".." {
+	if name == "" {
 		return ""
 	}
 	for _, r := range name {
@@ -81,7 +81,9 @@ func SafeName(raw string) string {
 	if i := strings.Index(stem, "."); i > 0 {
 		stem = stem[:i]
 	}
-	if windowsReserved[deviceKey(stem)] {
+	// Windows also ignores spaces and dots at the end of the stem when it looks
+	// for a device, so "nul .txt" is the device NUL as surely as "nul.txt" is.
+	if windowsReserved[deviceKey(strings.TrimRight(stem, " ."))] {
 		return ""
 	}
 	return name
@@ -90,13 +92,10 @@ func SafeName(raw string) string {
 // deviceKey folds a name stem to the form the reserved-name table is keyed by:
 // lower case, with the superscript digits Windows also accepts written plainly.
 func deviceKey(stem string) string {
-	var b strings.Builder
-	b.Grow(len(stem))
-	for _, r := range strings.ToLower(stem) {
+	return strings.Map(func(r rune) rune {
 		if d, ok := superscriptDigits[r]; ok {
-			r = d
+			return d
 		}
-		b.WriteRune(r)
-	}
-	return b.String()
+		return r
+	}, strings.ToLower(stem))
 }

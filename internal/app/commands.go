@@ -5,21 +5,24 @@ package app
 
 import (
 	"bytes"
+	"cmp"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/secu-tools/riven/internal/ciphers"
 	"github.com/secu-tools/riven/internal/core"
 	"github.com/secu-tools/riven/internal/kdf"
 	"github.com/secu-tools/riven/internal/kem"
 	"github.com/secu-tools/riven/internal/memory"
+	"github.com/secu-tools/riven/internal/parallel"
 	"github.com/secu-tools/riven/internal/pieceio"
 )
 
@@ -46,6 +49,7 @@ func cmdSplit(opts *cliOptions) error {
 		return err
 	}
 	out := msgWriter(opts)
+	defer startProgress()()
 
 	in, err := readSplitInput(opts)
 	if err != nil {
@@ -62,6 +66,7 @@ func cmdSplit(opts *cliOptions) error {
 	plan.opts.Name = recordedName(opts, in.origName)
 	plan.opts.CreatorVersion = creatorVersion()
 	plan.opts.CreatorCommit = creatorCommit()
+	plan.opts.Progress = progress
 
 	noteLargeSplit(out, len(input), plan.opts)
 
@@ -75,14 +80,10 @@ func cmdSplit(opts *cliOptions) error {
 	}
 
 	verified := verifiedSkipped
-	if opts.verifyEnabled() {
-		verifyPaths := written[pieceio.Binary]
-		if len(verifyPaths) == 0 {
-			verifyPaths = written[formats[0]]
-		}
-		if verified, err = verifySplit(input, verifyPaths, plan); err != nil {
+	if opts.verify != verifyOff {
+		if verified, err = verifySplit(opts.verify, input, written, formats, plan); err != nil {
 			fmt.Fprintln(out)
-			warn(out, "the pieces were written but did not rebuild the original. Do not rely on them.")
+			warn(out, "the pieces were written but failed the check after writing. Do not rely on them.")
 			return err
 		}
 	}
@@ -91,13 +92,26 @@ func cmdSplit(opts *cliOptions) error {
 	return reportGeneratedPasswords(opts, plan)
 }
 
-// verifyEnabled reports whether the post-split self-check should run. It is on
-// unless the user turned it off with --verify false or --no-verify.
-func (o *cliOptions) verifyEnabled() bool {
-	if !o.verifySet {
-		return true
+// verifyMode is how thoroughly a split checks what it wrote.
+type verifyMode uint8
+
+const (
+	verifyFull verifyMode = iota // every file and every piece: the default
+	verifyFast                   // one rebuild, from the first K pieces of one format
+	verifyOff
+)
+
+// verifyModes lists the modes in the order help and completion give them.
+var verifyModes = []verifyMode{verifyFull, verifyFast, verifyOff}
+
+func (m verifyMode) String() string {
+	switch m {
+	case verifyFast:
+		return "fast"
+	case verifyOff:
+		return "off"
 	}
-	return o.verify
+	return "full"
 }
 
 // splitInput is what a split reads.
@@ -135,7 +149,11 @@ func readSplitInput(opts *cliOptions) (splitInput, error) {
 		if !opts.yes && isInteractive() {
 			return splitInput{}, errors.New("reading data from standard input needs -y, since prompts cannot share it")
 		}
-		buf, err := io.ReadAll(os.Stdin)
+		var buf []byte
+		err := during("reading the input", os.Stdin, func() (err error) {
+			buf, err = io.ReadAll(os.Stdin)
+			return err
+		})
 		if err != nil {
 			return splitInput{}, err
 		}
@@ -150,7 +168,11 @@ func readSplitInput(opts *cliOptions) (splitInput, error) {
 		if st.IsDir() {
 			return splitInput{}, errSplitDirectory
 		}
-		buf, err := os.ReadFile(path)
+		var buf []byte
+		err = during("reading the input", nil, func() (err error) {
+			buf, err = os.ReadFile(path)
+			return err
+		})
 		if err != nil {
 			return splitInput{}, err
 		}
@@ -171,54 +193,45 @@ func recordedName(opts *cliOptions, orig string) string {
 
 // exportSplit produces the pieces and writes each one in every requested format.
 //
-// Pieces are written as they are produced and released immediately, so the
-// memory a split needs does not grow with the piece count. The export question
-// needs a piece size to answer, which is only known once a piece exists, so it
-// is settled from the first one and applied to the rest; every piece of a set is
-// the same size.
+// Pieces are written as they are produced, several files at a time, and
+// released once written, so the memory a split needs does not grow with the
+// piece count. The export question needs the piece size, which core works out
+// from the options, so it is settled before anything is encrypted: a form the
+// pieces would not fit is refused before the work, not after the first piece.
 func exportSplit(out io.Writer, plan *splitPlan, opts *cliOptions, input []byte, base string) (map[pieceio.Format][]string, []pieceio.Format, error) {
-	written := make(map[pieceio.Format][]string, len(pieceio.All()))
 	width := len(strconv.Itoa(plan.opts.N))
-	var formats []pieceio.Format
-	var sizes []int
-
 	pieceName := func(serial int) string { return fmt.Sprintf("%s.%0*d", base, width, serial) }
 
-	err := core.SplitTo(input, plan.opts, func(serial int, piece []byte) error {
-		if formats == nil {
-			chosen, ferr := resolveFormats(opts, plan, len(piece))
-			if ferr != nil {
-				return ferr
-			}
-			if ferr := confirmReplacePieces(opts, plan, chosen, pieceName); ferr != nil {
-				return ferr
-			}
-			formats = chosen
-		}
-		sizes = append(sizes, len(piece))
-
-		name := pieceName(serial)
-		for _, f := range formats {
-			path := pieceio.Path(plan.outDir, name, f)
-			data, _, err := encodeOne(piece, f, plan, serial)
-			if err != nil {
-				return fmt.Errorf("%s export: %w", f, err)
-			}
-			err = pieceio.Write(path, data)
-			memory.Zero(data)
-			if err != nil {
-				return err
-			}
-			written[f] = append(written[f], path)
-		}
-		return nil
+	size, err := core.PieceLen(len(input), plan.opts)
+	if err != nil {
+		return nil, nil, err
+	}
+	formats, err := resolveFormats(opts, plan, size)
+	if err == nil {
+		err = confirmReplacePieces(opts, plan, formats, pieceName)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	w := newPieceWriter(plan, formats, pieceName, size, opts.verify == verifyFull)
+	err = core.SplitTo(input, plan.opts, func(serial int, piece []byte) error {
+		return w.add(serial, piece)
 	})
+	// The failure the split stopped on is whichever a writer had recorded when
+	// the next piece was handed over. Another writer may have failed an earlier
+	// piece since, and the earliest is the one reported, so the error is the same
+	// whichever writer got there first.
+	werr := w.wait()
+	progress("", 0, 0)
+	if werr != nil {
+		err = werr
+	}
 	if err != nil {
 		return nil, nil, err
 	}
 
-	plan.pieceSizes = sizes
-	return written, formats, nil
+	plan.pieceSize, plan.pieceSums = w.size, w.sums
+	return w.written, w.formats, nil
 }
 
 // confirmReplacePieces asks before a split writes over files that have the
@@ -260,18 +273,18 @@ func fileExists(path string) bool {
 // reportSizeNotes says what the chosen formats cost at the size the pieces came
 // out. Both QR and sheet carry a code, but the report is about the pieces rather
 // than the formats, so it is made once.
-func reportSizeNotes(out io.Writer, formats []pieceio.Format, sizes []int) {
-	if len(sizes) == 0 {
+func reportSizeNotes(out io.Writer, formats []pieceio.Format, size, count int) {
+	if size == 0 {
 		return
 	}
 	wantSheet := slices.Contains(formats, pieceio.Sheet)
 	if wantSheet || slices.Contains(formats, pieceio.QR) {
-		reportQRSizes(out, sizes)
+		reportQRLevel(out, size, count)
 	}
 	if wantSheet {
-		if pages := pieceio.SheetPages(sizes[0]); pages > 1 {
+		if pages := pieceio.SheetPages(size); pages > 1 {
 			summaryRow(out, "sheet", fmt.Sprintf("about %d printed pages per piece, %d in all",
-				pages, pages*len(sizes)))
+				pages, pages*count))
 		}
 	}
 }
@@ -293,7 +306,7 @@ func noteLargeSplit(out io.Writer, inputLen int, opts core.SplitOptions) {
 // names the file only when the pieces record it: a sheet is printed and left
 // where others can read it, so --record-name false and --info none must reach
 // it too.
-func encodeOne(piece []byte, f pieceio.Format, plan *splitPlan, serial int) ([]byte, string, error) {
+func encodeOne(piece []byte, f pieceio.Format, plan *splitPlan, serial int) ([]byte, error) {
 	if f == pieceio.Sheet {
 		// A set that hides its details must not print them either.
 		info, _ := core.EffectiveInfo(plan.opts)
@@ -305,76 +318,279 @@ func encodeOne(piece []byte, f pieceio.Format, plan *splitPlan, serial int) ([]b
 	return pieceio.Encode(piece, f, plan.qrScale)
 }
 
-// reportQRSizes summarises the error correction the pieces received, from their
-// sizes. It is derived per piece rather than assumed, so a set that did land on
-// two levels is reported as it is.
-func reportQRSizes(out io.Writer, sizes []int) {
-	largest := 0
-	for _, n := range sizes {
-		if n > largest {
-			largest = n
-		}
-	}
-	counts := map[string]int{}
-	recovery := map[string]int{}
-	weakest := false
-	for _, n := range sizes {
-		name, rec, weak, ok := pieceio.QRLevelFor(n)
-		if !ok {
-			continue
-		}
-		counts[name]++
-		recovery[name] = rec
-		if weak {
-			weakest = true
-		}
-	}
-	if len(counts) == 0 {
+// reportQRLevel says which error correction the codes of count pieces of size
+// bytes received. Every piece of a set is the same size, so they share a level.
+func reportQRLevel(out io.Writer, size, count int) {
+	name, recovery, weakest, ok := pieceio.QRLevelFor(size)
+	if !ok {
 		return
 	}
-
-	names := make([]string, 0, len(counts))
-	for n := range counts {
-		names = append(names, n)
-	}
-	// Strongest first, which is the order the capacity table uses.
-	order := map[string]int{"H": 0, "Q": 1, "M": 2, "L": 3}
-	sort.Slice(names, func(i, j int) bool { return order[names[i]] < order[names[j]] })
-
-	parts := make([]string, 0, len(names))
-	for _, n := range names {
-		parts = append(parts, fmt.Sprintf("%s for %d piece(s), ~%d%% recoverable", n, counts[n], recovery[n]))
-	}
-	summaryRow(out, "qr", "error correction "+strings.Join(parts, "; "))
+	summaryRow(out, "qr", fmt.Sprintf("error correction %s for %d piece(s), ~%d%% recoverable", name, count, recovery))
 	if weakest {
 		warn(out, "the QR codes are near capacity and use the weakest correction; print them at high quality.")
 	}
 	// A large symbol has small modules, which a photograph may not resolve. Say so
 	// while the user can still choose more, smaller pieces.
-	if largest > pieceio.QRPhotoFriendlyBytes {
+	if size > pieceio.QRPhotoFriendlyBytes {
 		warn(out, fmt.Sprintf("the QR codes hold %d bytes each; a code over %d needs a flat, sharp photo "+
-			"to scan.", largest, pieceio.QRPhotoFriendlyBytes))
+			"to scan.", size, pieceio.QRPhotoFriendlyBytes))
 	}
 }
 
-// verifySplit re-reads K pieces from disk and reconstructs, confirming the result
-// matches the original, and returns how far that got. When a recipient private
-// key is missing the payload cannot be decrypted, so it verifies as far as it
-// can instead.
-func verifySplit(input []byte, paths []string, plan *splitPlan) (string, error) {
+// verifySplit checks the pieces a split wrote, as thoroughly as mode says, and
+// returns how far that got.
+//
+// Fast rebuilds the original from the first K pieces of one format. Full reads
+// back every file in every format, and the code on every sheet, against the
+// piece it was written from, and rebuilds from the pieces of one format K at a
+// time as they are read, the last ones with the first again, until every piece
+// has been in a rebuild. A fault in one piece or one format then shows, not only
+// one that spoils them all, and each file is read once, but for the few the last
+// group borrows.
+func verifySplit(mode verifyMode, input []byte, written map[pieceio.Format][]string, formats []pieceio.Format, plan *splitPlan) (string, error) {
+	rebuilt := pieceio.Binary
+	if len(written[rebuilt]) == 0 {
+		rebuilt = formats[0]
+	}
+	paths := written[rebuilt]
 	k := plan.opts.K
 	if len(paths) < k {
 		return "", fmt.Errorf("only %d pieces available to verify, need %d", len(paths), k)
 	}
-	reRead := make([][]byte, 0, k)
-	for i := 0; i < k; i++ {
-		piece, _, err := pieceio.Load(paths[i])
+	// The rebuilds leave the line as it is when they end: see checkStep.
+	defer checking("", 0, 0)
+	if mode == verifyFast {
+		return rebuildFrom(input, paths[:k], plan)
+	}
+	c := newGroupCheck(input, plan)
+	err := readBack(written, formats, plan, func(f pieceio.Format, path string, piece []byte) error {
+		if f != rebuilt {
+			memory.Zero(piece)
+			return nil
+		}
+		return c.add(path, piece)
+	})
+	if err == nil {
+		err = c.finish(paths)
+	}
+	// A rebuild still running is of pieces read before anything that failed
+	// since, so what it finds comes first.
+	if rerr := c.wait(); rerr != nil {
+		err = rerr
+	}
+	if err != nil {
+		return "", err
+	}
+	if c.outcome == verifiedFast {
+		return verifiedFull, nil
+	}
+	return c.outcome, nil
+}
+
+// groupCheck rebuilds from the pieces a full check reads, K at a time. The first
+// rebuild decrypts and compares; the rest stop at the hash, which the first tied
+// to the original. Those run alongside the reading, several at once when a group
+// is few and small pieces: a group of two password pieces has a key derivation
+// for each, and on its own would leave most of the cores idle. A group too large
+// for the budget is rebuilt where it completes, as the first is, so the reading
+// does not gather the next one meanwhile.
+type groupCheck struct {
+	input   []byte
+	plan    *splitPlan
+	pieces  [][]byte
+	paths   []string
+	outcome string
+
+	slots        chan struct{} // a token for each rebuild that may run at once; nil for none
+	running      sync.WaitGroup
+	groups       int // groups started
+	firstFailure     // by group
+}
+
+// newGroupCheck checks the pieces of plan's split. Where opening a piece derives
+// a key, as many groups are rebuilt at once as share the derivations a combine
+// would make of one group; where it derives none, as many as there are cores.
+// Either way they stay within the budget for pieces in flight, which also holds
+// the next group as the reading gathers it.
+func newGroupCheck(input []byte, plan *splitPlan) *groupCheck {
+	c := &groupCheck{input: input, plan: plan}
+	k := plan.opts.K
+	if fits := fileBudget/max(1, k*plan.pieceSize) - 1; fits > 0 {
+		atOnce := parallel.Workers(fits)
+		if core.EnvelopeDerives(plan.opts) {
+			atOnce = core.DerivationsAtOnce(plan.opts.Params) / k
+		}
+		c.slots = make(chan struct{}, max(1, min(atOnce, fits)))
+	}
+	return c
+}
+
+// add takes the next piece read, and rebuilds once it completes a group.
+func (c *groupCheck) add(path string, piece []byte) error {
+	if err := c.failure(); err != nil || c.outcome == verifiedSealed {
+		memory.Zero(piece)
+		return err // none of the pieces can be opened here, when there is no error
+	}
+	c.pieces, c.paths = append(c.pieces, piece), append(c.paths, path)
+	if len(c.pieces) < c.plan.opts.K {
+		return nil
+	}
+	pieces, paths, group := c.pieces, c.paths, c.groups
+	c.pieces, c.paths, c.groups = nil, nil, c.groups+1
+	if c.outcome == "" || c.slots == nil {
+		defer memory.FreeAll(pieces)
+		got, err := rebuildPieces(c.input, pieces, c.plan, c.outcome != "", checkStep)
+		if err != nil {
+			return fmt.Errorf("rebuilding from %s: %w", fileNames(paths), err)
+		}
+		if c.outcome == "" {
+			c.outcome = got
+		}
+		return nil
+	}
+	c.slots <- struct{}{}
+	c.running.Add(1)
+	go func() {
+		defer memory.GuardPanic()
+		defer func() {
+			memory.FreeAll(pieces)
+			<-c.slots
+			c.running.Done()
+		}()
+		// The reading is what the line follows meanwhile, so these say nothing.
+		if _, err := rebuildPieces(c.input, pieces, c.plan, true, nil); err != nil {
+			c.fail(group, fmt.Errorf("rebuilding from %s: %w", fileNames(paths), err))
+		}
+	}()
+	return nil
+}
+
+// finish completes the last group, when the pieces left over do not fill one,
+// with the first pieces again, read from paths. They are read a second time, so
+// they are held to the digest again, as the first reading was.
+func (c *groupCheck) finish(paths []string) error {
+	for i, path := range paths[:c.plan.opts.K] {
+		if len(c.pieces) == 0 || c.outcome == verifiedSealed {
+			return nil
+		}
+		piece, _, err := pieceio.Load(path)
+		if err != nil {
+			return err
+		}
+		if err := matchesPiece(path, [][]byte{piece}, c.plan.pieceSums[i]); err != nil {
+			memory.Zero(piece)
+			return err
+		}
+		if err := c.add(path, piece); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// wait lets the rebuilds under way finish, wipes the pieces of a group never
+// completed, and returns the first group's failure.
+func (c *groupCheck) wait() error {
+	c.running.Wait()
+	memory.FreeAll(c.pieces)
+	c.pieces, c.paths = nil, nil
+	return c.failure()
+}
+
+// readBack checks every file the split wrote holds the piece it was written
+// from, byte for byte, and hands each piece read to each, in order, which owns
+// it from then on and wipes it unless it keeps it. It needs no key, so it covers
+// every format of every piece at little cost. The files are read and decoded
+// several at a time, ahead of the one each is looking at.
+func readBack(written map[pieceio.Format][]string, formats []pieceio.Format, plan *splitPlan,
+	each func(f pieceio.Format, path string, piece []byte) error) error {
+	type file struct {
+		f     pieceio.Format
+		piece int
+		path  string
+	}
+	var files []file
+	for _, f := range formats {
+		for i, path := range written[f] {
+			files = append(files, file{f, i, path})
+		}
+	}
+	read := make([][][]byte, len(files))
+	defer func() {
+		for _, copies := range read {
+			memory.FreeAll(copies)
+		}
+	}()
+	reading := readingFile(checking, len(files))
+	return parallel.Ordered(len(files), workersFor(int64(plan.pieceSize)), func(n int) error {
+		file := files[n]
+		copies, err := pieceio.LoadAll(file.path)
+		if err != nil {
+			return err
+		}
+		read[n] = copies
+		return matchesPiece(file.path, copies, plan.pieceSums[file.piece])
+	}, func(n int) error {
+		reading(n)
+		copies := read[n]
+		read[n] = nil
+		memory.FreeAll(copies[1:])
+		return each(files[n].f, files[n].path, copies[0])
+	}, reading)
+}
+
+// matchesPiece checks every copy of a piece read from path is the piece whose
+// digest is sum. The second copy is a sheet's QR code.
+func matchesPiece(path string, copies [][]byte, sum [sha256.Size]byte) error {
+	for i, c := range copies {
+		if sha256.Sum256(c) == sum {
+			continue
+		}
+		if i > 0 {
+			return fmt.Errorf("the QR code on %s does not read back as written", path)
+		}
+		return fmt.Errorf("%s does not read back as written", path)
+	}
+	return nil
+}
+
+// fileNames lists paths by their file names, for a message. More than a few are
+// given as the first and the last, as pieceRange does: a group is as many files
+// as the threshold, which can be thousands.
+func fileNames(paths []string) string {
+	names := make([]string, len(paths))
+	for i, p := range paths {
+		names[i] = filepath.Base(p)
+	}
+	const few = 4
+	if len(names) > few {
+		return fmt.Sprintf("%s (%d files)", pieceRange(names), len(names))
+	}
+	return strings.Join(names, ", ")
+}
+
+// rebuildFrom reads the pieces at paths back from disk and rebuilds the original
+// from them, as rebuildPieces does.
+func rebuildFrom(input []byte, paths []string, plan *splitPlan) (string, error) {
+	reRead := make([][]byte, 0, len(paths))
+	defer func() { memory.FreeAll(reRead) }()
+	// verifySplit blanks the line when the check is over, however it ends.
+	checking("reading pieces", 0, 0)
+	for _, p := range paths {
+		piece, _, err := pieceio.Load(p)
 		if err != nil {
 			return "", err
 		}
 		reRead = append(reRead, piece)
 	}
-	defer memory.FreeAll(reRead)
+	return rebuildPieces(input, reRead, plan, false, checkStep)
+}
+
+// rebuildPieces rebuilds the original from pieces read back, confirming it
+// matches what was split. When a recipient private key is missing the payload
+// cannot be decrypted, so it checks as far as it can. checkOnly stops at the
+// hash the pieces carry, for a set already decrypted once. p is told its steps.
+func rebuildPieces(input []byte, reRead [][]byte, plan *splitPlan, checkOnly bool, p core.Progress) (string, error) {
 	if sealedWithoutKey(plan) {
 		return verifiedSealed, nil
 	}
@@ -383,12 +599,17 @@ func verifySplit(input []byte, paths []string, plan *splitPlan) (string, error) 
 		Passwords:   plan.verifyPasswords,
 		PrivateKeys: plan.privateKeys,
 		Params:      &plan.opts.Params,
+		Progress:    p,
+		CheckOnly:   checkOnly,
 	}
 	if !plan.opts.RecordAlgo {
 		open.Schemes = plan.schemeIDs
 	}
 
 	recovered, err := core.Combine(reRead, open)
+	if checkOnly && err == nil {
+		return verifiedFast, nil
+	}
 	if err != nil {
 		// The key is asked for only after the K pieces have all opened, agreed
 		// about the set and rebuilt to the recorded hash, so that much is checked.
@@ -401,7 +622,7 @@ func verifySplit(input []byte, paths []string, plan *splitPlan) (string, error) 
 	if !bytes.Equal(recovered, input) {
 		return "", errors.New("reconstructed data does not match the original")
 	}
-	return verifiedYes, nil
+	return verifiedFast, nil
 }
 
 // sealedWithoutKey reports a set whose pieces open only with a private key the
@@ -425,10 +646,11 @@ func sealedWithoutKey(plan *splitPlan) bool {
 
 // Verification outcomes, as the summary states them.
 const (
-	verifiedYes     = "yes, the pieces read back rebuild the original"
+	verifiedFull    = "yes, every file reads back and every piece rebuilds the original"
+	verifiedFast    = "yes, the pieces read back rebuild the original (fast check)"
 	verifiedPartly  = "partly: the pieces open and agree; a full rebuild needs the private key"
 	verifiedSealed  = "partly: the pieces read back; opening them needs the private key (--identity)"
-	verifiedSkipped = "skipped (--no-verify)"
+	verifiedSkipped = "skipped (--verify off)"
 )
 
 // printSplitSummary reports a finished split in a few aligned lines: what
@@ -459,7 +681,7 @@ func printSplitSummary(out io.Writer, plan *splitPlan, formats []pieceio.Format,
 		}
 		row(label, pieceRange(written[f])+" ("+f.String()+")")
 	}
-	reportSizeNotes(out, formats, plan.pieceSizes)
+	reportSizeNotes(out, formats, plan.pieceSize, plan.opts.N)
 	splitWarnings(out, plan)
 }
 
@@ -550,6 +772,28 @@ func pieceRange(paths []string) string {
 	return paths[0] + " ... " + paths[len(paths)-1]
 }
 
+// serialRuns lists piece numbers in order, a run of consecutive ones as its ends,
+// so a folder of thousands of pieces reads as "1-65535" rather than every number.
+func serialRuns(serials []int) string {
+	s := slices.Clone(serials)
+	slices.Sort(s)
+	s = slices.Compact(s)
+	var runs []string
+	for i := 0; i < len(s); {
+		j := i
+		for j+1 < len(s) && s[j+1] == s[j]+1 {
+			j++
+		}
+		if j == i {
+			runs = append(runs, strconv.Itoa(s[i]))
+		} else {
+			runs = append(runs, fmt.Sprintf("%d-%d", s[i], s[j]))
+		}
+		i = j + 1
+	}
+	return strings.Join(runs, ", ")
+}
+
 // splitWarnings states what the user has to act on or keep in mind: anything
 // left out of the pieces that rebuilding will ask for, and a set no password
 // protects.
@@ -605,6 +849,7 @@ func reportGeneratedPasswords(opts *cliOptions, plan *splitPlan) error {
 }
 
 func cmdInfo(opts *cliOptions) error {
+	defer startProgress()()
 	if err := validateOpenOptions(opts); err != nil {
 		return err
 	}
@@ -619,7 +864,7 @@ func cmdInfo(opts *cliOptions) error {
 	raw := pieceBytes(items)
 	defer memory.FreeAll(raw)
 
-	open, wipe, err := resolveOpenCredentials(opts, raw)
+	open, wipe, err := resolveOpenCredentials(opts)
 	if err != nil {
 		return err
 	}
@@ -644,7 +889,7 @@ func cmdInfo(opts *cliOptions) error {
 				fmt.Printf("  set %s...: %d piece(s), details hidden\n", set[:16], len(serials))
 				continue
 			}
-			fmt.Printf("  set %s...: pieces %v\n", set[:16], serials)
+			fmt.Printf("  set %s...: pieces %s\n", set[:16], serialRuns(serials))
 		}
 	}
 	// Each failure was printed beside its piece; the exit status still has to
@@ -713,6 +958,7 @@ func cmdCombine(opts *cliOptions) error {
 	if len(opts.files) == 0 {
 		return errors.New("combine needs pieces: the piece files, or a folder of them")
 	}
+	defer startProgress()()
 	items, err := loadInputs(msgWriter(opts), opts.files, true)
 	if err != nil {
 		return err
@@ -723,7 +969,12 @@ func cmdCombine(opts *cliOptions) error {
 	for _, it := range items {
 		warnUnverified(msgWriter(opts), it.det)
 	}
+	// The pieces are held only here from now on, so that the combine can let
+	// them go once they have opened.
 	pieces := pieceBytes(items)
+	for i := range items {
+		items[i].bytes = nil
+	}
 	defer memory.FreeAll(pieces)
 
 	recovered, name, err := combinePieces(opts, pieces, func(i int, _ error) {
@@ -746,22 +997,15 @@ func writeRecovered(opts *cliOptions, recovered []byte, name string) error {
 	outPath := opts.outDir
 
 	if outPath == "" {
-		switch {
-		case opts.yes || !isInteractive():
+		if opts.yes || !isInteractive() {
 			outPath = "-"
-		case name != "":
-			// The name came out of the piece, so it was chosen by whoever wrote
-			// it rather than typed here. Creating it unasked would let a piece
+		} else {
+			// A name that came out of the piece was chosen by whoever wrote it
+			// rather than typed here. Creating it unasked would let a piece
 			// decide the file name, and a name that does not exist yet would not
 			// even reach the overwrite prompt below. Offer it as the default of a
 			// question instead.
-			v, err := readLine("Write recovered data to", name)
-			if err != nil {
-				return err
-			}
-			outPath = v
-		default:
-			v, err := readLine("Write recovered data to", "riven-recovered.out")
+			v, err := readLine("Write recovered data to", cmp.Or(name, "riven-recovered.out"))
 			if err != nil {
 				return err
 			}
@@ -770,7 +1014,11 @@ func writeRecovered(opts *cliOptions, recovered []byte, name string) error {
 	}
 
 	if outPath == "-" {
-		if _, err := os.Stdout.Write(recovered); err != nil {
+		err := during("writing the result", os.Stdout, func() error {
+			_, err := os.Stdout.Write(recovered)
+			return err
+		})
+		if err != nil {
 			return err
 		}
 		writeLabeled(os.Stderr, "Done:", toneGood, fmt.Sprintf("%d bytes written to standard output", len(recovered)))
@@ -782,7 +1030,8 @@ func writeRecovered(opts *cliOptions, recovered []byte, name string) error {
 	}
 	// The recovered data is the secret itself, so it gets the same treatment as a
 	// private key: private even when it replaces an existing, readable file.
-	if err := pieceio.Write(outPath, recovered); err != nil {
+	err := during("writing the result", nil, func() error { return pieceio.Write(outPath, recovered) })
+	if err != nil {
 		return err
 	}
 	writeLabeled(msgWriter(opts), "Done:", toneGood, fmt.Sprintf("%d bytes written to %s", len(recovered), outPath))
@@ -797,7 +1046,7 @@ func writeRecovered(opts *cliOptions, recovered []byte, name string) error {
 // way confirmOverwrite does: -y is documented as failing instead of asking, and
 // this is the case where that matters most.
 func refuseKeyOverwrite(opts *cliOptions, path string) error {
-	if _, err := os.Stat(path); err != nil {
+	if !fileExists(path) {
 		return nil
 	}
 	if opts.yes || !isInteractive() {
@@ -817,10 +1066,7 @@ func refuseKeyOverwrite(opts *cliOptions, path string) error {
 // confirmOverwrite asks before replacing a file. It matters most for the name a
 // piece recorded, which is chosen without the user typing it.
 func confirmOverwrite(opts *cliOptions, path string) error {
-	if opts.yes || !isInteractive() {
-		return nil
-	}
-	if _, err := os.Stat(path); err != nil {
+	if opts.yes || !isInteractive() || !fileExists(path) {
 		return nil
 	}
 	ok, err := confirm(fmt.Sprintf("%s already exists. Overwrite it?", path), false)
@@ -866,15 +1112,7 @@ func cmdKeygen(opts *cliOptions) error {
 	}
 	// Overwriting a private key destroys access to everything sealed to it, and
 	// the default base name means a second keygen aims at the first one's files.
-	for _, p := range []string{pubPath, privPath} {
-		if err := refuseKeyOverwrite(opts, p); err != nil {
-			return err
-		}
-	}
-	if err := writePublicKey(pubPath, priv.Public()); err != nil {
-		return err
-	}
-	if err := writePrivateKey(privPath, priv); err != nil {
+	if err := writeKeyPair(opts, priv, pubPath, privPath); err != nil {
 		return err
 	}
 	out := msgWriter(opts)

@@ -4,14 +4,17 @@
 package app
 
 import (
-	"crypto/sha256"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
+	"github.com/secu-tools/riven/internal/memory"
+	"github.com/secu-tools/riven/internal/parallel"
 	"github.com/secu-tools/riven/internal/pieceio"
 )
 
@@ -35,6 +38,7 @@ func pieceBytes(items []heldPiece) [][]byte {
 type pieceArg struct {
 	path    string
 	fromDir bool
+	size    int64 // what the file system said, for how many to read at once
 }
 
 // notPieceExts are the files Riven itself writes that are not pieces, and that
@@ -52,7 +56,7 @@ func expandPieceArgs(args []string) ([]pieceArg, error) {
 			return nil, err
 		}
 		if !info.IsDir() {
-			out = append(out, pieceArg{path: arg})
+			out = append(out, pieceArg{path: arg, size: info.Size()})
 			continue
 		}
 		found, err := dirPieceFiles(arg)
@@ -82,13 +86,21 @@ func dirPieceFiles(dir string) ([]pieceArg, error) {
 			notPieceExts[strings.ToLower(filepath.Ext(name))] {
 			continue
 		}
-		out = append(out, pieceArg{path: filepath.Join(dir, name), fromDir: true})
+		var size int64
+		if info, err := e.Info(); err == nil {
+			size = info.Size()
+		}
+		out = append(out, pieceArg{path: filepath.Join(dir, name), fromDir: true, size: size})
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("%s holds no files to read", dir)
 	}
 	return out, nil
 }
+
+// loadPiece reads one piece file. It is a variable so a test can hold a file
+// back and see what the command shows while it waits.
+var loadPiece = pieceio.Load
 
 // loadInputs reads every file named on the command line, expanding directories.
 //
@@ -100,34 +112,70 @@ func dirPieceFiles(dir string) ([]pieceArg, error) {
 // Repeats are dropped, since one piece exported in several formats decodes to
 // the same bytes. Opening a piece costs a full key derivation, so a directory
 // written with --format all would otherwise cost six times what it should.
+//
+// The files are read and decoded several at a time, ahead of the one being
+// taken, and taken in the order given.
 func loadInputs(out io.Writer, args []string, strict bool) ([]heldPiece, error) {
 	inputs, err := expandPieceArgs(args)
 	if err != nil {
 		return nil, err
 	}
 
-	var items []heldPiece
-	seen := map[[sha256.Size]byte]bool{}
-	repeats := 0
+	type loaded struct {
+		piece []byte
+		det   pieceio.Detected
+		err   error
+	}
+	read := make([]loaded, len(inputs))
+	defer func() {
+		for _, l := range read {
+			memory.Zero(l.piece)
+		}
+	}()
+	var largest int64
 	for _, in := range inputs {
-		piece, det, err := pieceio.Load(in.path)
-		if err != nil {
+		largest = max(largest, in.size)
+	}
+
+	var items []heldPiece
+	seen := map[pieceKey][]int{} // the items with each key
+	repeats := 0
+	reading := readingFile(progress, len(inputs))
+	err = parallel.Ordered(len(inputs), workersFor(largest), func(i int) error {
+		l := &read[i]
+		l.piece, l.det, l.err = loadPiece(inputs[i].path)
+		return nil
+	}, func(i int) error {
+		in, l := inputs[i], read[i]
+		read[i] = loaded{}
+		reading(i)
+		if l.err != nil {
+			progress("", 0, 0)
 			switch {
 			case in.fromDir:
 			case strict:
-				return nil, err
+				return l.err
 			default:
-				fmt.Fprintf(out, "  %q: cannot read (%v)\n", in.path, err)
+				fmt.Fprintf(out, "  %q: cannot read (%v)\n", in.path, l.err)
 			}
-			continue
+			return nil
 		}
-		key := sha256.Sum256(piece)
-		if seen[key] {
+		key := keyOf(l.piece)
+		if slices.ContainsFunc(seen[key], func(n int) bool { return bytes.Equal(items[n].bytes, l.piece) }) {
+			memory.Zero(l.piece)
 			repeats++
-			continue
+			return nil
 		}
-		seen[key] = true
-		items = append(items, heldPiece{bytes: piece, det: det})
+		seen[key] = append(seen[key], len(items))
+		items = append(items, heldPiece{bytes: l.piece, det: l.det})
+		return nil
+	}, reading)
+	progress("", 0, 0)
+	if err != nil {
+		for _, it := range items {
+			memory.Zero(it.bytes)
+		}
+		return nil, err
 	}
 	if repeats > 0 {
 		fmt.Fprintf(out, "  %d file(s) hold the same piece as another and were skipped\n", repeats)
@@ -136,6 +184,21 @@ func loadInputs(out io.Writer, args []string, strict bool) ([]heldPiece, error) 
 		return nil, errors.New("no piece could be read")
 	}
 	return items, nil
+}
+
+// pieceKey is what two copies of one piece are first matched by: its length and
+// how it starts. A piece starts with a salt and a nonce drawn at random, so two
+// different pieces all but never share a key, and telling a repeat costs a
+// comparison only when there is one, not a pass over every piece read.
+type pieceKey struct {
+	size int
+	head [48]byte
+}
+
+func keyOf(piece []byte) pieceKey {
+	k := pieceKey{size: len(piece)}
+	copy(k.head[:], piece)
+	return k
 }
 
 var errSplitDirectory = errors.New(

@@ -6,15 +6,13 @@ package ciphers
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hkdf"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/sha512"
 	"crypto/subtle"
 	"encoding/binary"
 	"errors"
-	"io"
-
-	"golang.org/x/crypto/hkdf"
 
 	"github.com/secu-tools/riven/internal/memory"
 )
@@ -39,15 +37,11 @@ func newAESCTRHMAC(key []byte) (cipher.AEAD, error) {
 	if len(key) != 32 {
 		return nil, errors.New("ciphers: aes-ctr-hmac requires a 32-byte key")
 	}
-	r := hkdf.New(sha512.New, key, nil, []byte("riven-aes-ctr-hmac-v1"))
-	encKey := make([]byte, 32)
-	macKey := make([]byte, 32)
-	if _, err := io.ReadFull(r, encKey); err != nil {
+	okm, err := hkdf.Key(sha512.New, key, nil, "riven-aes-ctr-hmac-v1", 64)
+	if err != nil {
 		return nil, err
 	}
-	if _, err := io.ReadFull(r, macKey); err != nil {
-		return nil, err
-	}
+	encKey, macKey := okm[:32], okm[32:]
 	block, err := aes.NewCipher(encKey)
 	memory.Zero(encKey)
 	if err != nil {

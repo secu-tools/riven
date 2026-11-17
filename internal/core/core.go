@@ -10,12 +10,14 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/secu-tools/riven/internal/cascade"
 	"github.com/secu-tools/riven/internal/ciphers"
 	"github.com/secu-tools/riven/internal/compact"
 	"github.com/secu-tools/riven/internal/disperse"
 	"github.com/secu-tools/riven/internal/format"
+	"github.com/secu-tools/riven/internal/gf16"
 	"github.com/secu-tools/riven/internal/kdf"
 	"github.com/secu-tools/riven/internal/kem"
 	"github.com/secu-tools/riven/internal/memory"
@@ -228,8 +230,17 @@ func (m InfoMode) String() string {
 	return "auto"
 }
 
+// Why EffectiveInfo refuses a mode, for a caller that words the refusal itself.
+var (
+	// ErrInfoNeedsSecret is protected or strict details for a set with no layer.
+	ErrInfoNeedsSecret = errors.New("need a password or a recipient layer")
+	// ErrInfoNeedsThreshold is hidden details at a threshold of one.
+	ErrInfoNeedsThreshold = errors.New("core: details cannot be hidden at a threshold of one: each piece is the whole set")
+)
+
 // EffectiveInfo resolves InfoAuto for a split, and refuses protected or strict
-// details for a set with nothing to protect them with.
+// details for a set with nothing to protect them with, and hidden ones for a
+// set whose every piece is the whole of it.
 func EffectiveInfo(opts SplitOptions) (InfoMode, error) {
 	// Every layer is either a password or a recipient key, so any layer at all
 	// is something to protect the details with.
@@ -242,13 +253,13 @@ func EffectiveInfo(opts SplitOptions) (InfoMode, error) {
 		return InfoPublic, nil
 	case InfoProtected, InfoStrict:
 		if !hasSecret {
-			return 0, fmt.Errorf("core: %s details need a password or a recipient layer", opts.Info)
+			return 0, fmt.Errorf("core: %s details %w", opts.Info, ErrInfoNeedsSecret)
 		}
 	case InfoHidden:
 		// A share at a threshold of one is a plain copy, so each piece would carry
 		// its details in the clear under the public envelope.
 		if opts.K == 1 {
-			return 0, errors.New("core: details cannot be hidden at a threshold of one: each piece is the whole set")
+			return 0, ErrInfoNeedsThreshold
 		}
 	case InfoPublic:
 	default:
@@ -289,6 +300,17 @@ func EnvelopeRecipients(opts SplitOptions) ([]*kem.PublicKey, error) {
 	return recipients, nil
 }
 
+// EnvelopeDerives reports whether a split's envelopes are sealed with a
+// password, so that opening each piece derives a key from it.
+func EnvelopeDerives(opts SplitOptions) bool {
+	info, err := EffectiveInfo(opts)
+	if err != nil {
+		return false
+	}
+	passwords, _ := envelopeSecrets(opts.Layers, info)
+	return len(passwords) > 0
+}
+
 // LayerKind says how a cascade layer is keyed.
 type LayerKind uint8
 
@@ -314,6 +336,11 @@ type LayerSpec struct {
 	Password  []byte         // PasswordLayer
 	Recipient *kem.PublicKey // RecipientLayer
 }
+
+// MaxPieces is the most pieces one split can write. The full method's Shamir
+// sharing and the compact method's dispersal both work over GF(2^16), which has
+// 65535 non-zero points to hand out, one per piece.
+const MaxPieces = format.MaxPieces
 
 // SplitOptions configures a split.
 type SplitOptions struct {
@@ -350,6 +377,35 @@ type SplitOptions struct {
 	// content, and any K pieces rebuild it with nothing else supplied. It cannot
 	// be combined with any cascade layers.
 	Keyless bool
+
+	// Progress, when set, hears how far the split has got.
+	Progress Progress
+}
+
+// Progress hears how far a long split or combine has got: the step under way,
+// and how much of it is done out of total, or a total of zero when the step
+// cannot be measured part way. An empty step means none is under way, which is
+// reported before anything that may ask a question, before SplitTo hands over
+// its first piece, and before Split, SplitTo or a combine returns. It may be
+// called from several goroutines at once, and done can arrive out of order.
+type Progress func(step string, done, total int64)
+
+// report tells p, when there is one, that step is under way.
+func (p Progress) report(step string, done, total int64) {
+	if p != nil {
+		p(step, done, total)
+	}
+}
+
+// idle tells p that no step is under way.
+func (p Progress) idle() { p.report("", 0, 0) }
+
+// units reports, as step, the units split works through.
+func (p Progress) units(step string) split.Progress {
+	if p == nil {
+		return nil
+	}
+	return func(done, total int) { p(step, int64(done), int64(total)) }
 }
 
 // OpenOptions configures inspection and reconstruction.
@@ -402,6 +458,23 @@ type OpenOptions struct {
 	// keys are derived, so a caller can say a slow open is coming. It is not
 	// called for envelopes that take no password, which derive nothing.
 	BeforeDerive func(worst kdf.Params)
+
+	// Progress, when set, hears how far a combine has got.
+	Progress Progress
+
+	// CheckOnly stops a combine once the pieces have opened, agreed, and rebuilt
+	// what the set shares to the hash every piece carries, before any layer is
+	// decrypted, and returns no content. A check that has decrypted a set once
+	// uses it for the rest of its pieces: the same hash means the same bytes, so
+	// only the first rebuild pays for stretching the layers' passwords.
+	CheckOnly bool
+
+	// ReleasePieces hands the pieces given to CombineFile over to it: once
+	// every one has opened or been refused, each is wiped and its slot set to
+	// nil. An open piece is held by what it opened to, so the files themselves
+	// are not needed for the rebuild, and a caller that keeps no other copy has
+	// their memory back before the rebuild asks for its own.
+	ReleasePieces bool
 }
 
 // ErrSchemesRequired indicates the set did not record its algorithms and none
@@ -417,7 +490,9 @@ var ErrKeyRequired = cascade.ErrKeyRequired
 // and the metadata every piece repeats.
 type splitPrep struct {
 	details         format.Details // what every manifest, or the shared details, says
+	shape           format.Shape   // every piece's
 	shares          [][]byte
+	pieces          [][]byte            // full sets only: each piece, its share made in place
 	data            []byte              // compact sets only: the sealed package and its fill
 	disp            *disperse.Disperser // compact sets only: computes each piece's fragment
 	detailShares    [][]byte            // sets with hidden details only
@@ -434,10 +509,6 @@ type splitPrep struct {
 // payload and any shares still held, and is safe to call after an error.
 func prepare(input []byte, opts SplitOptions) (*splitPrep, error) {
 	if err := checkSplitOptions(&opts); err != nil {
-		return nil, err
-	}
-	info, err := EffectiveInfo(opts)
-	if err != nil {
 		return nil, err
 	}
 
@@ -459,44 +530,29 @@ func prepare(input []byte, opts SplitOptions) (*splitPrep, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	layers, envPasswords, hybrid, layerCleanup, err := buildLayers(opts.Layers, schemeIDs)
+	lay, err := layoutSplit(len(input), opts, schemeIDs)
+	if err != nil {
+		return nil, err
+	}
+	layers, _, _, layerCleanup, err := buildLayers(opts.Layers, schemeIDs)
 	defer layerCleanup()
 	if err != nil {
 		return nil, err
 	}
-	if len(envPasswords) == 0 && !opts.Keyless && !hybrid {
-		return nil, errors.New("core: a split needs at least one password layer, a recipient layer, or keyless mode")
-	}
-	payloadLen, err := cascade.Len(len(input), layers)
-	if err != nil {
-		return nil, err
-	}
 
-	// A protected envelope takes the first layer's secret and a strict one every
-	// secret. Otherwise it uses the public keyless derivation, which is also what
-	// a split-only set uses.
-	stretched := len(envPasswords) > 0
-	envelopeKeyless := info != InfoProtected && info != InfoStrict
-
-	descs := make([]cascade.Descriptor, len(layers))
-	for i, l := range layers {
-		descs[i] = cascade.Descriptor{Kind: l.Kind, SchemeID: l.SchemeID, Recorded: opts.RecordAlgo}
-	}
 	prep := &splitPrep{
-		details: format.Details{
-			K: opts.K, N: opts.N,
-			Encrypted: len(layers) > 0, Hybrid: hybrid,
-			AlgoStored: opts.RecordAlgo, KDFStored: opts.RecordKDF && stretched,
-			Params: opts.Params, Layers: descs,
-			Name: opts.Name, CreatorVersion: opts.CreatorVersion, CreatorCommit: opts.CreatorCommit,
-		},
-		envelopeKeyless: envelopeKeyless, stretched: stretched,
+		details: lay.details,
+		// A protected envelope takes the first layer's secret and a strict one
+		// every secret. Otherwise it uses the public keyless derivation, which is
+		// also what a split-only set uses.
+		envelopeKeyless: lay.info != InfoProtected && lay.info != InfoStrict,
+		stretched:       lay.stretched,
 	}
-	prep.envPasswords, prep.envRecipients = envelopeSecrets(opts.Layers, info)
+	prep.envPasswords, prep.envRecipients = envelopeSecrets(opts.Layers, lay.info)
 	prep.cleanup = func() {
 		wipeCanon()
 		memory.FreeAll(prep.shares)
+		memory.FreeAll(prep.pieces)
 		memory.Zero(prep.data)
 		memory.FreeAll(prep.detailShares)
 	}
@@ -506,23 +562,23 @@ func prepare(input []byte, opts SplitOptions) (*splitPrep, error) {
 		return nil, err
 	}
 
-	shape := format.Shape{Encaps: format.EncapsLen(prep.envRecipients), Layers: len(descs), Meta: prep.details.TextLen()}
-	if info == InfoHidden {
+	if lay.info == InfoHidden {
 		if prep.detailShares, err = prep.shareDetails(); err != nil {
 			return fail(err)
 		}
-		shape = format.Shape{Details: len(prep.detailShares[0])}
 	}
 
 	// The payload is encrypted straight into the buffer the method shares or
 	// disperses, so the split never holds it twice.
 	encrypt := func(dst []byte) error {
+		opts.Progress.report("encrypting", 0, 0)
 		return cascade.EncryptTo(dst, input, layers, opts.Params, opts.RecordAlgo)
 	}
+	defer opts.Progress.idle()
 	if opts.Method == MethodCompact {
-		err = prep.disperse(payloadLen, encrypt, opts, shape)
+		err = prep.disperse(lay, encrypt, opts)
 	} else {
-		err = prep.share(payloadLen, encrypt, opts, shape)
+		err = prep.share(lay, encrypt, opts)
 	}
 	if err != nil {
 		return fail(err)
@@ -537,52 +593,57 @@ func prepare(input []byte, opts SplitOptions) (*splitPrep, error) {
 }
 
 // share is the full method: the payload itself, padded with fill, is shared.
-// encrypt writes the payload of payloadLen bytes into the buffer that is shared.
-func (p *splitPrep) share(payloadLen int, encrypt func([]byte) error, opts SplitOptions, shape format.Shape) error {
-	shared := make([]byte, format.SharedLen(payloadLen, fillLen(payloadLen, opts, shape)))
+// encrypt writes the payload into the buffer that is shared, of the length lay
+// gives. Each share is made where it goes in its piece, which is then sealed
+// around it, so a split holds the shares once, as the pieces, and never copies
+// them.
+func (p *splitPrep) share(lay *splitLayout, encrypt func([]byte) error, opts SplitOptions) error {
+	payloadLen, shape := lay.payloadLen, lay.shape
+	shared := make([]byte, lay.bodyLen)
 	defer memory.Zero(shared)
-	if err := split.ValidateParams(opts.N, opts.K, len(shared)); err != nil {
-		return err
-	}
 	if err := encrypt(shared[format.PayloadAt : format.PayloadAt+payloadLen]); err != nil {
 		return err
 	}
-	hash, err := format.Wrap(shared, payloadLen)
-	if err != nil {
+	if err := format.Frame(shared, payloadLen); err != nil {
 		return err
 	}
-	shares, err := split.Split(shared, opts.N, opts.K)
-	if err != nil {
+
+	// The hash and the shares are both read from the shared bytes and neither
+	// needs the other, so the hash is taken alongside the sharing.
+	var hash []byte
+	hashed := make(chan struct{})
+	go func() {
+		defer memory.GuardPanic()
+		defer close(hashed)
+		hash = format.Hash(shared)
+	}()
+	defer func() { <-hashed }()
+
+	opts.Progress.report("sharing", 0, 0)
+	p.pieces, p.shares = make([][]byte, opts.N), make([][]byte, opts.N)
+	for i := range p.pieces {
+		p.pieces[i] = make([]byte, format.PieceLen(shape))
+		p.shares[i] = p.pieces[i][shape.ShareAt() : shape.ShareAt()+shape.Share]
+	}
+	if err := split.SplitInto(p.shares, shared, opts.K, opts.Progress.units("sharing")); err != nil {
 		return err
 	}
-	p.shares, p.payloadHash = shares, hash
+	<-hashed
+	p.shape, p.payloadHash = shape, hash
 	return nil
 }
 
 // disperse is the compact method: the payload is sealed, the package padded to
 // the size class and dispersed, and only the short secret that opens it is
-// shared. encrypt writes the payload of payloadLen bytes into the buffer that
-// is sealed and dispersed.
-func (p *splitPrep) disperse(payloadLen int, encrypt func([]byte) error, opts SplitOptions, shape format.Shape) error {
-	pkgLen := compact.PackageLen(payloadLen)
-	keyed := format.SharedLen(compact.SecretLen, format.MinFill)
-	if err := split.ValidateParams(opts.N, opts.K, keyed); err != nil {
-		return err
-	}
-	shape.Share = split.ShareLen(keyed, opts.K)
-
-	// The fragment is one coordinate byte and 1/K of the dispersed data, so the
-	// data grows by K bytes for every byte the piece needs to reach its class.
-	groups := (pkgLen + opts.K - 1) / opts.K
-	if !opts.Padding.Off {
-		shape.Fragment = disperse.FragmentLen(groups*opts.K, opts.K)
-		natural := format.PieceLen(shape)
-		groups += BucketFor(natural, opts.Padding.Width()) - natural
-	}
+// shared. encrypt writes the payload into the buffer that is sealed and
+// dispersed, of the length lay gives.
+func (p *splitPrep) disperse(lay *splitLayout, encrypt func([]byte) error, opts SplitOptions) error {
+	payloadLen := lay.payloadLen
+	p.shape = lay.shape
 
 	// The data is kept, and each fragment computed as its piece is written, so a
 	// split holds one fragment at a time rather than all N. prep.cleanup wipes it.
-	p.data = make([]byte, groups*opts.K)
+	p.data = make([]byte, lay.bodyLen)
 	if err := encrypt(p.data[compact.PayloadAt : compact.PayloadAt+payloadLen]); err != nil {
 		return err
 	}
@@ -607,6 +668,150 @@ func (p *splitPrep) disperse(payloadLen int, encrypt func([]byte) error, opts Sp
 	return nil
 }
 
+// splitLayout is the size of everything a split makes, worked out from the
+// options and the input's length alone. prepare makes the pieces to it and
+// PieceLen reports it, so what a caller is told is what it gets.
+type splitLayout struct {
+	info       InfoMode
+	details    format.Details // what every manifest, or the shared details, says
+	stretched  bool           // a layer stretches a password
+	payloadLen int            // the input once every layer has sealed it
+	bodyLen    int            // what is shared (full) or dispersed (compact)
+	shape      format.Shape   // every piece's
+}
+
+// layoutSplit works out a split's layout. opts has been through
+// checkSplitOptions, and schemeIDs are its layers' algorithms. A recipient
+// layer's encapsulation is as long as its scheme says, so none is made here.
+func layoutSplit(inputLen int, opts SplitOptions, schemeIDs []uint8) (*splitLayout, error) {
+	info, err := EffectiveInfo(opts)
+	if err != nil {
+		return nil, err
+	}
+	lay := &splitLayout{info: info}
+	descs := make([]cascade.Descriptor, len(opts.Layers))
+	sized := make([]cascade.Layer, len(opts.Layers))
+	hybrid := false
+	for i, l := range opts.Layers {
+		d := cascade.Descriptor{Kind: cascade.Password, SchemeID: schemeIDs[i], Recorded: opts.RecordAlgo}
+		var encap []byte
+		switch l.Kind {
+		case PasswordLayer:
+			lay.stretched = true
+		case RecipientLayer:
+			if l.Recipient == nil {
+				return nil, fmt.Errorf("core: layer %d is a recipient layer with no key", i+1)
+			}
+			d.Kind, hybrid = cascade.KEM, true
+			encap = make([]byte, l.Recipient.Scheme().CiphertextSize())
+		default:
+			return nil, fmt.Errorf("core: layer %d has an unknown kind %d", i+1, l.Kind)
+		}
+		descs[i] = d
+		sized[i] = cascade.Layer{Kind: d.Kind, SchemeID: d.SchemeID, KEMCiphertext: encap}
+	}
+	if !lay.stretched && !opts.Keyless && !hybrid {
+		return nil, errors.New("core: a split needs at least one password layer, a recipient layer, or keyless mode")
+	}
+	if lay.payloadLen, err = cascade.Len(inputLen, sized); err != nil {
+		return nil, err
+	}
+	lay.details = format.Details{
+		K: opts.K, N: opts.N,
+		Encrypted: len(descs) > 0, Hybrid: hybrid,
+		AlgoStored: opts.RecordAlgo, KDFStored: opts.RecordKDF && lay.stretched,
+		Params: opts.Params, Layers: descs,
+		Name: opts.Name, CreatorVersion: opts.CreatorVersion, CreatorCommit: opts.CreatorCommit,
+	}
+
+	// Everything a piece carries but its share or fragment.
+	_, recipients := envelopeSecrets(opts.Layers, info)
+	shape := format.Shape{Encaps: format.EncapsLen(recipients), Layers: len(descs), Meta: lay.details.TextLen()}
+	if info == InfoHidden {
+		shape = format.Shape{Details: split.ShareLen(format.DetailsLen(len(descs), lay.details.TextLen()), opts.K)}
+	}
+	if opts.Method == MethodCompact {
+		lay.shape, lay.bodyLen, err = compactShape(lay.payloadLen, opts, shape)
+	} else {
+		lay.shape, lay.bodyLen = fullShape(lay.payloadLen, opts, shape)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return lay, fitsPiece(lay.shape)
+}
+
+// fullShape completes shape, which holds everything a piece carries but its
+// share, for the full method, and returns it with the length of what is shared:
+// the payload, framed and filled to the piece's size class.
+func fullShape(payloadLen int, opts SplitOptions, shape format.Shape) (format.Shape, int) {
+	fill, pad := fillLen(payloadLen, opts, shape)
+	sharedLen := format.SharedLen(payloadLen, fill)
+	shape.Share, shape.Pad = split.ShareLen(sharedLen, opts.K), pad
+	return shape, sharedLen
+}
+
+// compactShape completes shape, which holds everything a piece carries but its
+// share and fragment, for the compact method, and returns it with the length of
+// what is dispersed: the sealed package, grown to the piece's size class.
+func compactShape(payloadLen int, opts SplitOptions, shape format.Shape) (format.Shape, int, error) {
+	if err := compact.CheckLen(payloadLen); err != nil {
+		return shape, 0, err
+	}
+	pkgLen := compact.PackageLen(payloadLen)
+	keyed := format.SharedLen(compact.SecretLen, format.MinFill)
+	shape.Share = split.ShareLen(keyed, opts.K)
+
+	// The fragment is a coordinate and one symbol for every group of K symbols
+	// of the dispersed data, so the data grows by a group for every symbol the
+	// piece needs to reach its class.
+	group := disperse.GroupLen(opts.K)
+	groups := (pkgLen + group - 1) / group
+	pad := false
+	if !opts.Padding.Off {
+		shape.Fragment = disperse.FragmentLen(groups*group, opts.K)
+		natural := format.PieceLen(shape)
+		short := BucketFor(natural, opts.Padding.Width()) - natural
+		groups += short / gf16.Size
+		pad = short%gf16.Size != 0
+	}
+	shape.Fragment, shape.Pad = disperse.FragmentLen(groups*group, opts.K), pad
+	return shape, groups * group, nil
+}
+
+// PieceLen returns how long each piece of a split of inputLen bytes under opts
+// is, without encrypting or sharing anything, so a caller can refuse a form the
+// pieces would not fit before the work of making them. It is the layout SplitTo
+// makes the pieces to, and fails as SplitTo would for options it refuses.
+func PieceLen(inputLen int, opts SplitOptions) (int, error) {
+	if err := checkSplitOptions(&opts); err != nil {
+		return 0, err
+	}
+	schemeIDs, err := AssignSchemes(opts.Layers)
+	if err != nil {
+		return 0, err
+	}
+	lay, err := layoutSplit(inputLen, opts, schemeIDs)
+	if err != nil {
+		return 0, err
+	}
+	return format.PieceLen(lay.shape), nil
+}
+
+// fitsPiece refuses a split whose pieces would each carry more than a piece can
+// hold, before the work of making them. It counts all a piece carries, as the
+// format does when it seals one, so what passes here is not refused there after
+// the encrypting and the sharing. A full share is as long as the input and a
+// compact fragment about 1/K of it, so only a split the ciphers do not stop
+// first can reach this.
+func fitsPiece(shape format.Shape) error {
+	if n := shape.Carried(); n > format.MaxCarriedLen {
+		return fmt.Errorf("core: too large to split: each piece would carry %d GiB of it, and a piece holds at most about %d GiB",
+			(n+1<<30-1)>>30, (format.MaxCarriedLen+1<<29)>>30)
+	}
+	return nil
+}
+
 // shareDetails shares what the manifests would otherwise show, for a set that
 // hides its details.
 func (p *splitPrep) shareDetails() ([][]byte, error) {
@@ -619,96 +824,115 @@ func (p *splitPrep) shareDetails() ([][]byte, error) {
 }
 
 // fillLen returns how much random fill to share after a payload of payloadLen
-// bytes: format.MinFill, plus whatever brings the piece up to its size class.
-// shape holds everything in the piece but the share. Every share has the same
-// length and every manifest the same shape, so one fill length covers the set.
-func fillLen(payloadLen int, opts SplitOptions, shape format.Shape) int {
+// bytes: format.MinFill, plus whatever brings the piece up to its size class, or
+// without padding the byte, if any, that makes the shared bytes whole symbols.
+// A share is whole symbols, so where the class is an odd number of bytes past the
+// rest of the piece, pad says to finish it with a byte after the share. shape
+// holds everything in the piece but the share. Every share has the same length
+// and every manifest the same shape, so one fill length covers the set.
+func fillLen(payloadLen int, opts SplitOptions, shape format.Shape) (fill int, pad bool) {
+	secret := format.SharedLen(payloadLen, format.MinFill)
 	if opts.Padding.Off {
-		return format.MinFill
+		return format.MinFill + split.Fit(secret) - secret, false
 	}
 	overhead := format.PieceLen(shape)
-	secret := format.SharedLen(payloadLen, format.MinFill)
-	target := BucketFor(overhead+split.ShareLen(secret, opts.K), opts.Padding.Width())
-	return format.MinFill + split.SecretLen(target-overhead, opts.K) - secret
+	room := BucketFor(overhead+split.ShareLen(secret, opts.K), opts.Padding.Width()) - overhead
+	shared := split.SecretLen(room, opts.K)
+	return format.MinFill + shared - secret, split.ShareLen(shared, opts.K) < room
 }
 
 // Split runs the full pipeline and returns N piece blobs (piece i has serial
 // i+1). The input slice is not modified.
 //
-// Every piece is held at once, which is N times the payload on top of the shares.
-// For a large input use SplitTo, which releases each piece as it is written.
+// It is SplitTo keeping every piece, so it makes them exactly as a split to
+// files does. Holding them all costs nothing more with the full method, whose
+// shares are made inside their pieces, but N times a fragment with the compact
+// one, which SplitTo makes as each piece is written.
 func Split(input []byte, opts SplitOptions) ([][]byte, error) {
-	prep, err := prepare(input, opts)
-	if err != nil {
-		return nil, err
-	}
-	defer prep.cleanup()
-
-	// Each piece has its own salt, so each needs its own Argon2 derivation. They
-	// are independent, so they run concurrently.
-	pieces := make([][]byte, opts.N)
-	// Only an envelope that takes passwords derives a key from them, so only that
-	// is bounded by the derivation memory budget.
-	workers := parallel.Workers(opts.N)
-	if len(prep.envPasswords) > 0 {
-		workers = derivationWorkers(opts.Params, opts.N)
-	}
-	err = parallel.Do(opts.N, workers, func(i int) error {
-		piece, perr := prep.encode(i, opts)
-		if perr != nil {
-			return perr
-		}
-		pieces[i] = piece
+	pieces := make([][]byte, 0, max(opts.N, 0))
+	err := SplitTo(input, opts, func(_ int, piece []byte) error {
+		pieces = append(pieces, piece)
 		return nil
 	})
 	if err != nil {
+		memory.FreeAll(pieces)
 		return nil, err
 	}
 	return pieces, nil
 }
 
-// SplitTo is Split without holding every piece at once: each piece is handed to
-// write and released before the next is built.
+// SplitTo is Split handing each piece to write, in order, rather than holding
+// them all. write owns the piece it is given: SplitTo neither reads nor wipes it
+// again, so it can be written out while SplitTo goes on.
 //
-// This is what a large input needs. The pieces are N times the payload on top of
-// the shares, so collecting them all roughly doubles what a split already costs.
-// Pieces are built in order rather than concurrently, because the caller is
-// writing them out and the derivations stop being the slow part once the input
-// is large.
+// The pieces are sealed in parallel ahead of the one being written, since each
+// password envelope derives its own key and that is the slow part of a split
+// into many pieces. No step is under way when the first piece is handed over,
+// which is when a caller learns how large the pieces are and may ask about it;
+// a later one may find "sealing piece i of N" reported, when it waited for that.
 func SplitTo(input []byte, opts SplitOptions, write func(serial int, piece []byte) error) error {
 	prep, err := prepare(input, opts)
 	if err != nil {
 		return err
 	}
 	defer prep.cleanup()
+	defer opts.Progress.idle()
 
-	for i := 0; i < opts.N; i++ {
-		piece, err := prep.encode(i, opts)
-		if err != nil {
-			return err
+	sealed := make([][]byte, opts.N)
+	defer memory.FreeAll(sealed) // pieces sealed and never handed over
+	return parallel.Ordered(opts.N, prep.sealWorkers(opts), func(i int) (err error) {
+		sealed[i], err = prep.encode(i, opts)
+		return err
+	}, func(i int) error {
+		piece := sealed[i]
+		sealed[i] = nil
+		prep.handOver(i)
+		if i == 0 {
+			opts.Progress.idle()
 		}
-		err = write(i+1, piece)
-		memory.Zero(piece)
-		if err != nil {
-			return err
-		}
-		// The share is spent, so release it rather than holding N of them.
-		prep.release(i)
-	}
-	return nil
+		return write(i+1, piece)
+	}, func(i int) {
+		opts.Progress.report(fmt.Sprintf("sealing piece %d of %d", i+1, opts.N), 0, 0)
+	})
 }
 
-// release wipes and drops what piece i carried.
-func (p *splitPrep) release(i int) {
-	for _, set := range [][][]byte{p.shares, p.detailShares} {
-		if i < len(set) {
-			memory.Zero(set[i])
-			set[i] = nil
-		}
+// sealBudget caps the compact pieces SplitTo holds sealed ahead of the one being
+// written. A full set's pieces are made with its shares, so sealing them ahead
+// holds nothing more.
+const sealBudget = 64 << 20
+
+// sealWorkers decides how many pieces are sealed at once: as many as derive
+// their envelope keys within the derivation budget, when the envelope takes a
+// password, and for a compact set, whose pieces are made as they are sealed, as
+// many as fit in sealBudget.
+func (p *splitPrep) sealWorkers(opts SplitOptions) int {
+	w := parallel.Workers(opts.N)
+	if len(p.envPasswords) > 0 {
+		w = derivationWorkers(opts.Params, opts.N)
+	}
+	if p.disp != nil {
+		w = max(1, min(w, sealBudget/format.PieceLen(p.shape)))
+	}
+	return w
+}
+
+// handOver forgets piece i, which the caller now owns, and wipes what it was
+// made from. A full set's share is inside the piece, so it is only forgotten.
+func (p *splitPrep) handOver(i int) {
+	if p.pieces != nil {
+		p.pieces[i], p.shares[i] = nil, nil
+	} else {
+		memory.Zero(p.shares[i])
+		p.shares[i] = nil
+	}
+	if p.detailShares != nil {
+		memory.Zero(p.detailShares[i])
+		p.detailShares[i] = nil
 	}
 }
 
-// encode seals share i into a piece.
+// encode seals piece i: a full set's around the share already in it, and a
+// compact set's around its fragment, made in place in a new piece.
 func (p *splitPrep) encode(i int, opts SplitOptions) ([]byte, error) {
 	in := format.EncodeInput{
 		Details:     p.details,
@@ -720,15 +944,23 @@ func (p *splitPrep) encode(i int, opts SplitOptions) ([]byte, error) {
 		Share:       p.shares[i],
 		Passwords:   p.envPasswords,
 		Recipients:  p.envRecipients,
-	}
-	if p.disp != nil {
-		in.Fragment = p.disp.Fragment(i)
-		defer memory.Zero(in.Fragment)
+		Pad:         p.shape.Pad,
 	}
 	if p.detailShares != nil {
 		in.DetailsShare = p.detailShares[i]
 	}
-	return format.Encode(in)
+	var piece []byte
+	if p.disp != nil {
+		piece = make([]byte, format.PieceLen(p.shape))
+		in.Fragment = piece[p.shape.FragmentAt():p.shape.ShareAt()]
+		p.disp.FragmentTo(in.Fragment, i)
+	} else {
+		piece = p.pieces[i]
+	}
+	if err := format.EncodeTo(piece, in); err != nil {
+		return nil, err
+	}
+	return piece, nil
 }
 
 // MemoryEstimate reports roughly how much memory a split of this size needs, in
@@ -737,9 +969,9 @@ func (p *splitPrep) encode(i int, opts SplitOptions) ([]byte, error) {
 // The payload is encrypted straight into what is shared or dispersed, so it is
 // never held twice. The full method gives every share the full length of the
 // payload, so the shares alone are N times the input: the input, the shared
-// payload and N shares, then the input, N shares and one piece in flight. The
-// compact method holds the input and the sealed data, then also one fragment and
-// one piece of 1/K each, since fragments are computed as pieces are written.
+// payload and N pieces, each made around its share. The compact method holds
+// the input and the sealed data, and a piece of 1/K or a few as they are
+// written, since fragments are computed as pieces are sealed.
 func MemoryEstimate(inputLen, n, k int, m Method) int64 {
 	in := int64(inputLen)
 	if m != MethodCompact || k < 1 {
@@ -747,6 +979,11 @@ func MemoryEstimate(inputLen, n, k int, m Method) int64 {
 	}
 	return 2*in + 2*in/int64(k)
 }
+
+// DerivationsAtOnce is how many keys of cost p a split or a combine derives at
+// once: as many as the cores allow, within a memory budget. A caller running
+// several combines together divides it between them, to stay within it too.
+func DerivationsAtOnce(p kdf.Params) int { return derivationWorkers(p, math.MaxInt) }
 
 // derivationWorkers decides how many envelope keys to derive at once. Argon2 is
 // deliberately memory-hungry, so the count is bounded by a memory budget as well
@@ -820,6 +1057,11 @@ func checkSplitOptions(opts *SplitOptions) error {
 	if opts.Method != MethodFull && opts.Method != MethodCompact {
 		return fmt.Errorf("core: unknown method %d", opts.Method)
 	}
+	// Both methods work over GF(2^16), whose 65535 non-zero points cap the
+	// pieces. Checked here, before the input is encrypted or anything is held.
+	if err := split.ValidateParams(opts.N, opts.K, 1); err != nil {
+		return err
+	}
 	if err := opts.Params.Validate(); err != nil {
 		return err
 	}
@@ -827,10 +1069,10 @@ func checkSplitOptions(opts *SplitOptions) error {
 }
 
 // buildLayers turns the caller's layer list into cascade layers, encapsulating
-// to every recipient key on the way. It returns the passwords that key the
-// envelope, whether any recipient layer is present, and a cleanup that wipes the
+// to every recipient key on the way. It returns whether any layer stretches a
+// password, whether any recipient layer is present, and a cleanup that wipes the
 // shared secrets; the cleanup is always safe to call, including after an error.
-func buildLayers(specs []LayerSpec, schemeIDs []uint8) (layers []cascade.Layer, envPasswords [][]byte, hybrid bool, cleanup func(), err error) {
+func buildLayers(specs []LayerSpec, schemeIDs []uint8) (layers []cascade.Layer, stretched, hybrid bool, cleanup func(), err error) {
 	var secrets [][]byte
 	cleanup = func() {
 		memory.FreeAll(secrets)
@@ -840,26 +1082,26 @@ func buildLayers(specs []LayerSpec, schemeIDs []uint8) (layers []cascade.Layer, 
 		switch l.Kind {
 		case PasswordLayer:
 			if len(l.Password) == 0 {
-				return nil, nil, false, cleanup, fmt.Errorf("core: layer %d is a password layer with no password", i+1)
+				return nil, false, false, cleanup, fmt.Errorf("core: layer %d is a password layer with no password", i+1)
 			}
 			if l.Recipient != nil {
-				return nil, nil, false, cleanup, fmt.Errorf("core: layer %d is a password layer but also names a recipient key", i+1)
+				return nil, false, false, cleanup, fmt.Errorf("core: layer %d is a password layer but also names a recipient key", i+1)
 			}
 			layers = append(layers, cascade.Layer{
 				Kind: cascade.Password, SchemeID: schemeIDs[i], Password: l.Password,
 			})
-			envPasswords = append(envPasswords, l.Password)
+			stretched = true
 
 		case RecipientLayer:
 			if l.Recipient == nil {
-				return nil, nil, false, cleanup, fmt.Errorf("core: layer %d is a recipient layer with no key", i+1)
+				return nil, false, false, cleanup, fmt.Errorf("core: layer %d is a recipient layer with no key", i+1)
 			}
 			if len(l.Password) > 0 {
-				return nil, nil, false, cleanup, fmt.Errorf("core: layer %d is a recipient layer but also carries a password", i+1)
+				return nil, false, false, cleanup, fmt.Errorf("core: layer %d is a recipient layer but also carries a password", i+1)
 			}
 			ss, ct, eerr := l.Recipient.Encapsulate()
 			if eerr != nil {
-				return nil, nil, false, cleanup, fmt.Errorf("core: layer %d: %w", i+1, eerr)
+				return nil, false, false, cleanup, fmt.Errorf("core: layer %d: %w", i+1, eerr)
 			}
 			secrets = append(secrets, ss)
 			layers = append(layers, cascade.Layer{
@@ -868,8 +1110,8 @@ func buildLayers(specs []LayerSpec, schemeIDs []uint8) (layers []cascade.Layer, 
 			hybrid = true
 
 		default:
-			return nil, nil, false, cleanup, fmt.Errorf("core: layer %d has an unknown kind %d", i+1, l.Kind)
+			return nil, false, false, cleanup, fmt.Errorf("core: layer %d has an unknown kind %d", i+1, l.Kind)
 		}
 	}
-	return layers, envPasswords, hybrid, cleanup, nil
+	return layers, stretched, hybrid, cleanup, nil
 }

@@ -4,6 +4,7 @@
 package app
 
 import (
+	"runtime/debug"
 	"strings"
 	"testing"
 
@@ -52,5 +53,36 @@ func TestCreatorFieldsFitTheFormat(t *testing.T) {
 	}
 	if len(creatorCommit()) > format.MaxCreatorLen {
 		t.Fatalf("creatorCommit() is %d bytes, over the limit", len(creatorCommit()))
+	}
+}
+
+// TestBuildInfoNamesTheBuild checks what a binary built without the release
+// scripts records about itself: a tagged version as it is, a pseudo-version
+// not at all, since its commit is recorded anyway, and the revision cut to
+// twelve characters and marked when the tree had changes.
+func TestBuildInfoNamesTheBuild(t *testing.T) {
+	oldVersion, oldCommit := version, commit
+	t.Cleanup(func() { version, commit = oldVersion, oldCommit })
+	info := func(v, rev, modified string) *debug.BuildInfo {
+		bi := &debug.BuildInfo{Main: debug.Module{Version: v}}
+		if rev != "" {
+			bi.Settings = []debug.BuildSetting{{Key: "vcs.revision", Value: rev}, {Key: "vcs.modified", Value: modified}}
+		}
+		return bi
+	}
+	for _, c := range []struct {
+		bi              *debug.BuildInfo
+		version, commit string
+	}{
+		{info("v1.2.0", "0123456789abcdef0123", "false"), "v1.2.0", "0123456789ab"},
+		{info("v0.0.0-20260101120000-0123456789ab", "0123456789abcdef", "true"), "dev", "0123456789ab+dirty"},
+		{info("(devel)", "abc123", "false"), "dev", "abc123"},
+		{info("", "", ""), "dev", "none"},
+	} {
+		version, commit = "dev", "none"
+		applyBuildInfo(c.bi)
+		if version != c.version || commit != c.commit {
+			t.Errorf("%q: got %q and %q, want %q and %q", c.bi.Main.Version, version, commit, c.version, c.commit)
+		}
 	}
 }

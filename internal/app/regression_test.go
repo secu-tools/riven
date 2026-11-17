@@ -225,7 +225,7 @@ func TestRegressionCombineAsksForAlgorithmsAfterTheCost(t *testing.T) {
 	}
 	var got []byte
 	withTerminal(t, "m=8,t=1,p=1\nchacha20-poly1305\n", func() {
-		got, _, err = combinePieces(opts, pieces, nil)
+		got, _, err = combinePieces(opts, copied(pieces), nil)
 	})
 	if err != nil || !bytes.Equal(got, input) {
 		t.Fatalf("the set did not rebuild through the prompts: %q, %v", got, err)
@@ -314,7 +314,7 @@ func TestConflictingOptionsAreRefused(t *testing.T) {
 		"two input files":          {"split", "a", "b"},
 		"more algos than layers":   {"split", "f", "--algo", "aes-256-gcm,chacha20-poly1305", "--password-env", "RIVEN_UNIT_PW"},
 		"k above n":                {"split", "f", "-n", "3", "-k", "4"},
-		"n out of range":           {"split", "f", "-n", "300"},
+		"n out of range":           {"split", "f", "-n", "65536"},
 		"unknown padding mode":     {"split", "f", "--pad", "wide"},
 		"padding width of zero":    {"split", "f", "--pad", "wide"},
 		"padding width too large":  {"split", "f", "--pad", "501"},

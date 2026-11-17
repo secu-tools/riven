@@ -56,11 +56,7 @@ func Canonical(raw []byte) []byte {
 	// NFC.Bytes allocates on the ordinary heap, so the canonical form is moved
 	// into locked memory and the intermediate wiped: this value is what the key
 	// is actually derived from.
-	nfc := norm.NFC.Bytes(src)
-	out := memory.Bytes(len(nfc))
-	copy(out, nfc)
-	memory.Zero(nfc)
-	return out
+	return memory.Copy(norm.NFC.Bytes(src))
 }
 
 // fromGB18030 transcodes b to UTF-8 when b really is GB18030. The decoder

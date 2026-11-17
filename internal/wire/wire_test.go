@@ -5,6 +5,8 @@ package wire
 
 import (
 	"bytes"
+	"encoding/binary"
+	"math"
 	"testing"
 )
 
@@ -69,6 +71,7 @@ func TestBytesTooLarge(t *testing.T) {
 func FuzzReader(f *testing.F) {
 	f.Add([]byte{0, 0, 0, 2, 9, 9, 1, 2, 3})
 	f.Add([]byte{})
+	f.Add([]byte{0, 0, 0, 1, 0, 0, 0, 3, 1, 2, 3})
 	f.Fuzz(func(t *testing.T, data []byte) {
 		r := NewReader(data)
 		for i := 0; i < 8; i++ {
@@ -76,6 +79,7 @@ func FuzzReader(f *testing.F) {
 			_, _ = r.U16()
 			_, _ = r.U32()
 			_, _ = r.Bytes(1 << 20)
+			_, _ = r.View64()
 			_, _ = r.Raw(3)
 		}
 		_ = r.RestView()
@@ -111,4 +115,63 @@ func TestViewsShareTheBuffer(t *testing.T) {
 	if _, err := NewReader([]byte{0, 0, 0, 3, 1, 2}).View(0); err != ErrTooLarge {
 		t.Fatalf("a view past the buffer: %v", err)
 	}
+}
+
+// TestView64ReadsALongPrefix checks a field behind a uint64 length prefix, the
+// way format writes a fragment, reads back whole and empty.
+func TestView64ReadsALongPrefix(t *testing.T) {
+	w := NewWriter(0)
+	w.U64(5)
+	w.Raw([]byte("large"))
+	w.U64(0)
+	w.Raw([]byte("rest"))
+	buf := w.Result()
+	if len(buf) != 8+5+8+4 {
+		t.Fatalf("encoded %d bytes, want two 8-byte prefixes", len(buf))
+	}
+
+	r := NewReader(buf)
+	if v, err := r.View64(); err != nil || string(v) != "large" {
+		t.Fatalf("view %q, %v", v, err)
+	}
+	if v, err := r.View64(); err != nil || len(v) != 0 {
+		t.Fatalf("empty view %q, %v", v, err)
+	}
+	if rest := r.RestView(); string(rest) != "rest" {
+		t.Fatalf("rest %q", rest)
+	}
+}
+
+// TestView64ReadsTheWholeLength shows a length past 4 GiB is read whole, with no
+// 4 GiB buffer: the claim is 2^32+3 with 3 bytes behind it, which a reader that
+// kept only the low 32 bits would take as a 3-byte field.
+func TestView64ReadsTheWholeLength(t *testing.T) {
+	for _, n := range []uint64{1<<32 + 3, math.MaxInt64 + 1, math.MaxUint64} {
+		buf := binary.BigEndian.AppendUint64(nil, n)
+		buf = append(buf, 1, 2, 3)
+		if v, err := NewReader(buf).View64(); err != ErrTooLarge {
+			t.Errorf("a length of %d over 3 bytes gave %d bytes, %v; want ErrTooLarge", n, len(v), err)
+		}
+	}
+	if _, err := NewReader([]byte{0, 0, 0, 0, 0, 0, 0}).View64(); err != ErrShort {
+		t.Errorf("a 7-byte prefix: %v, want ErrShort", err)
+	}
+}
+
+// TestBytesRefusesALengthItWouldWrap covers the writer side of the same limit: a
+// u32 prefix cannot hold 4 GiB, so the length is refused rather than wrapped.
+func TestBytesRefusesALengthItWouldWrap(t *testing.T) {
+	if got := prefixLen(math.MaxUint32); got != math.MaxUint32 {
+		t.Fatalf("the longest field got a prefix of %d", got)
+	}
+	if uint64(math.MaxInt) <= math.MaxUint32 {
+		t.Skip("an int here cannot hold a length past a u32")
+	}
+	over := uint64(math.MaxUint32) + 1
+	defer func() {
+		if recover() == nil {
+			t.Fatal("a 4 GiB field was given a wrapped prefix")
+		}
+	}()
+	prefixLen(int(over))
 }

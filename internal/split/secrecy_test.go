@@ -6,83 +6,62 @@ package split
 import (
 	"testing"
 
-	"github.com/secu-tools/riven/internal/shamir"
 	"github.com/secu-tools/riven/internal/testkit"
 )
 
-// TestChunkedSharesRevealNothingBelowTheThreshold checks that cutting a large
-// secret into chunks keeps the secrecy of a single sharing. Each chunk is an
-// independent sharing, so the chunks of one share must look unrelated even where
-// the chunks of the secret are identical, and shares below the threshold, sliced
-// chunk by chunk as docs/format.md section 6 describes, must not give any chunk
-// back. A chunk copied in the clear, or one polynomial reused across chunks,
-// would fail.
-func TestChunkedSharesRevealNothingBelowTheThreshold(t *testing.T) {
-	// All zeros, so every chunk of the secret is the same; the last is partial.
-	secret := make([]byte, 2*chunkBytes+chunkBytes/2)
+// TestEveryStretchOfALargeSecretIsSharedAfresh checks that cutting a large
+// secret into units for the cores, and each unit into runs whose coefficients
+// are drawn together, keeps the secrecy of a single sharing. Every symbol must
+// get its own coefficients, so the stretches of one share must look unrelated
+// even where the secret repeats, and shares below the threshold must give no
+// stretch back. A stretch copied in the clear, or coefficients reused from one
+// run to the next, would fail.
+func TestEveryStretchOfALargeSecretIsSharedAfresh(t *testing.T) {
+	// All zeros, so every stretch of the secret is the same; the last unit is
+	// partial.
+	secret := make([]byte, 2*unitBytes+unitBytes/2)
 	const n, k = 4, 3
 	shares, err := Split(secret, n, k)
 	if err != nil {
 		t.Fatal(err)
 	}
-	chunks := chunkCount(len(shares[0]))
-	if chunks != 3 {
-		t.Fatalf("expected 3 chunks, got %d", chunks)
+	guess, err := Combine(shares[:k-1], k-1)
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	// chunkOf returns chunk c of a share: its share bytes and its x-coordinate.
-	chunkOf := func(share []byte, c int) (ys []byte, x byte) {
-		lo := c * (chunkBytes + 1)
-		hi := lo + chunkBytes + 1
-		if hi > len(share) {
-			hi = len(share)
-		}
-		return share[lo : hi-1], share[hi-1]
-	}
-
-	// Interpolation is independent per byte, so a prefix of every chunk is enough
-	// to measure, and keeps the test quick.
-	const sample = 1 << 14
-	for c := 0; c < chunks; c++ {
-		ys, _ := chunkOf(shares[0], c)
-		if chi := testkit.ChiSquare(ys[:sample]); chi > 400 {
-			t.Fatalf("chunk %d of one share is not uniform (chi-square %.0f)", c+1, chi)
-		}
-
-		// What an attacker holding k-1 shares can compute for this chunk.
-		held := make([][]byte, k-1)
-		for i := range held {
-			ys, x := chunkOf(shares[i], c)
-			held[i] = append(append([]byte(nil), ys[:sample]...), x)
-		}
-		guess, err := shamir.Combine(held)
-		if err != nil {
-			t.Fatal(err)
+	// Interpolation is independent per symbol, so a sample from every stretch is
+	// enough to measure, and keeps the test quick. A stretch is shorter than a
+	// run of coefficients, so consecutive ones also compare runs.
+	const stretch = 1 << 14
+	values := func(share []byte, at int) []byte { return share[2+at : 2+at+stretch] }
+	for at := 0; at+stretch <= len(secret); at += 4 * stretch {
+		if chi := testkit.ChiSquare(values(shares[0], at)); chi > 400 {
+			t.Fatalf("at %d one share is not uniform (chi-square %.0f)", at, chi)
 		}
 		zeros := 0
-		for _, b := range guess {
+		for _, b := range guess[at : at+stretch] {
 			if b == 0 {
 				zeros++
 			}
 		}
-		if zeros > sample/20 {
-			t.Fatalf("chunk %d: %d shares give back %d of %d secret bytes", c+1, k-1, zeros, sample)
+		if zeros > stretch/20 {
+			t.Fatalf("at %d: %d shares give back %d of %d secret bytes", at, k-1, zeros, stretch)
 		}
-		if chi := testkit.ChiSquare(guess); chi > 400 {
-			t.Fatalf("chunk %d: %d shares interpolate to a skewed value (chi-square %.0f)", c+1, k-1, chi)
+		if chi := testkit.ChiSquare(guess[at : at+stretch]); chi > 400 {
+			t.Fatalf("at %d: %d shares interpolate to a skewed value (chi-square %.0f)", at, k-1, chi)
 		}
 	}
 
-	// Identical secret chunks must not give identical share chunks.
-	first, _ := chunkOf(shares[0], 0)
-	second, _ := chunkOf(shares[0], 1)
-	same := 0
-	for i := range first {
-		if first[i] == second[i] {
-			same++
+	// Identical stretches of the secret must not give identical shares, however
+	// far apart: coefficients reused from one word, run or unit to another would
+	// repeat a block here, since the secret is zeros throughout.
+	seen := map[[64]byte]int{}
+	for at := 2; at+64 <= len(shares[0]); at += 64 {
+		block := [64]byte(shares[0][at : at+64])
+		if first, ok := seen[block]; ok {
+			t.Fatalf("the share repeats its block at %d at %d", first, at)
 		}
-	}
-	if same > len(first)/20 {
-		t.Fatalf("two chunks of one share agree on %d of %d bytes", same, len(first))
+		seen[block] = at
 	}
 }

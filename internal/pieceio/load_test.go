@@ -4,10 +4,14 @@
 package pieceio
 
 import (
+	"bytes"
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/secu-tools/riven/internal/format"
 )
 
 // A directory of pieces may hold anything, including a link to a device or a
@@ -36,12 +40,132 @@ func TestLoadRejectsASymlinkToADevice(t *testing.T) {
 }
 
 // The bound exists so an absurd size is refused rather than allocated. It must
-// stay far above any piece that could actually be combined, since rebuilding
-// needs several times the piece size in memory at once.
+// not refuse any file a split can write: the largest piece in each form with no
+// size limit of its own, its size scaled from a real encoding.
 func TestMaxStoredLenCannotRefuseARealPiece(t *testing.T) {
-	const plausibleLargestPiece = 4 << 30 // a 4 GiB input already needs ~32 GiB to split
-	if MaxStoredLen < plausibleLargestPiece {
-		t.Fatalf("MaxStoredLen is %d, which would refuse a piece a user could make", MaxStoredLen)
+	largest := format.MaxCarriedLen + 1<<20 // and everything around what it carries
+	piece := make([]byte, 64<<10)
+	for _, f := range []Format{Binary, Base64, Base32} {
+		data, err := Encode(piece, f, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stored := largest/int64(len(piece))*int64(len(data)) + 1<<20; stored > MaxStoredLen {
+			t.Errorf("the largest %s piece is about %d bytes, past the %d MaxStoredLen allows", f, stored, int64(MaxStoredLen))
+		}
+	}
+}
+
+// TestLoadAllReadsEveryCopy checks a file's every copy of its piece is read: one
+// for a plain format and for a sheet too large for a code, and two, the text and
+// the code, for a sheet that carries both.
+func TestLoadAllReadsEveryCopy(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name string, data []byte) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	sheet := func(piece []byte) []byte {
+		t.Helper()
+		page, err := EncodeSheet(piece, SheetInfo{Serial: 1, Total: 2, Needed: 2}, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return page
+	}
+	small, large := samplePiece(t, 300), samplePiece(t, QRMaxBytes+100)
+	text, err := Encode(small, Base32, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name  string
+		data  []byte
+		piece []byte
+		want  int
+	}{
+		{"base32", text, small, 1},
+		{"sheet with a code", sheet(small), small, 2},
+		{"sheet too large for a code", sheet(large), large, 1},
+	} {
+		copies, err := LoadAll(write(c.name, c.data))
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if len(copies) != c.want {
+			t.Fatalf("%s: %d copies read, want %d", c.name, len(copies), c.want)
+		}
+		for i, got := range copies {
+			if !bytes.Equal(got, c.piece) {
+				t.Fatalf("%s: copy %d is not the piece", c.name, i)
+			}
+		}
+	}
+	if _, err := LoadAll(filepath.Join(dir, "missing")); err == nil {
+		t.Fatal("a missing file was read")
+	}
+	if _, err := LoadAll(write("empty", nil)); err == nil {
+		t.Fatal("an empty file was read")
+	}
+}
+
+// TestLoadAllWantsTheCodeOnASheet checks a sheet whose piece fits a code is
+// refused when the code is gone or does not read: its text alone would pass for
+// the whole sheet, and the code is what most people will scan.
+func TestLoadAllWantsTheCodeOnASheet(t *testing.T) {
+	piece := samplePiece(t, 300)
+	page, err := EncodeSheet(piece, SheetInfo{Serial: 1, Total: 2, Needed: 2}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	png, ok := sheetQR(page)
+	if !ok {
+		t.Fatal("the sheet has no code")
+	}
+	code := []byte(base64.StdEncoding.EncodeToString(png))
+	notAnImage := []byte(base64.StdEncoding.EncodeToString([]byte("not an image")))
+	for name, spoiled := range map[string][]byte{
+		"no code":            bytes.Replace(page, []byte(`src="`+sheetQRSource), []byte(`src="`), 1),
+		"code is not base64": bytes.Replace(page, code, []byte("!!!!"), 1),
+		"code is not a QR":   bytes.Replace(page, code, notAnImage, 1),
+	} {
+		if bytes.Equal(spoiled, page) {
+			t.Fatalf("%s: the sheet was not changed", name)
+		}
+		path := filepath.Join(t.TempDir(), "sheet.html")
+		if err := os.WriteFile(path, spoiled, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// The text is untouched, so the sheet still loads as a piece.
+		if got, _, err := Load(path); err != nil || !bytes.Equal(got, piece) {
+			t.Fatalf("%s: the text no longer reads: %v", name, err)
+		}
+		if _, err := LoadAll(path); err == nil || !strings.Contains(err.Error(), "QR code") {
+			t.Fatalf("%s: got %v, want the code reported as unreadable", name, err)
+		}
+	}
+}
+
+// TestTextDecodersTurnBinaryAwayWithoutCopyingIt checks the text decoders, which
+// are tried on every file before it is taken as binary, allocate nothing for a
+// binary piece. Each once made a copy the size of the file before looking at it,
+// so reading a large piece took several times its size in memory.
+func TestTextDecodersTurnBinaryAwayWithoutCopyingIt(t *testing.T) {
+	binary := bytes.Repeat([]byte{0xA7, 0x00, 0x1F}, 1<<18)
+	allocs := testing.AllocsPerRun(5, func() {
+		_, _, words := tryBip39(binary)
+		_, _, b32 := tryBase32(binary)
+		_, _, b64 := tryBase64(binary)
+		if words || b32 || b64 {
+			t.Fatal("binary was read as text")
+		}
+	})
+	if allocs != 0 {
+		t.Fatalf("the text decoders made %.0f allocations for a binary piece, want none", allocs)
 	}
 }
 
@@ -53,8 +177,13 @@ func TestWordDecodeRefusesOversizeTextEarly(t *testing.T) {
 	if len(huge) <= bip39MaxText {
 		t.Fatal("test input is not over the bound")
 	}
-	if _, ok := bip39Indexes(huge); ok {
+	if _, _, ok := tryBip39([]byte(huge)); ok {
 		t.Fatal("an oversize word list was accepted")
+	}
+	// It is turned away before any token is made of it.
+	raw := []byte(huge)
+	if allocs := testing.AllocsPerRun(5, func() { tryBip39(raw) }); allocs != 0 {
+		t.Fatalf("an oversize word list cost %.0f allocations before it was refused", allocs)
 	}
 }
 

@@ -7,7 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sort"
+	"maps"
+	"slices"
 
 	"github.com/secu-tools/riven/internal/core"
 	"github.com/secu-tools/riven/internal/memory"
@@ -26,6 +27,7 @@ func cmdVerify(opts *cliOptions) error {
 	if len(opts.files) == 0 {
 		return errors.New("verify needs pieces: the piece files, or a folder of them")
 	}
+	defer startProgress()()
 	out := msgWriter(opts)
 
 	pieces, err := loadInputs(out, opts.files, false)
@@ -35,7 +37,7 @@ func cmdVerify(opts *cliOptions) error {
 	raw := pieceBytes(pieces)
 	defer memory.FreeAll(raw)
 
-	open, wipe, err := resolveOpenCredentials(opts, raw)
+	open, wipe, err := resolveOpenCredentials(opts)
 	if err != nil {
 		return err
 	}
@@ -62,7 +64,7 @@ func cmdVerify(opts *cliOptions) error {
 	}
 
 	failed := unreadable > 0
-	for _, id := range sortedSetIDs(sets) {
+	for _, id := range slices.Sorted(maps.Keys(sets)) {
 		if !verifySet(out, id, sets[id], open) {
 			failed = true
 		}
@@ -83,15 +85,11 @@ func groupBySet(out io.Writer, items []heldPiece, open core.OpenOptions) (map[st
 	for _, item := range items {
 		p, err := core.Open(item.bytes, open)
 		if err != nil {
-			writeWrapped(out, "  ", paint(out, toneError, "FAILED:")+" "+pieceFailure(item.det.Path, err))
+			reportFailed(out, "FAILED:", pieceFailure(item.det.Path, err))
 			unreadable++
 			continue
 		}
 		info := p.Info
-		status := "intact"
-		if !info.Intact {
-			status = "DAMAGED"
-		}
 		checked := ""
 		if !item.det.Verified {
 			checked = ", no checksum in this format"
@@ -100,25 +98,19 @@ func groupBySet(out io.Writer, items []heldPiece, open core.OpenOptions) (map[st
 		if info.Hidden {
 			which = "piece of a set with hidden details"
 		}
-		writeWrapped(out, "  ", fmt.Sprintf("%q: %s, %s, read as %s%s",
-			item.det.Path, which, status, item.det.Format, checked))
-		if !info.Intact {
-			p.Wipe()
-			unreadable++
-			continue
-		}
+		// A piece that opened is intact: its tag authenticated all of it.
+		writeWrapped(out, "  ", fmt.Sprintf("%q: %s, intact, read as %s%s",
+			item.det.Path, which, item.det.Format, checked))
 		sets[info.SetID] = append(sets[info.SetID], p)
 	}
 	return sets, unreadable
 }
 
-func sortedSetIDs(sets map[string][]*core.Piece) []string {
-	ids := make([]string, 0, len(sets))
-	for id := range sets {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	return ids
+// reportFailed prints one of verify's failures, indented under its heading, with
+// label coloured. The fold is worked out on the plain label, as writeLabeled's
+// is: counting the escape codes would fold every line short of the width.
+func reportFailed(out io.Writer, label, body string) {
+	writeFolded(out, "  "+label+" ", "  "+paint(out, toneError, label)+" ", body)
 }
 
 // verifySet reports whether one set can be rebuilt, reconstructing it when
@@ -165,7 +157,7 @@ func reportRebuild(out io.Writer, pieces []*core.Piece, open core.OpenOptions) b
 				paint(out, toneWarning, "NOT ENOUGH:"))
 			return false
 		}
-		writeWrapped(out, "  ", paint(out, toneError, "FAILED")+" to rebuild: "+humanize(err))
+		reportFailed(out, "FAILED", "to rebuild: "+humanize(err))
 		return false
 	}
 	defer memory.Zero(recovered)

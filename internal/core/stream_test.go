@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"errors"
+	"runtime"
 	"testing"
 )
 
@@ -35,8 +36,7 @@ func TestSplitToGivesTheSamePiecesAsSplit(t *testing.T) {
 	var serials []int
 	err := SplitTo(input, opts, func(serial int, piece []byte) error {
 		serials = append(serials, serial)
-		// The piece is only borrowed: SplitTo wipes it once this returns.
-		streamed = append(streamed, bytes.Clone(piece))
+		streamed = append(streamed, piece) // write owns it: SplitTo is done with it
 		return nil
 	})
 	if err != nil {
@@ -70,32 +70,33 @@ func TestSplitToGivesTheSamePiecesAsSplit(t *testing.T) {
 	}
 }
 
-// TestSplitToReleasesEachPiece checks a piece is wiped once it has been written,
-// which is what bounds the memory a split needs.
-func TestSplitToReleasesEachPiece(t *testing.T) {
-	input := bytes.Repeat([]byte("release me"), 500)
-	var borrowed [][]byte
-	err := SplitTo(input, splitOpts(4, 2), func(serial int, piece []byte) error {
-		borrowed = append(borrowed, piece)
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i, p := range borrowed {
-		if !allZero(p) {
-			t.Fatalf("piece %d was still readable after SplitTo returned", i+1)
+// TestSplitToHandsEachPieceOver checks write owns the piece it is given: SplitTo
+// neither wipes nor reuses it once handed over, so a caller can write it out
+// while the split goes on, and the pieces kept just as they were given rebuild
+// the input, with either method.
+func TestSplitToHandsEachPieceOver(t *testing.T) {
+	input := bytes.Repeat([]byte("hand me over"), 5000)
+	for _, m := range []Method{MethodFull, MethodCompact} {
+		opts := splitOpts(4, 2)
+		opts.Method = m
+		var kept, copies [][]byte
+		err := SplitTo(input, opts, func(serial int, piece []byte) error {
+			kept, copies = append(kept, piece), append(copies, bytes.Clone(piece))
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range kept {
+			if !bytes.Equal(kept[i], copies[i]) {
+				t.Fatalf("%v: piece %d changed after it was handed over", m, i+1)
+			}
+		}
+		got, err := Combine(kept[2:], OpenOptions{Passwords: [][]byte{[]byte("stream test")}})
+		if err != nil || !bytes.Equal(got, input) {
+			t.Fatalf("%v: the pieces as handed over did not rebuild the input: %v", m, err)
 		}
 	}
-}
-
-func allZero(b []byte) bool {
-	for _, c := range b {
-		if c != 0 {
-			return false
-		}
-	}
-	return true
 }
 
 // TestSplitToStopsAtTheFirstFailure checks a write error ends the split rather
@@ -131,7 +132,7 @@ func TestSplitToRefusesBadOptions(t *testing.T) {
 	if err := SplitTo([]byte("x"), splitOpts(0, 0), write); err == nil {
 		t.Fatal("a split into no pieces must be refused")
 	}
-	if err := SplitTo([]byte("x"), splitOpts(300, 2), write); err == nil {
+	if err := SplitTo([]byte("x"), splitOpts(MaxPieces+1, 2), write); err == nil {
 		t.Fatal("more pieces than the field allows must be refused")
 	}
 	if called {
@@ -213,5 +214,34 @@ func TestSplitToKeyless(t *testing.T) {
 	}
 	if !bytes.Equal(got, input) {
 		t.Fatalf("rebuilt %q", got)
+	}
+}
+
+// TestSplitToMakesEachPieceOnce checks the bulk of a split is allocated once: a
+// full set's shares are made inside their pieces and a compact set's fragments
+// inside theirs, and each piece is sealed where it is, so a split allocates the
+// shared payload or the sealed package and the pieces, not a copy of each on
+// the way. Copying the share or the fragment into a manifest, and sealing that
+// into a new piece, would allocate three times as much.
+func TestSplitToMakesEachPieceOnce(t *testing.T) {
+	const size, n, k = 4 << 20, 4, 2
+	input := make([]byte, size)
+	for _, m := range []Method{MethodFull, MethodCompact} {
+		opts := SplitOptions{N: n, K: k, Keyless: true, Method: m, Padding: PadNone()}
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		if err := SplitTo(input, opts, func(int, []byte) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+		runtime.ReadMemStats(&after)
+		want := uint64(size + n*size) // the shared payload and the pieces
+		if m == MethodCompact {
+			want = size + n*size/k // the package and the pieces
+		}
+		// The margin covers the rest, such as the coefficients Shamir sharing draws
+		// for each unit; a copy of each piece would be N times the input more.
+		if got := after.TotalAlloc - before.TotalAlloc; got > want+size {
+			t.Fatalf("%v: a split of %d MiB allocated %d MiB, want about %d", m, size>>20, got>>20, want>>20)
+		}
 	}
 }

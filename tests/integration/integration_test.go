@@ -151,7 +151,7 @@ func TestMixedTransportFormats(t *testing.T) {
 	}
 	decoded := make([][]byte, 0, len(pieces))
 	for i, p := range pieces {
-		data, _, err := pieceio.Encode(p, formats[i], 4)
+		data, err := pieceio.Encode(p, formats[i], 4)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -190,7 +190,7 @@ func TestQRCapacityBoundary(t *testing.T) {
 			if !pieceio.QRFits(len(p)) {
 				return false
 			}
-			if _, _, err := pieceio.Encode(p, pieceio.QR, 2); err != nil {
+			if _, err := pieceio.Encode(p, pieceio.QR, 2); err != nil {
 				return false
 			}
 		}

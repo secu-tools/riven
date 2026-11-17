@@ -4,12 +4,15 @@
 package app
 
 import (
+	"encoding/base64"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/secu-tools/riven/internal/core"
+	"github.com/secu-tools/riven/internal/kem"
 	"github.com/secu-tools/riven/internal/pieceio"
 )
 
@@ -20,7 +23,7 @@ func writeSet(t *testing.T, dir string, opts core.SplitOptions, input []byte, f 
 	pieces := makePieces(t, opts, input)
 	var paths []string
 	for i, p := range pieces {
-		data, _, err := pieceio.Encode(p, f, 4)
+		data, err := pieceio.Encode(p, f, 4)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -146,10 +149,10 @@ func TestVerifyReadsEveryTransport(t *testing.T) {
 				var data []byte
 				var err error
 				if f == pieceio.Sheet {
-					data, _, err = pieceio.EncodeSheet(p,
+					data, err = pieceio.EncodeSheet(p,
 						pieceio.SheetInfo{Serial: i + 1, Total: 2, Needed: 2, Name: "s"}, 4)
 				} else {
-					data, _, err = pieceio.Encode(p, f, 4)
+					data, err = pieceio.Encode(p, f, 4)
 				}
 				if err != nil {
 					t.Fatal(err)
@@ -241,15 +244,36 @@ func TestResolveFormatAnswer(t *testing.T) {
 	}
 }
 
-// captureStderr returns what fn writes to the standard streams. The verify
-// command sends its report to standard error under -y, which is how these tests
-// invoke it, so that report is what comes back. It reuses captureOutput rather
-// than re-deriving the pipe plumbing.
-func captureStderr(t *testing.T, fn func()) string {
-	t.Helper()
-	out, _ := captureOutput(t, func() error {
-		fn()
-		return nil
-	})
-	return out
+// TestVerifySaysWhatItCouldNotCheck covers two things a check reports beyond
+// pass or fail: a piece in a text form carrying no checksum, as one typed in by
+// hand may be, which says a mistyped character would surface only as a failed
+// open; and a set sealed to a recipient key, which verifies as far as the
+// pieces agreeing when the key is not given.
+func TestVerifySaysWhatItCouldNotCheck(t *testing.T) {
+	dir := t.TempDir()
+	pieces := makePieces(t, core.SplitOptions{N: 2, K: 2, Keyless: true}, []byte("unchecked"))
+	var paths []string
+	for i, p := range pieces {
+		path := filepath.Join(dir, fmt.Sprintf("plain.%d.txt", i+1))
+		if err := os.WriteFile(path, []byte(base64.StdEncoding.EncodeToString(p)+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, path)
+	}
+	var err error
+	out := captureStderr(t, func() { err = cmdVerify(verifyOpts(t, paths)) })
+	if err != nil || !strings.Contains(out, "no checksum in this format") {
+		t.Fatalf("%v:\n%s", err, out)
+	}
+
+	priv, err := kem.Generate(kem.X25519)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths = writeSet(t, t.TempDir(), core.SplitOptions{N: 2, K: 2, Info: core.InfoPublic,
+		Layers: []core.LayerSpec{{Kind: core.RecipientLayer, Recipient: priv.Public()}}}, []byte("sealed"), pieceio.Binary)
+	out = captureStderr(t, func() { err = cmdVerify(verifyOpts(t, paths)) })
+	if err != nil || !strings.Contains(out, "rebuilding needs a recipient private key") {
+		t.Fatalf("%v:\n%s", err, out)
+	}
 }

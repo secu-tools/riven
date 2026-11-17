@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/secu-tools/riven/internal/kem"
@@ -42,6 +43,20 @@ func writePrivateKey(path string, priv *kem.PrivateKey) error {
 	return pieceio.Write(path, []byte(body))
 }
 
+// writeKeyPair writes a new key pair to pubPath and privPath, refusing to
+// replace a key file that is already at either: see refuseKeyOverwrite.
+func writeKeyPair(opts *cliOptions, priv *kem.PrivateKey, pubPath, privPath string) error {
+	for _, p := range []string{pubPath, privPath} {
+		if err := refuseKeyOverwrite(opts, p); err != nil {
+			return err
+		}
+	}
+	if err := writePublicKey(pubPath, priv.Public()); err != nil {
+		return err
+	}
+	return writePrivateKey(privPath, priv)
+}
+
 // keyKind distinguishes the two file roles.
 type keyKind int
 
@@ -72,7 +87,7 @@ func decodeKeyBody(path string, kind keyKind) ([]byte, kem.Scheme, error) {
 		return nil, 0, err
 	}
 
-	scheme := kem.Default()
+	var scheme kem.Scheme
 	haveScheme := false
 	var b64 string
 
@@ -82,18 +97,14 @@ func decodeKeyBody(path string, kind keyKind) ([]byte, kem.Scheme, error) {
 			continue
 		}
 		if strings.HasPrefix(line, "riven-") {
-			matched := false
-			for _, s := range kem.All() {
-				if line == kind.label(s) {
-					scheme, haveScheme, matched = s, true, true
-					break
-				}
+			all := kem.All()
+			i := slices.IndexFunc(all, func(s kem.Scheme) bool { return line == kind.label(s) })
+			if i < 0 {
+				// A label of the other role, or an unknown scheme.
+				return nil, 0, fmt.Errorf("%q is not a riven recipient %s file", path, kind.describe())
 			}
-			if matched {
-				continue
-			}
-			// A label of the other role, or an unknown scheme.
-			return nil, 0, fmt.Errorf("%q is not a riven recipient %s file", path, kind.describe())
+			scheme, haveScheme = all[i], true
+			continue
 		}
 		b64 = line
 		break
@@ -136,6 +147,9 @@ func readPrivateKey(path string) (*kem.PrivateKey, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The key keeps its own copy, so the decoded bytes are wiped, as
+	// writePrivateKey wipes its own.
+	defer memory.Zero(b)
 	priv, err := kem.PrivateFromBytes(b, scheme)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)

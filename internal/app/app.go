@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"strings"
 
 	"github.com/secu-tools/riven/internal/core"
 	"github.com/secu-tools/riven/internal/memory"
@@ -47,7 +48,15 @@ func printError(out io.Writer, err error) {
 // internalPrefix matches the package name the internal packages put before their
 // messages, which says where an error came from to a developer and nothing to
 // anyone running the tool.
-var internalPrefix = regexp.MustCompile(`(^|: )(core|format|cascade|compact|disperse|split|kem|kdf|pieceio|qrcode|wire|ciphers|password|memory): `)
+var internalPrefix = regexp.MustCompile(`(^|: )(` + strings.Join(internalPackages, "|") + `): `)
+
+// internalPackages are the packages whose errors may reach the user. A test
+// checks it against the directories under internal/, so a new package is not
+// left out.
+var internalPackages = []string{
+	"cascade", "ciphers", "compact", "core", "disperse", "format", "gf16", "kdf", "kem",
+	"memory", "parallel", "password", "pieceio", "qrcode", "split", "wire",
+}
 
 // humanize is the error's message as a user should read it.
 func humanize(err error) string {

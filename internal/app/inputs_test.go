@@ -5,6 +5,7 @@ package app
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -175,6 +176,50 @@ func TestDirectoryReportsRepeats(t *testing.T) {
 	}
 	if !strings.Contains(report.String(), "hold the same piece as another") {
 		t.Fatalf("the repeats should be reported:\n%s", report.String())
+	}
+}
+
+// TestOnlyIdenticalFilesAreRepeats checks a file is dropped as a repeat only
+// when it is another byte for byte. Repeats are first matched by length and how
+// they start, so two files alike there and different further on must both be
+// kept, while a true copy among them is still dropped.
+func TestOnlyIdenticalFilesAreRepeats(t *testing.T) {
+	dir := t.TempDir()
+	// Zero bytes keep these from reading as any text format.
+	body := make([]byte, 200)
+	var paths []string
+	for i, last := range []byte{1, 2, 2, 3} {
+		body[len(body)-1] = last
+		p := filepath.Join(dir, fmt.Sprintf("p%d", i))
+		if err := os.WriteFile(p, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, p)
+	}
+	// Another length with the same start is another piece too.
+	short := filepath.Join(dir, "short")
+	if err := os.WriteFile(short, body[:150], 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var report strings.Builder
+	items, err := loadInputs(&report, append(paths, short), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 4 {
+		t.Fatalf("kept %d of 5 files, want the 4 that differ", len(items))
+	}
+	for i, want := range []byte{1, 2, 3} {
+		if got := items[i].bytes[199]; got != want {
+			t.Fatalf("item %d ends in %d, want %d: the files were not taken in order", i, got, want)
+		}
+	}
+	if len(items[3].bytes) != 150 {
+		t.Fatalf("the shorter file was not kept: %d bytes", len(items[3].bytes))
+	}
+	if !strings.Contains(report.String(), "1 file(s) hold the same piece as another") {
+		t.Fatalf("the one repeat should be reported:\n%s", report.String())
 	}
 }
 

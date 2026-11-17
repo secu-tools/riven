@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"sync/atomic"
 
 	"github.com/secu-tools/riven/internal/cascade"
 	"github.com/secu-tools/riven/internal/compact"
@@ -187,6 +188,12 @@ func CombineFile(pieces [][]byte, opts OpenOptions) ([]byte, string, error) {
 	defer wipe()
 
 	first, params, opened, damaged, err := openPieces(pieces, &opts)
+	if opts.ReleasePieces {
+		for i := range pieces {
+			memory.Free(pieces[i])
+			pieces[i] = nil
+		}
+	}
 	if err != nil {
 		return nil, "", err
 	}
@@ -235,6 +242,15 @@ func combineOpened(first *format.Manifest, params kdf.Params, opened []*format.M
 	if err != nil {
 		return nil, "", err
 	}
+	// A spare piece carries as much as one that is used, the whole input for a
+	// full set, so it is dropped before the rebuild rather than held through it.
+	forgetSpare(opened, set.use)
+	if opts.CheckOnly {
+		_, buf, err := set.rebuild(opts.Progress)
+		opts.Progress.idle()
+		memory.Zero(buf)
+		return nil, "", err
+	}
 
 	// Everything the set may have withheld is settled once the details are
 	// known, before the rebuild and before any password is asked for, so each
@@ -248,7 +264,8 @@ func combineOpened(first *format.Manifest, params kdf.Params, opened []*format.M
 		return nil, "", err
 	}
 
-	payload, buf, err := set.rebuild()
+	payload, buf, err := set.rebuild(opts.Progress)
+	opts.Progress.idle()
 	if err != nil {
 		return nil, "", err
 	}
@@ -261,7 +278,9 @@ func combineOpened(first *format.Manifest, params kdf.Params, opened []*format.M
 		memory.Zero(buf)
 		return nil, "", err
 	}
+	opts.Progress.report("decrypting", 0, 0)
 	plaintext, err := cascade.Decrypt(payload, cascadePws, decaps, cparams, opts.Schemes)
+	opts.Progress.idle()
 	if err != nil {
 		memory.Zero(buf)
 		return nil, "", err
@@ -302,6 +321,19 @@ func settleSchemes(layers []cascade.Descriptor, recorded bool, opts *OpenOptions
 func forget(opened []*format.Manifest) {
 	for _, m := range opened {
 		if m != nil {
+			m.Wipe()
+		}
+	}
+}
+
+// forgetSpare is forget for the opened manifests a rebuild does not use.
+func forgetSpare(opened, use []*format.Manifest) {
+	used := make(map[*format.Manifest]bool, len(use))
+	for _, m := range use {
+		used[m] = true
+	}
+	for _, m := range opened {
+		if m != nil && !used[m] {
 			m.Wipe()
 		}
 	}
@@ -404,18 +436,20 @@ func revealDetails(distinct []*format.Manifest) (*format.Details, error) {
 	return d, nil
 }
 
-// rebuild reconstructs the cascade payload from the chosen pieces. The payload
-// lies inside buf, which the caller wipes.
-func (s *openedSet) rebuild() (payload, buf []byte, err error) {
+// rebuild reconstructs the cascade payload from the chosen pieces, telling p how
+// far it has got. The payload lies inside buf, which the caller wipes.
+func (s *openedSet) rebuild(p Progress) (payload, buf []byte, err error) {
 	k := s.details.K
 	shares := make([][]byte, len(s.use))
 	for i, m := range s.use {
 		shares[i] = m.Share
 	}
-	shared, err := split.Combine(shares, k)
+	p.report("rebuilding", 0, 0)
+	shared, err := split.CombineProgress(shares, k, p.units("rebuilding"))
 	if err != nil {
 		return nil, nil, err
 	}
+	p.report("hashing", 0, 0)
 	body, ok := format.UnwrapPayload(shared, s.hash)
 	if !ok {
 		memory.Zero(shared)
@@ -430,10 +464,12 @@ func (s *openedSet) rebuild() (payload, buf []byte, err error) {
 	for i, m := range s.use {
 		frags[i] = m.Fragment
 	}
+	p.report("rebuilding", 0, 0)
 	data, err := disperse.Combine(frags, k)
 	if err != nil {
 		return nil, nil, err
 	}
+	p.report("decrypting", 0, 0)
 	if payload, err = compact.Open(data, body); err != nil {
 		memory.Zero(data)
 		return nil, nil, err
@@ -570,11 +606,20 @@ func openPieces(pieces [][]byte, o *OpenOptions) (*format.Manifest, kdf.Params, 
 		params: make([]kdf.Params, len(pieces)),
 		failed: make([]error, len(pieces)),
 	}
-	op.tryKeyless(op.closed())
+	// The public key, then the recipient keys alone.
+	o.Progress.report("opening pieces", 0, 0)
+	op.tryAll(op.closed(), func(p []byte) (*format.Manifest, kdf.Params, error) {
+		return format.Decode(p, nil, o.Params)
+	})
 	if len(o.PrivateKeys) > 0 {
-		op.tryKeys(op.closed())
+		op.tryAll(op.closed(), func(p []byte) (*format.Manifest, kdf.Params, error) {
+			return format.DecodeSealed(p, nil, o.PrivateKeys, o.Params)
+		})
 	}
-	if open := op.count(); open < len(pieces) && len(o.Passwords) == 0 && o.EnvelopePasswords != nil {
+	o.Progress.idle()
+	// A piece that failed for another reason, such as a version this build does
+	// not read, would not open with a password either, so it is no reason to ask.
+	if open := op.count(); len(op.closed()) > 0 && len(o.Passwords) == 0 && o.EnvelopePasswords != nil {
 		pws, err := o.EnvelopePasswords(open > 0)
 		if err != nil {
 			return nil, kdf.Params{}, nil, nil, err
@@ -626,22 +671,12 @@ func (op *opening) count() int {
 	return n
 }
 
-// tryKeyless tries the public key on the pieces at idx, all at once, since it
-// derives nothing.
-func (op *opening) tryKeyless(idx []int) {
+// tryAll tries one way of opening that derives no key on the pieces at idx, all
+// at once.
+func (op *opening) tryAll(idx []int, way decoder) {
 	_ = parallel.Do(len(idx), parallel.Workers(len(idx)), func(j int) error {
 		i := idx[j]
-		op.opened[i], op.params[i], op.failed[i] = format.Decode(op.pieces[i], nil, op.o.Params)
-		return nil
-	})
-}
-
-// tryKeys tries the recipient keys alone on the pieces at idx, all at once, since
-// they derive nothing.
-func (op *opening) tryKeys(idx []int) {
-	_ = parallel.Do(len(idx), parallel.Workers(len(idx)), func(j int) error {
-		i := idx[j]
-		op.opened[i], op.params[i], op.failed[i] = format.DecodeSealed(op.pieces[i], nil, op.o.PrivateKeys, op.o.Params)
+		op.opened[i], op.params[i], op.failed[i] = way(op.pieces[i])
 		return nil
 	})
 }
@@ -738,10 +773,16 @@ func (op *opening) withPasswords() error {
 	for _, i := range rest {
 		budget = append(budget, op.pieces[i])
 	}
+	// Each derivation takes a while, so a set of many pieces says how many are
+	// open.
+	var done atomic.Int64
+	op.o.Progress.report("opening pieces", 0, int64(len(rest)))
 	_ = parallel.Do(len(rest), openWorkers(budget, *op.o, op.params[ref], len(rest)), func(j int) error {
 		op.decode(rest[j])
+		op.o.Progress.report("opening pieces", done.Add(1), int64(len(rest)))
 		return nil
 	})
+	op.o.Progress.idle()
 	return nil
 }
 
@@ -751,7 +792,10 @@ func (op *opening) withPasswords() error {
 func (op *opening) openReference(closed []int) int {
 	for _, i := range closed[:min(2, len(closed))] {
 		op.announce()
-		if w := op.decode(i); w >= 0 {
+		op.o.Progress.report("opening pieces", 0, 0)
+		w := op.decode(i)
+		op.o.Progress.idle()
+		if w >= 0 {
 			op.ways = op.ways[w : w+1]
 			return i
 		}

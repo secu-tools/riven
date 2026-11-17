@@ -90,17 +90,20 @@ func wrapWords(s string, width int) []string {
 // column, so a menu entry or a report line reads as a block rather than running
 // back to the left margin.
 func writeWrapped(out io.Writer, lead, body string) {
+	writeFolded(out, lead, lead, body)
+}
+
+// writeFolded is writeWrapped with the lead printed as shown, which is lead with
+// styling added. The fold is worked out on lead, the plain text, so escape codes
+// never count towards the width.
+func writeFolded(out io.Writer, lead, shown, body string) {
 	indent := utf8.RuneCountInString(lead)
-	avail := lineWidth() - indent
-	if avail < minTextWidth {
-		avail = minTextWidth
-	}
-	lines := wrapWords(body, avail)
+	lines := wrapWords(body, max(lineWidth()-indent, minTextWidth))
 	if len(lines) == 0 {
-		fmt.Fprintln(out, strings.TrimRight(lead, " "))
+		fmt.Fprintln(out, strings.TrimRight(shown, " "))
 		return
 	}
-	fmt.Fprintln(out, lead+lines[0])
+	fmt.Fprintln(out, shown+lines[0])
 	pad := strings.Repeat(" ", indent)
 	for _, l := range lines[1:] {
 		fmt.Fprintln(out, pad+l)

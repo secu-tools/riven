@@ -68,7 +68,7 @@ func TestRoundTripEveryFormat(t *testing.T) {
 	for _, size := range []int{format.MinPieceLen, 200, 1000, QRMaxBytes} {
 		piece := randomPiece(size)
 		for _, f := range Encodable() {
-			data, _, err := Encode(piece, f, 4)
+			data, err := Encode(piece, f, 4)
 			if err != nil {
 				t.Fatalf("%s %d bytes: encode: %v", f, size, err)
 			}
@@ -108,7 +108,7 @@ func TestBinaryNotMisreadAsBase64(t *testing.T) {
 // messengers and copy-paste introduce.
 func TestBase64Tolerance(t *testing.T) {
 	piece := randomPiece(300)
-	data, _, err := Encode(piece, Base64, 0)
+	data, err := Encode(piece, Base64, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestQRLimits(t *testing.T) {
 	if QRFits(QRMaxBytes + 1) {
 		t.Fatal("over max should not fit")
 	}
-	if _, _, err := Encode(randomPiece(QRMaxBytes+1), QR, 4); err == nil {
+	if _, err := Encode(randomPiece(QRMaxBytes+1), QR, 4); err == nil {
 		t.Fatal("over-capacity QR should fail")
 	}
 }
@@ -186,27 +186,20 @@ func TestQRTooLargeMessage(t *testing.T) {
 	}
 }
 
-// TestQRNoteMentionsLevel checks the encoder reports the chosen protection and
-// warns only at the weakest level.
-func TestQRNoteMentionsLevel(t *testing.T) {
-	small := randomPiece(200)
-	_, note, err := Encode(small, QR, 4)
-	if err != nil {
-		t.Fatal(err)
+// TestQRLevelForReportsStrength checks the level reported for a piece is the
+// strongest for a small one and the weakest, flagged as such, only near capacity,
+// and that a piece too large for a code has none.
+func TestQRLevelForReportsStrength(t *testing.T) {
+	name, recovery, weakest, ok := QRLevelFor(200)
+	if !ok || name != "H" || weakest || recovery <= 0 {
+		t.Fatalf("a small piece: level %q, ~%d%%, weakest=%v, ok=%v; want H, not the weakest", name, recovery, weakest, ok)
 	}
-	if !strings.Contains(note, "error correction H") {
-		t.Fatalf("small piece should use level H: %q", note)
+	name, _, weakest, ok = QRLevelFor(QRMaxBytes)
+	if !ok || name != "L" || !weakest {
+		t.Fatalf("a piece at capacity: level %q, weakest=%v, ok=%v; want L, the weakest", name, weakest, ok)
 	}
-	if strings.Contains(note, "print at high quality") {
-		t.Fatalf("strong level should not warn: %q", note)
-	}
-	big := randomPiece(QRMaxBytes)
-	_, note, err = Encode(big, QR, 4)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(note, "error correction L") || !strings.Contains(note, "print at high quality") {
-		t.Fatalf("near-capacity piece should warn: %q", note)
+	if _, _, _, ok := QRLevelFor(QRMaxBytes + 1); ok {
+		t.Fatal("a piece over capacity was given a level")
 	}
 }
 
@@ -214,7 +207,7 @@ func TestLoadAndWrite(t *testing.T) {
 	dir := t.TempDir()
 	piece := randomPiece(250)
 	for _, f := range Encodable() {
-		data, _, err := Encode(piece, f, 4)
+		data, err := Encode(piece, f, 4)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -243,7 +236,7 @@ func TestLoadAndWrite(t *testing.T) {
 func TestEncodeDoesNotAliasInput(t *testing.T) {
 	piece := randomPiece(120)
 	original := append([]byte(nil), piece...)
-	data, _, err := Encode(piece, Binary, 0)
+	data, err := Encode(piece, Binary, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

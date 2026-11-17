@@ -4,10 +4,12 @@
 package core
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/secu-tools/riven/internal/ciphers"
@@ -211,6 +213,25 @@ func TestKnownAnswerVectors(t *testing.T) {
 				t.Fatalf("%s: a piece sealed to the key showed its details without it", v.name)
 			}
 		}
+	}
+}
+
+// TestAnotherVersionIsRefusedByName opens a keyless piece whose manifest says
+// version 3, which this build does not know. It must be refused with its
+// version named rather than read with the wrong layout, and not taken for a
+// piece that needs a password: none would open it, so none is asked for.
+func TestAnotherVersionIsRefusedByName(t *testing.T) {
+	piece, err := os.ReadFile(filepath.Join("testdata", "version-3.piece"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	asked := false
+	_, err = Combine([][]byte{piece}, OpenOptions{EnvelopePasswords: func(bool) ([][]byte, error) {
+		asked = true
+		return nil, errors.New("no password")
+	}})
+	if asked || err == nil || !strings.Contains(err.Error(), "unsupported piece version 3") {
+		t.Fatalf("a version 3 piece gave %v, and asked for a password: %v", err, asked)
 	}
 }
 

@@ -208,3 +208,42 @@ func TestByIDByName(t *testing.T) {
 		t.Fatalf("ByName(nope) should not exist")
 	}
 }
+
+// TestEverySchemeRefusesWhatCannotBeACiphertext checks each scheme turns away
+// a key of the wrong length, and a ciphertext too short to hold its own tag,
+// with an error rather than a panic or an empty plaintext.
+func TestEverySchemeRefusesWhatCannotBeACiphertext(t *testing.T) {
+	for _, s := range All() {
+		if _, err := s.New(make([]byte, s.KeyLen-1)); err == nil {
+			t.Errorf("%s took a %d-byte key", s.Name, s.KeyLen-1)
+		}
+		aead, err := s.New(make([]byte, s.KeyLen))
+		if err != nil {
+			t.Fatal(err)
+		}
+		nonce := make([]byte, s.NonceLen)
+		for n := range s.TagLen {
+			if _, err := aead.Open(nil, nonce, make([]byte, n), nil); err == nil {
+				t.Errorf("%s opened a %d-byte ciphertext, shorter than its tag", s.Name, n)
+			}
+		}
+	}
+}
+
+// TestCTRHMACRefusesAWrongNonceOnOpen checks the hand-built scheme refuses a
+// nonce of the wrong length when opening, as the library schemes do, rather
+// than reading a ciphertext against the wrong counter.
+func TestCTRHMACRefusesAWrongNonceOnOpen(t *testing.T) {
+	s, ok := ByName("aes-256-ctr-hmac")
+	if !ok {
+		t.Fatal("aes-256-ctr-hmac is not registered")
+	}
+	aead, err := s.New(make([]byte, s.KeyLen))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ct := aead.Seal(nil, make([]byte, s.NonceLen), []byte("data"), nil)
+	if _, err := aead.Open(nil, make([]byte, s.NonceLen+1), ct, nil); err == nil {
+		t.Fatal("a ciphertext opened under a nonce of the wrong length")
+	}
+}

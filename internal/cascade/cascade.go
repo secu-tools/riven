@@ -14,13 +14,11 @@ package cascade
 
 import (
 	"crypto/cipher"
+	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"io"
-
-	"golang.org/x/crypto/hkdf"
 
 	"github.com/secu-tools/riven/internal/ciphers"
 	"github.com/secu-tools/riven/internal/kdf"
@@ -84,17 +82,23 @@ func Len(n int, layers []Layer) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	if err := fits(n, schemes); err != nil {
+		return 0, err
+	}
 	hdr, ct := lengths(n, layers, schemes)
 	return hdr + ct, nil
 }
 
-// EncryptTo is Encrypt writing the payload into dst, which must be exactly Len
+// EncryptTo encrypts plaintext under layers into dst, which must be exactly Len
 // bytes, so a caller can have it land where it is used next. Every layer seals in
 // place, so nothing else the size of the plaintext is allocated. On an error dst
 // is wiped.
 func EncryptTo(dst, plaintext []byte, layers []Layer, params kdf.Params, recordSchemes bool) error {
 	schemes, err := resolve(layers)
 	if err != nil {
+		return err
+	}
+	if err := fits(len(plaintext), schemes); err != nil {
 		return err
 	}
 	hdr, ct := lengths(len(plaintext), layers, schemes)
@@ -159,7 +163,7 @@ func EncryptTo(dst, plaintext []byte, layers []Layer, params kdf.Params, recordS
 	return nil
 }
 
-// resolve looks up every layer's algorithm, rejecting what Encrypt cannot apply.
+// resolve looks up every layer's algorithm, rejecting what EncryptTo cannot apply.
 func resolve(layers []Layer) ([]ciphers.Scheme, error) {
 	if len(layers) > maxLayers {
 		return nil, fmt.Errorf("cascade: too many layers (%d > %d)", len(layers), maxLayers)
@@ -176,6 +180,21 @@ func resolve(layers []Layer) ([]ciphers.Scheme, error) {
 		schemes[i] = scheme
 	}
 	return schemes, nil
+}
+
+// fits refuses n bytes of plaintext that a layer cannot seal in one call, which
+// its AEAD would meet with a panic. Layers apply innermost first, so each seals
+// the plaintext and the tags of the layers inside it.
+func fits(n int, schemes []ciphers.Scheme) error {
+	size := int64(n)
+	for i := len(schemes) - 1; i >= 0; i-- {
+		if size > schemes[i].MaxLen {
+			return fmt.Errorf("cascade: too large to encrypt: %s seals at most about %d GiB at once",
+				schemes[i].Name, (schemes[i].MaxLen+1<<29)>>30)
+		}
+		size += int64(schemes[i].TagLen)
+	}
+	return nil
 }
 
 // lengths returns the header length and the ciphertext length for n bytes of
@@ -218,7 +237,7 @@ func layerAEAD(l Layer, scheme ciphers.Scheme, salt []byte, params kdf.Params) (
 	return aead, err
 }
 
-// Decrypt reverses Encrypt in place: it overwrites payload and returns the
+// Decrypt reverses EncryptTo in place: it overwrites payload and returns the
 // plaintext as a sub-slice of it, so no copy the size of the content is made.
 // Passwords for the Password layers are supplied in order via passwords; decap
 // recovers shared secrets for KEM layers (nil when there are none). schemes
@@ -315,20 +334,24 @@ func openPasswordLayer(l layerDesc, scheme ciphers.Scheme, ct, password []byte, 
 //
 // A shared secret cannot be checked on its own: a mechanism returns an unrelated
 // secret rather than an error for a key that does not match, so the AEAD tag is
-// what decides. An AEAD clears what it fails to open, so with more than one key
-// to try, each attempt opens into a scratch buffer and the one that works is
-// copied back. The last decapsulation error is kept and reported, because it
-// explains a mismatched key type, which is the likely reason for supplying the
-// wrong key file.
+// what decides. An AEAD clears what it fails to open, so when more than one key
+// decapsulates, each attempt opens into a scratch buffer and the one that works
+// is copied back. Every key is decapsulated first, since that is cheap and a key
+// of another type refuses the ciphertext, so the usual case of one key of the
+// layer's type opens in place, without the scratch copy of the payload. The
+// last decapsulation error is kept and reported, because it explains a
+// mismatched key type, which is the likely reason for supplying the wrong key
+// file.
 func openKEMLayer(l layerDesc, scheme ciphers.Scheme, ct []byte, decaps []Decapsulator, i int) ([]byte, error) {
 	if len(decaps) == 0 {
 		return nil, fmt.Errorf("%w: layer %d", ErrKeyRequired, i+1)
 	}
-	dst := ct[:0]
-	if len(decaps) > 1 {
-		dst = make([]byte, 0, len(ct))
-		defer memory.Zero(dst[:cap(dst)])
-	}
+	var keys [][]byte
+	defer func() {
+		for _, k := range keys {
+			memory.Zero(k)
+		}
+	}()
 	var lastDecapErr error
 	for _, d := range decaps {
 		ss, err := d(l.kemCt)
@@ -341,13 +364,23 @@ func openKEMLayer(l layerDesc, scheme ciphers.Scheme, ct []byte, decaps []Decaps
 		if err != nil {
 			return nil, err
 		}
+		keys = append(keys, key)
+	}
+	dst := ct[:0]
+	if len(keys) > 1 {
+		dst = make([]byte, 0, len(ct))
+		defer memory.Zero(dst[:cap(dst)])
+	}
+	for _, key := range keys {
 		aead, err := scheme.New(key)
-		memory.Zero(key)
 		if err != nil {
 			return nil, err
 		}
 		if pt, err := aead.Open(dst, l.nonce, ct, layerAD(scheme.ID)); err == nil {
-			return ct[:copy(ct, pt)], nil
+			if len(keys) > 1 {
+				pt = ct[:copy(ct, pt)]
+			}
+			return pt, nil
 		}
 	}
 	if lastDecapErr != nil {
@@ -440,12 +473,7 @@ func kemKey(ss []byte) ([]byte, error) {
 	if len(ss) == 0 {
 		return nil, errors.New("cascade: empty KEM shared secret")
 	}
-	r := hkdf.New(sha256.New, ss, nil, []byte("riven-kem-layer-v1"))
-	k := make([]byte, 32)
-	if _, err := io.ReadFull(r, k); err != nil {
-		return nil, err
-	}
-	return k, nil
+	return hkdf.Key(sha256.New, ss, nil, "riven-kem-layer-v1", 32)
 }
 
 func layerAD(schemeID uint8) []byte {

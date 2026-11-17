@@ -5,8 +5,10 @@ package app
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -36,6 +38,103 @@ func planFor(t *testing.T, args ...string) *splitPlan {
 		t.Fatalf("plan: %v", err)
 	}
 	return plan
+}
+
+// TestPieceCountsAreBounded checks -n stops at 65535, the most distinct points
+// the field both methods work over has to give pieces, and that K stays within
+// N. Nothing is split: the counts are refused when the command line is read.
+func TestPieceCountsAreBounded(t *testing.T) {
+	if plan := planFor(t, "--keyless", "-n", "65535", "-k", "65535"); plan.opts.N != 65535 || plan.opts.K != 65535 {
+		t.Fatalf("65535 of 65535 planned as %d of %d", plan.opts.K, plan.opts.N)
+	}
+	for _, args := range [][]string{
+		{"-n", "65536"}, {"-n", "1000000"}, {"-n", "1000000000000"}, {"-n", "100000000000000000000"},
+		{"-n", "0"}, {"-n", "3", "-k", "4"}, {"-k", "0"},
+	} {
+		opts, err := parseArgs(append([]string{"split", "f"}, args...))
+		if err == nil {
+			err = validateSplitOptions(opts)
+		}
+		if err == nil {
+			t.Errorf("%v was accepted", args)
+		}
+	}
+}
+
+// TestQRScaleIsBoundedByWhatReadsBack checks --qr-scale stops where a code
+// would be too large for riven to read back, so a split cannot write one its own
+// check, or a later combine, then refuses. Nothing is split.
+func TestQRScaleIsBoundedByWhatReadsBack(t *testing.T) {
+	for scale, ok := range map[int]bool{
+		0: true, 1: true, pieceio.QRMaxScale: true,
+		-1: false, pieceio.QRMaxScale + 1: false, 1000: false,
+	} {
+		opts, err := parseArgs([]string{"split", "f", "--qr-scale", strconv.Itoa(scale)})
+		if err == nil {
+			err = validateSplitOptions(opts)
+		}
+		if (err == nil) != ok {
+			t.Errorf("--qr-scale %d: %v, want accepted=%v", scale, err, ok)
+		}
+		if !ok && (err == nil || !strings.Contains(err.Error(), strconv.Itoa(pieceio.QRMaxScale))) {
+			t.Errorf("--qr-scale %d: the refusal does not give the limit: %v", scale, err)
+		}
+	}
+}
+
+// TestSizeNotesCountEveryPrintedPage checks the summary gives the pages of a
+// sheet for one piece and for the whole set, and nothing for a sheet of one
+// page or a format that prints nothing.
+func TestSizeNotesCountEveryPrintedPage(t *testing.T) {
+	const size, count = 4000, 3
+	pages := pieceio.SheetPages(size)
+	if pages < 2 {
+		t.Fatalf("a %d byte piece should run to several pages, got %d", size, pages)
+	}
+	var buf bytes.Buffer
+	reportSizeNotes(&buf, []pieceio.Format{pieceio.Sheet}, size, count)
+	want := fmt.Sprintf("about %d printed pages per piece, %d in all", pages, pages*count)
+	if got := strings.Join(strings.Fields(buf.String()), " "); !strings.Contains(got, want) {
+		t.Fatalf("the summary does not say %q:\n%s", want, buf.String())
+	}
+	for _, c := range []struct {
+		formats []pieceio.Format
+		size    int
+	}{
+		{[]pieceio.Format{pieceio.Sheet}, 100},
+		{[]pieceio.Format{pieceio.Binary, pieceio.Base32}, size},
+		{[]pieceio.Format{pieceio.Sheet}, 0},
+	} {
+		buf.Reset()
+		reportSizeNotes(&buf, c.formats, c.size, count)
+		if strings.Contains(buf.String(), "printed pages") {
+			t.Errorf("%v at %d bytes reported pages:\n%s", c.formats, c.size, buf.String())
+		}
+	}
+}
+
+// TestPlanningStopsOnWhatItCannotUse checks the planner refuses, on its own as
+// well as after the command line is checked, more algorithms than layers and
+// an --identity file that is not a key: neither may be dropped without a word.
+func TestPlanningStopsOnWhatItCannotUse(t *testing.T) {
+	t.Setenv("RIVEN_UNIT_PLAN", "plan")
+	opts, err := parseArgs([]string{"split", "f", "--password-env", "RIVEN_UNIT_PLAN",
+		"--algo", "aes-256-gcm,chacha20-poly1305", "-y"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := planLayers(&splitPlan{}, opts, false, true); err == nil || !strings.Contains(err.Error(), "only 1 layers") {
+		t.Fatalf("two algorithms for one layer: %v", err)
+	}
+
+	missing := filepath.Join(t.TempDir(), "absent.key")
+	opts, err = parseArgs([]string{"split", "f", "--keyless", "--identity", missing, "-y"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := planSplit(opts, t.TempDir()); err == nil || !strings.Contains(err.Error(), "absent.key") {
+		t.Fatalf("a missing --identity file: %v", err)
+	}
 }
 
 func TestPlanDefaults(t *testing.T) {
@@ -225,14 +324,14 @@ func TestSplitSummaryDescribesTheSet(t *testing.T) {
 
 	var buf bytes.Buffer
 	printSplitSummary(&buf, plan, []pieceio.Format{pieceio.Binary},
-		map[pieceio.Format][]string{pieceio.Binary: {"a.1", "a.2"}}, verifiedYes)
+		map[pieceio.Format][]string{pieceio.Binary: {"a.1", "a.2"}}, verifiedFull)
 	// The summary wraps to the terminal, so compare it as one line.
 	out := strings.Join(strings.Fields(buf.String()), " ")
 	for _, want := range []string{
 		"password (", "x25519 recipient key (", "every private key is needed",
 		"algorithms are not recorded", "needs --algo ",
 		"Argon2id cost is not recorded", "needs --kdf m=8",
-		"a.1 ... a.2", verifiedYes,
+		"a.1 ... a.2", verifiedFull,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("summary is missing %q:\n%s", want, out)
@@ -244,7 +343,7 @@ func TestSplitSummaryForKeylessSets(t *testing.T) {
 	plan := planFor(t, "--keyless", "-n", "3", "-k", "2")
 	var buf bytes.Buffer
 	printSplitSummary(&buf, plan, []pieceio.Format{pieceio.Binary},
-		map[pieceio.Format][]string{pieceio.Binary: {"a.1"}}, verifiedYes)
+		map[pieceio.Format][]string{pieceio.Binary: {"a.1"}}, verifiedFull)
 	out := strings.Join(strings.Fields(buf.String()), " ")
 	if !strings.Contains(out, "none: no password") || !strings.Contains(out, "warning: no password") {
 		t.Fatalf("keyless summary should say so:\n%s", out)
@@ -268,7 +367,7 @@ func TestSplitSummaryFitsTheLineWidth(t *testing.T) {
 	var buf bytes.Buffer
 	withLineWidth(t, width, func() {
 		printSplitSummary(&buf, plan, []pieceio.Format{pieceio.Binary},
-			map[pieceio.Format][]string{pieceio.Binary: {"a.1"}}, verifiedYes)
+			map[pieceio.Format][]string{pieceio.Binary: {"a.1"}}, verifiedFull)
 	})
 	for _, line := range strings.Split(buf.String(), "\n") {
 		if n := utf8.RuneCountInString(line); n > width && len(strings.Fields(line)) > 1 {
@@ -297,7 +396,7 @@ func TestSummarySaysWhenTheSizeGivesTheLengthAway(t *testing.T) {
 		plan := planFor(t, c.args...)
 		var buf bytes.Buffer
 		printSplitSummary(&buf, plan, []pieceio.Format{pieceio.Binary},
-			map[pieceio.Format][]string{pieceio.Binary: {"a.1"}}, verifiedYes)
+			map[pieceio.Format][]string{pieceio.Binary: {"a.1"}}, verifiedFull)
 		if got := strings.Contains(buf.String(), "not padded"); got != c.says {
 			t.Fatalf("%s: mentions the padding %v, want %v:\n%s", c.name, got, c.says, buf.String())
 		}
@@ -331,12 +430,12 @@ func TestExportAndVerify(t *testing.T) {
 			}
 		}
 	}
-	reportSizeNotes(&buf, formats, plan.pieceSizes)
+	reportSizeNotes(&buf, formats, plan.pieceSize, plan.opts.N)
 	if !strings.Contains(buf.String(), "error correction") {
 		t.Fatalf("the QR export should report its level:\n%s", buf.String())
 	}
 
-	if got, err := verifySplit(input, written[pieceio.Binary], plan); err != nil || got != verifiedYes {
+	if got, err := verifySplit(verifyFull, input, written, formats, plan); err != nil || got != verifiedFull {
 		t.Fatalf("verification should pass: %q, %v", got, err)
 	}
 
@@ -350,8 +449,10 @@ func TestExportAndVerify(t *testing.T) {
 	if err := os.WriteFile(damaged, body, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := verifySplit(input, written[pieceio.Binary], plan); err == nil {
-		t.Fatal("a damaged piece must fail verification")
+	for _, mode := range []verifyMode{verifyFast, verifyFull} {
+		if _, err := verifySplit(mode, input, written, formats, plan); err == nil {
+			t.Fatalf("%v: a damaged piece must fail verification", mode)
+		}
 	}
 }
 
@@ -377,38 +478,46 @@ func TestVerifyASetSealedToAKey(t *testing.T) {
 		want string
 	}{
 		{nil, verifiedSealed},
-		{[]string{"--identity", key}, verifiedYes},
+		{[]string{"--identity", key}, verifiedFull},
 		{[]string{"--info", "public"}, verifiedPartly},
 	} {
 		plan := planFor(t, append([]string{"--recipient", pub, "-n", "2", "-k", "2"}, c.args...)...)
 		plan.outDir = t.TempDir()
-		written, _, err := exportSplit(&bytes.Buffer{}, plan, &cliOptions{yes: true}, input, "doc")
+		written, formats, err := exportSplit(&bytes.Buffer{}, plan, &cliOptions{yes: true}, input, "doc")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got, err := verifySplit(input, written[pieceio.Binary], plan); err != nil || got != c.want {
+		if got, err := verifySplit(verifyFull, input, written, formats, plan); err != nil || got != c.want {
 			t.Fatalf("%v: verified %q, %v; want %q", c.args, got, err, c.want)
 		}
 	}
 }
 
-// TestReportQRSizesCountsEveryPiece checks the report is derived per piece
-// rather than assumed from one of them.
-func TestReportQRSizesCountsEveryPiece(t *testing.T) {
+// TestReportQRLevelFlagsWeakCodes checks the report names the level the pieces'
+// size gives and how many pieces have it, flags a size near capacity and one
+// too large to photograph easily, and says nothing of a size no code holds.
+func TestReportQRLevelFlagsWeakCodes(t *testing.T) {
 	var buf bytes.Buffer
-	reportQRSizes(&buf, []int{100, 100, 2900})
+	reportQRLevel(&buf, 2900, 3)
 	out := strings.Join(strings.Fields(buf.String()), " ")
-	if !strings.Contains(out, "2 piece(s)") || !strings.Contains(out, "1 piece(s)") {
-		t.Fatalf("mixed levels should be reported per piece:\n%s", out)
+	if !strings.Contains(out, "error correction L for 3 piece(s)") {
+		t.Fatalf("the level and the piece count should be reported:\n%s", out)
 	}
-	if !strings.Contains(out, "weakest correction") {
+	if !strings.Contains(out, "weakest correction") || !strings.Contains(out, "sharp photo") {
 		t.Fatalf("a piece near capacity should be flagged:\n%s", out)
 	}
 
 	buf.Reset()
-	reportQRSizes(&buf, []int{100, 100})
-	if strings.Contains(buf.String(), "weakest correction") {
-		t.Fatalf("small pieces should not be flagged:\n%s", buf.String())
+	reportQRLevel(&buf, 100, 2)
+	out = strings.Join(strings.Fields(buf.String()), " ")
+	if !strings.Contains(out, "error correction H for 2 piece(s)") || strings.Contains(out, "warning") {
+		t.Fatalf("small pieces should be reported and not flagged:\n%s", out)
+	}
+
+	buf.Reset()
+	reportQRLevel(&buf, pieceio.QRMaxBytes+1, 2)
+	if buf.Len() != 0 {
+		t.Fatalf("a size no code holds should report nothing:\n%s", buf.String())
 	}
 }
 
@@ -418,24 +527,15 @@ func TestReportQRSizesCountsEveryPiece(t *testing.T) {
 func TestGeneratedPasswordsReachTheUser(t *testing.T) {
 	plan := planFor(t, "--generate", "--algo", "aes-256-gcm,chacha20-poly1305", "--kdf", "m=8,t=1,p=1")
 
-	old := os.Stdout
-	r, w, err := os.Pipe()
+	var err error
+	printed := capture(t, func() { err = reportGeneratedPasswords(&cliOptions{yes: true}, plan) })
 	if err != nil {
 		t.Fatal(err)
 	}
-	os.Stdout = w
-	err = reportGeneratedPasswords(&cliOptions{yes: true}, plan)
-	w.Close()
-	os.Stdout = old
-	if err != nil {
-		t.Fatal(err)
-	}
-	var buf bytes.Buffer
-	buf.ReadFrom(r)
 
-	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	lines := strings.Split(strings.TrimRight(printed, "\n"), "\n")
 	if len(lines) != 2 {
-		t.Fatalf("stdout carried %d lines, want one per generated password:\n%q", len(lines), buf.String())
+		t.Fatalf("stdout carried %d lines, want one per generated password:\n%q", len(lines), printed)
 	}
 	for i, l := range lines {
 		if l != string(plan.generated[i]) {

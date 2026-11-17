@@ -6,18 +6,33 @@ package split
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/binary"
 	"testing"
+
+	"github.com/secu-tools/riven/internal/testkit"
 )
 
 func TestParamValidation(t *testing.T) {
 	if err := ValidateParams(3, 2, 0); err == nil {
 		t.Fatal("empty secret should fail")
 	}
+	if err := ValidateParams(0, 0, 5); err == nil {
+		t.Fatal("no parts should fail")
+	}
+	if err := ValidateParams(3, 0, 5); err == nil {
+		t.Fatal("k=0 should fail")
+	}
+	if _, err := Combine([][]byte{{0, 1, 2, 3}}, 0); err == nil {
+		t.Fatal("combining at k=0 should fail")
+	}
 	if err := ValidateParams(2, 3, 5); err == nil {
 		t.Fatal("k>n should fail")
 	}
-	if err := ValidateParams(256, 2, 5); err == nil {
-		t.Fatal("n>255 should fail")
+	if err := ValidateParams(MaxParts+1, 2, 5); err == nil {
+		t.Fatalf("n>%d should fail", MaxParts)
+	}
+	if err := ValidateParams(MaxParts, MaxParts, 5); err != nil {
+		t.Fatalf("n=k=%d should be allowed: %v", MaxParts, err)
 	}
 	if err := ValidateParams(5, 1, 5); err != nil {
 		t.Fatalf("k=1 should be allowed: %v", err)
@@ -61,36 +76,26 @@ func TestKOneMultiParts(t *testing.T) {
 }
 
 func TestThresholdAllSubsets(t *testing.T) {
-	secret := []byte{0x00, 0xFF, 0x42, 0x00, 0x01} // includes zero bytes
+	secret := []byte{0x00, 0xFF, 0x42, 0x00, 0x01, 0x00} // includes zero symbols
 	n, k := 6, 4
 	shares, err := Split(secret, n, k)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Every k-subset reconstructs.
-	idx := make([]int, k)
-	var rec func(start, depth int)
-	rec = func(start, depth int) {
-		if depth == k {
-			sub := make([][]byte, k)
-			for i, j := range idx {
-				sub[i] = shares[j]
-			}
-			got, err := Combine(sub, k)
-			if err != nil {
-				t.Fatalf("combine: %v", err)
-			}
-			if !bytes.Equal(got, secret) {
-				t.Fatalf("mismatch for %v", idx)
-			}
-			return
+	testkit.Subsets(n, k, func(idx []int) {
+		sub := make([][]byte, k)
+		for i, j := range idx {
+			sub[i] = shares[j]
 		}
-		for i := start; i < n; i++ {
-			idx[depth] = i
-			rec(i+1, depth+1)
+		got, err := Combine(sub, k)
+		if err != nil {
+			t.Fatalf("combine: %v", err)
 		}
-	}
-	rec(0, 0)
+		if !bytes.Equal(got, secret) {
+			t.Fatalf("mismatch for %v", idx)
+		}
+	})
 }
 
 func TestInsufficientShares(t *testing.T) {
@@ -100,9 +105,10 @@ func TestInsufficientShares(t *testing.T) {
 	}
 }
 
-func TestOneByte(t *testing.T) {
-	for _, b := range []byte{0x00, 0x01, 0x80, 0xFF} {
-		shares, err := Split([]byte{b}, 10, 8)
+func TestOneSymbol(t *testing.T) {
+	for _, s := range []uint16{0x0000, 0x0001, 0x8000, 0xFFFF} {
+		secret := binary.BigEndian.AppendUint16(nil, s)
+		shares, err := Split(secret, 10, 8)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -110,21 +116,38 @@ func TestOneByte(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(got) != 1 || got[0] != b {
-			t.Fatalf("one-byte %02x failed: %v", b, got)
+		if !bytes.Equal(got, secret) {
+			t.Fatalf("one symbol %04x failed: %x", s, got)
 		}
 	}
 }
 
-// TestChunkedRoundTrip covers the sizes where the chunking changes shape: side
-// of the chunk boundary, several whole chunks, and a part chunk at the end. A
-// chunk miscount would corrupt everything past the first chunk, so every K-sized
-// subset is checked rather than just the first one.
-func TestChunkedRoundTrip(t *testing.T) {
-	sizes := []int{
-		chunkBytes - 1, chunkBytes, chunkBytes + 1,
-		2*chunkBytes - 1, 2 * chunkBytes, 2*chunkBytes + 1,
-		3*chunkBytes + 12345,
+// TestOddSecretsAreRefused checks Split takes only whole symbols at a threshold
+// above one, rather than padding where Combine could not undo it, and that Fit
+// says how long to make the secret.
+func TestOddSecretsAreRefused(t *testing.T) {
+	if _, err := Split([]byte("odd"), 3, 2); err == nil {
+		t.Fatal("a secret of an odd length was shared")
+	}
+	if _, err := Split([]byte("odd"), 3, 1); err != nil {
+		t.Fatalf("a copy needs no whole symbols: %v", err)
+	}
+	for n, want := range map[int]int{1: 2, 2: 2, 3: 4, 100: 100} {
+		if got := Fit(n); got != want {
+			t.Fatalf("Fit(%d) = %d, want %d", n, got, want)
+		}
+	}
+}
+
+// TestRoundTripAcrossUnits covers the lengths where the work changes shape:
+// every tail a word can end with, and either side of the boundary between the
+// units the cores share. A miscounted tail or unit would corrupt what follows,
+// so every pair of shares is checked rather than just the first one.
+func TestRoundTripAcrossUnits(t *testing.T) {
+	sizes := []int{2, 4, 6, 8, 10, 14,
+		unitBytes - 2, unitBytes, unitBytes + 2,
+		2*unitBytes - 2, 2 * unitBytes, 2*unitBytes + 6,
+		3*unitBytes + 12346,
 	}
 	for _, size := range sizes {
 		secret := make([]byte, size)
@@ -136,10 +159,9 @@ func TestChunkedRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("size=%d: %v", size, err)
 		}
-		wantLen := size + (size+chunkBytes-1)/chunkBytes
 		for i, s := range shares {
-			if len(s) != wantLen {
-				t.Fatalf("size=%d share %d is %d bytes, want %d", size, i+1, len(s), wantLen)
+			if len(s) != size+2 {
+				t.Fatalf("size=%d share %d is %d bytes, want %d", size, i+1, len(s), size+2)
 			}
 		}
 		for i := 0; i < n; i++ {
@@ -156,25 +178,11 @@ func TestChunkedRoundTrip(t *testing.T) {
 	}
 }
 
-// TestChunkCountMatchesSplit checks the count Combine derives from a share
-// length against the count Split actually used, across the boundaries where an
-// off-by-one would show up.
-func TestChunkCountMatchesSplit(t *testing.T) {
-	for _, size := range []int{1, 2, 255, chunkBytes - 1, chunkBytes, chunkBytes + 1,
-		2 * chunkBytes, 2*chunkBytes + 1, 5 * chunkBytes, 5*chunkBytes + 7} {
-		want := (size + chunkBytes - 1) / chunkBytes
-		shareLen := size + want
-		if got := chunkCount(shareLen); got != want {
-			t.Fatalf("secret %d bytes: chunkCount(%d) = %d, want %d", size, shareLen, got, want)
-		}
-	}
-}
-
 // TestShareLenMatchesSplit checks the size helpers padding is computed from
-// against real shares, across the chunk boundaries, and that SecretLen undoes
-// ShareLen. A drift would put pieces off their size class.
+// against real shares, and that SecretLen undoes ShareLen. A drift would put
+// pieces off their size class.
 func TestShareLenMatchesSplit(t *testing.T) {
-	for _, size := range []int{1, 2, 255, chunkBytes - 1, chunkBytes, chunkBytes + 1, 2*chunkBytes + 1} {
+	for _, size := range []int{2, 4, 6, 254, unitBytes, unitBytes + 2} {
 		for _, k := range []int{1, 2} {
 			shares, err := Split(make([]byte, size), 2, k)
 			if err != nil {
@@ -188,23 +196,147 @@ func TestShareLenMatchesSplit(t *testing.T) {
 			}
 		}
 	}
-	// No secret has shares one byte past a full chunk's, so the answer falls short.
-	if got := SecretLen(chunkBytes+2, 2); ShareLen(got, 2) != chunkBytes+1 {
-		t.Fatalf("SecretLen(%d) = %d, whose shares are %d bytes", chunkBytes+2, got, ShareLen(got, 2))
+	// No secret Split takes has shares of an odd length, so the answer falls
+	// short; an odd secret is measured as Fit pads it.
+	if got := SecretLen(9, 2); got != 6 {
+		t.Fatalf("SecretLen(9, 2) = %d, want 6", got)
+	}
+	if got := ShareLen(7, 2); got != 10 {
+		t.Fatalf("ShareLen(7, 2) = %d, want 10", got)
 	}
 }
 
-// TestChunkedSharesMustAgreeInLength checks that shares of different lengths are
-// refused, since the chunk layout is read from the length.
-func TestChunkedSharesMustAgreeInLength(t *testing.T) {
-	secret := make([]byte, 3*chunkBytes)
+// TestSplitIntoWritesInPlace checks SplitInto writes every share into the buffer
+// it is given, leaving what is around it alone, and that they rebuild; and that a
+// buffer too short or too long is refused before anything is written.
+func TestSplitIntoWritesInPlace(t *testing.T) {
+	secret := make([]byte, unitBytes+6)
+	rand.Read(secret)
+	for _, k := range []int{1, 3} {
+		size := len(secret)
+		if k > 1 {
+			size += 2
+		}
+		bufs, dst := make([][]byte, 4), make([][]byte, 4)
+		for i := range bufs {
+			bufs[i] = bytes.Repeat([]byte{0xee}, size+10)
+			dst[i] = bufs[i][5 : 5+size]
+		}
+		if err := SplitInto(dst, secret, k, nil); err != nil {
+			t.Fatal(err)
+		}
+		for _, b := range bufs {
+			if !bytes.Equal(b[:5], []byte{0xee, 0xee, 0xee, 0xee, 0xee}) || !bytes.Equal(b[5+size:], b[:5]) {
+				t.Fatalf("k=%d: SplitInto wrote outside its share", k)
+			}
+		}
+		for _, use := range [][][]byte{dst[:k], dst[len(dst)-k:]} {
+			got, err := Combine(use, k)
+			if err != nil || !bytes.Equal(got, secret) {
+				t.Fatalf("k=%d: the shares did not rebuild the secret: %v", k, err)
+			}
+		}
+	}
+
+	for _, n := range []int{5, 7} {
+		dst := [][]byte{make([]byte, 6), make([]byte, n)}
+		if err := SplitInto(dst, []byte("abcd"), 2, nil); err == nil || !bytes.Equal(dst[0], make([]byte, 6)) {
+			t.Fatalf("a share buffer of %d bytes, not 6, was not refused first: %v", n, err)
+		}
+	}
+}
+
+// TestSharesMustAgreeInLength checks that shares of different lengths are
+// refused: they cannot be from one set.
+func TestSharesMustAgreeInLength(t *testing.T) {
+	secret := make([]byte, 3*unitBytes)
 	rand.Read(secret)
 	shares, err := Split(secret, 3, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	truncated := append([][]byte{}, shares[0], shares[1][:len(shares[1])-1])
+	truncated := append([][]byte{}, shares[0], shares[1][:len(shares[1])-2])
 	if _, err := Combine(truncated, 2); err == nil {
 		t.Fatal("shares of different lengths must be refused")
+	}
+}
+
+// TestCombineRefusesMalformedShares checks what cannot be a sharing is refused
+// rather than interpolated: a coordinate of zero, two shares at one coordinate,
+// and shares too short or of an odd length to hold symbols.
+func TestCombineRefusesMalformedShares(t *testing.T) {
+	shares, err := Split([]byte("abcd"), 3, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zero := append([]byte{0, 0}, shares[0][2:]...)
+	cases := map[string][][]byte{
+		"zero coordinate":  {zero, shares[1]},
+		"same coordinate":  {shares[0], shares[0]},
+		"too short":        {shares[0][:2], shares[1][:2]},
+		"odd length":       {shares[0][:5], shares[1][:5]},
+		"lengths disagree": {shares[0], shares[1][:4]},
+	}
+	for name, c := range cases {
+		if _, err := Combine(c, 2); err == nil {
+			t.Errorf("%s: combined", name)
+		}
+	}
+}
+
+// TestManyParts checks a set past the 255 an 8-bit field allows, with a short
+// secret so it stays quick: every one of 65535 shares has its own coordinate,
+// and any two rebuild; a threshold of a few hundred rebuilds from that many and
+// not one fewer.
+func TestManyParts(t *testing.T) {
+	secret := []byte("sixteen byte key")
+	shares, err := Split(secret, MaxParts, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := make([]bool, 1<<16)
+	for _, s := range shares {
+		x := binary.BigEndian.Uint16(s)
+		if seen[x] {
+			t.Fatalf("coordinate %d used twice", x)
+		}
+		seen[x] = true
+	}
+	for _, pair := range [][2]int{{0, MaxParts - 1}, {123, 45678}} {
+		got, err := Combine([][]byte{shares[pair[0]], shares[pair[1]]}, 2)
+		if err != nil || !bytes.Equal(got, secret) {
+			t.Fatalf("shares %v: %v", pair, err)
+		}
+	}
+
+	const n, k = 700, 300
+	shares, err = Split(secret, n, k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Combine(shares[n-k:], k)
+	if err != nil || !bytes.Equal(got, secret) {
+		t.Fatalf("%d of %d: %v", k, n, err)
+	}
+	if got, _ := Combine(shares[:k-1], k-1); bytes.Equal(got, secret) {
+		t.Fatalf("%d shares rebuilt a threshold of %d", k-1, k)
+	}
+}
+
+func BenchmarkSplit(b *testing.B) {
+	secret := make([]byte, 8<<20)
+	b.SetBytes(int64(len(secret)))
+	for b.Loop() {
+		if _, err := Split(secret, 5, 3); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// TestAnEmptyShareIsNotASecret checks a threshold of one, where the share is
+// the secret itself, refuses an empty share rather than rebuild nothing.
+func TestAnEmptyShareIsNotASecret(t *testing.T) {
+	if _, err := Combine([][]byte{{}}, 1); err == nil {
+		t.Fatal("an empty share was taken for a secret")
 	}
 }

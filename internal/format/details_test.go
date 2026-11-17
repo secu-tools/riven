@@ -112,3 +112,30 @@ func TestEncodeDetailsRejectsBadInput(t *testing.T) {
 		t.Fatal("an over-long name was accepted")
 	}
 }
+
+// TestDetailsBehindAGoodHashAreStillChecked checks the fields behind the
+// closing hash. The hash only says the bytes are the ones that were hashed, and
+// whoever wrote a piece wrote its hash too, so a field no writer of this format
+// would set is refused however well it is hashed.
+func TestDetailsBehindAGoodHashAreStillChecked(t *testing.T) {
+	good, err := EncodeDetails(sampleDetails())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := good[:len(good)-hashLen]
+	// Body: flags, k (2 bytes), n (2), cost, the layer count, the layers, the
+	// texts, then zeros to the padding step.
+	for name, change := range map[string]func(b []byte){
+		"unknown flag":        func(b []byte) { b[0] |= ^uint8(detailFlags) },
+		"threshold of zero":   func(b []byte) { b[1], b[2] = 0, 0 },
+		"fewer pieces than k": func(b []byte) { b[3], b[4] = 0, 1 },
+		"layers past the end": func(b []byte) { b[6] = 255 },
+		"padding not zero":    func(b []byte) { b[len(b)-1] = 1 },
+	} {
+		b := append([]byte(nil), body...)
+		change(b)
+		if _, ok := DecodeDetails(append(b, detailsHash(b)...)); ok {
+			t.Errorf("%s: read as details", name)
+		}
+	}
+}

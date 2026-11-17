@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/secu-tools/riven/internal/ciphers"
@@ -691,5 +692,42 @@ func TestKEMCiphertextSizeShowsInPieces(t *testing.T) {
 	// Padding varies, so allow slack while confirming the growth is real.
 	if grew < want-64 || grew > want+256 {
 		t.Fatalf("piece grew by %d bytes, expected about %d", grew, want)
+	}
+}
+
+// TestReleasePiecesDropsTheFilesBeforeTheRebuild checks a combine given the
+// pieces to keep wipes and drops every one of them, the one it set aside as
+// damaged too, and still rebuilds; and that without being given them it leaves
+// them as they were.
+func TestReleasePiecesDropsTheFilesBeforeTheRebuild(t *testing.T) {
+	input := []byte("released before the rebuild")
+	pieces, err := Split(input, SplitOptions{N: 3, K: 2, Keyless: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pieces[2][len(pieces[2])-1] ^= 1 // damaged, so it never opens
+
+	kept := [][]byte{bytes.Clone(pieces[0]), bytes.Clone(pieces[1]), bytes.Clone(pieces[2])}
+	if got, err := Combine(kept, OpenOptions{}); err != nil || !bytes.Equal(got, input) {
+		t.Fatalf("combine: %q, %v", got, err)
+	}
+	for i := range kept {
+		if !bytes.Equal(kept[i], pieces[i]) {
+			t.Fatalf("piece %d changed although it was not handed over", i+1)
+		}
+	}
+
+	held := slices.Clone(pieces)
+	got, err := Combine(pieces, OpenOptions{ReleasePieces: true})
+	if err != nil || !bytes.Equal(got, input) {
+		t.Fatalf("combine releasing the pieces: %q, %v", got, err)
+	}
+	for i := range pieces {
+		if pieces[i] != nil {
+			t.Fatalf("piece %d was kept", i+1)
+		}
+		if !bytes.Equal(held[i], make([]byte, len(held[i]))) {
+			t.Fatalf("piece %d was dropped without being wiped", i+1)
+		}
 	}
 }

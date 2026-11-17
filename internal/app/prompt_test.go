@@ -5,10 +5,8 @@ package app
 
 import (
 	"bufio"
-	"bytes"
 	"errors"
 	"io"
-	"os"
 	"strings"
 	"testing"
 )
@@ -18,28 +16,10 @@ import (
 // terminal.
 func withInput(t *testing.T, answers string, fn func()) string {
 	t.Helper()
-	oldStdin, oldStdout := stdin, os.Stdout
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout = w
+	old := stdin
 	stdin = bufio.NewReader(strings.NewReader(answers))
-	done := make(chan string)
-	go func() {
-		var buf bytes.Buffer
-		io.Copy(&buf, r)
-		done <- buf.String()
-	}()
-
-	defer func() {
-		stdin, os.Stdout = oldStdin, oldStdout
-	}()
-	fn()
-	w.Close()
-	out := <-done
-	r.Close()
-	return out
+	defer func() { stdin = old }()
+	return capture(t, fn)
 }
 
 // TestReadLineTakesTheDefaultOnEnter is the wizard's central promise: pressing
@@ -219,5 +199,35 @@ func TestReadPasswordFromNonTerminal(t *testing.T) {
 	}
 	if strings.Contains(out, "hunter2") {
 		t.Fatalf("the password must not be echoed: %q", out)
+	}
+}
+
+// TestMaskedReadingFollowsTheKeys scripts the keystrokes a terminal sends while
+// a password is typed: each byte kept echoes a star, Backspace takes one back
+// and wipes it from the screen, control bytes are dropped, and Enter ends it.
+func TestMaskedReadingFollowsTheKeys(t *testing.T) {
+	var echo strings.Builder
+	// Backspace on nothing, "ab", Backspace, a control byte, "c", Delete, "d", Enter.
+	got, err := readMasked(strings.NewReader("\x7fab\b\x01c\x7fd\r"), &echo)
+	if err != nil || string(got) != "ad" {
+		t.Fatalf("read %q, %v", got, err)
+	}
+	if want := "**\b \b*\b \b*\r\n"; echo.String() != want {
+		t.Fatalf("echoed %q, want %q", echo.String(), want)
+	}
+	if got, err := readMasked(strings.NewReader("\n"), io.Discard); err != nil || len(got) != 0 {
+		t.Fatalf("Enter alone gave %q, %v", got, err)
+	}
+}
+
+// TestMaskedReadingCancels checks every way out short of Enter cancels the
+// question rather than handing back what was typed so far.
+func TestMaskedReadingCancels(t *testing.T) {
+	for name, keys := range map[string]string{
+		"Ctrl-C": "secret\x03", "Ctrl-D": "secret\x04", "Escape": "secret\x1b", "input ends": "secret",
+	} {
+		if got, err := readMasked(strings.NewReader(keys), io.Discard); !errors.Is(err, errAborted) || got != nil {
+			t.Errorf("%s: read %q, %v", name, got, err)
+		}
 	}
 }

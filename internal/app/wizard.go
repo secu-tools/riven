@@ -4,6 +4,7 @@
 package app
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -20,6 +21,13 @@ import (
 
 const defaultQRScale = 8
 
+// defaultN and defaultK are the piece count and threshold of a split that names
+// neither; the threshold is lowered to a smaller count.
+const (
+	defaultN = 5
+	defaultK = 3
+)
+
 // splitPlan is the fully resolved configuration for one split.
 type splitPlan struct {
 	opts            core.SplitOptions
@@ -29,7 +37,17 @@ type splitPlan struct {
 	outDir          string
 	generated       [][]byte
 	qrScale         int
-	pieceSizes      []int // each piece's length once written, for the summary's notes
+	pieceSize       int                 // the length of a piece once written; every piece of a set is the same
+	pieceSums       [][sha256.Size]byte // each piece's digest for a full check; nil without one
+}
+
+// addPasswordLayer adds a password layer, and keeps its password to verify the
+// split with: the two lists stay in step.
+func (p *splitPlan) addPasswordLayer(schemeID uint8, pw []byte) {
+	p.opts.Layers = append(p.opts.Layers, core.LayerSpec{
+		Kind: core.PasswordLayer, SchemeID: schemeID, Password: pw,
+	})
+	p.verifyPasswords = append(p.verifyPasswords, pw)
 }
 
 // secrets names what reads a protected set's details: every password and every
@@ -122,19 +140,18 @@ func planSplit(opts *cliOptions, defaultDir string) (*splitPlan, error) {
 		return nil, err
 	}
 
-	if err := planIdentities(plan, opts); err != nil {
+	// The private keys given with --identity let the split be verified end to
+	// end, rather than only as far as the pieces opening.
+	keys, err := resolveOpenKeys(opts)
+	if err != nil {
 		return nil, err
 	}
+	plan.privateKeys = keys
 	if err := planProtection(plan, opts, interactive); err != nil {
 		return nil, err
 	}
-	if plan.opts.Info == core.InfoHidden && plan.opts.K == 1 {
-		return nil, errors.New("--info none needs -k 2 or more: with -k 1 every piece is the whole set, " +
-			"so its details cannot be hidden from whoever holds one")
-	}
-	if _, err := core.EffectiveInfo(plan.opts); err != nil {
-		return nil, fmt.Errorf("--info %s needs a password or a recipient key: add --password-env or "+
-			"--recipient, or use --info public or --info none", plan.opts.Info)
+	if err := checkInfo(plan); err != nil {
+		return nil, err
 	}
 
 	// Resolve the algorithms once, so the summary and the verification step agree
@@ -153,27 +170,39 @@ func planSplit(opts *cliOptions, defaultDir string) (*splitPlan, error) {
 	return plan, nil
 }
 
+// checkInfo refuses an --info mode the set cannot have, in the command line's
+// terms. core decides which those are.
+func checkInfo(plan *splitPlan) error {
+	_, err := core.EffectiveInfo(plan.opts)
+	switch {
+	case errors.Is(err, core.ErrInfoNeedsThreshold):
+		return errors.New("--info none needs -k 2 or more: with -k 1 every piece is the whole set, " +
+			"so its details cannot be hidden from whoever holds one")
+	case errors.Is(err, core.ErrInfoNeedsSecret):
+		return fmt.Errorf("--info %s needs a password or a recipient key: add --password-env or "+
+			"--recipient, or use --info public or --info none", plan.opts.Info)
+	}
+	return err
+}
+
 // planCounts resolves how many pieces to write and how many are needed, asking
 // when the run is interactive and nothing settled it.
 func planCounts(plan *splitPlan, opts *cliOptions, interactive bool) error {
-	n := 5
+	n := defaultN
 	if opts.nSet {
 		n = opts.n
 	} else if interactive {
-		v, err := readInt("Total pieces to create (N)", n, 1, 255)
+		v, err := readInt("Total pieces to create (N)", n, 1, core.MaxPieces)
 		if err != nil {
 			return err
 		}
 		n = v
 	}
-	if n < 1 || n > 255 {
-		return fmt.Errorf("total pieces N=%d must be between 1 and 255", n)
+	if n < 1 || n > core.MaxPieces {
+		return fmt.Errorf("total pieces N=%d must be between 1 and %d", n, core.MaxPieces)
 	}
 
-	defK := 3
-	if defK > n {
-		defK = n
-	}
+	defK := min(defaultK, n)
 	k := defK
 	if opts.kSet {
 		k = opts.k
@@ -232,19 +261,6 @@ func planDefaults(plan *splitPlan, opts *cliOptions) error {
 			return err
 		}
 		plan.opts.Info = info
-	}
-	return nil
-}
-
-// planIdentities loads the private keys given with --identity, so a split can be
-// verified end to end rather than only as far as the pieces opening.
-func planIdentities(plan *splitPlan, opts *cliOptions) error {
-	for _, path := range opts.identities {
-		key, err := readPrivateKey(path)
-		if err != nil {
-			return err
-		}
-		plan.privateKeys = append(plan.privateKeys, key)
 	}
 	return nil
 }
@@ -308,7 +324,7 @@ func resolveMode(opts *cliOptions, interactive bool) (securityMode, error) {
 	}
 	advancedFromFlags := opts.algoSet || opts.kdfSpec != "" || opts.recordAlgoSet ||
 		opts.recordKDFSet || opts.recordNameSet || opts.padSet || opts.methodSet || opts.infoSet ||
-		len(opts.layerSources) > 1 || countRecipientSources(opts) > 0
+		len(opts.layerSources) > 1 || hasRecipientSource(opts)
 	if advancedFromFlags {
 		return modeAdvanced, nil
 	}
@@ -341,14 +357,11 @@ func resolveMode(opts *cliOptions, interactive bool) (securityMode, error) {
 	}
 }
 
-func countRecipientSources(opts *cliOptions) int {
-	n := 0
-	for _, s := range opts.layerSources {
-		if s.kind == core.RecipientLayer {
-			n++
-		}
-	}
-	return n
+// hasRecipientSource reports whether --recipient was given.
+func hasRecipientSource(opts *cliOptions) bool {
+	return slices.ContainsFunc(opts.layerSources, func(s layerSource) bool {
+		return s.kind == core.RecipientLayer
+	})
 }
 
 // planLayers builds the cascade. Flags win when present; otherwise the wizard
@@ -361,23 +374,21 @@ func planLayers(plan *splitPlan, opts *cliOptions, interactive, advanced bool) e
 
 	switch {
 	case len(opts.layerSources) > 0:
-		if len(algos) > len(opts.layerSources) {
-			return fmt.Errorf("--algo names %d algorithms but only %d layers were given; add more --password-env or --recipient flags",
-				len(algos), len(opts.layerSources))
+		// validateSplitOptions rejects this earlier; the check is repeated so an
+		// algorithm is never dropped without a word when this is called on its own.
+		if err := checkAlgoCount(len(algos), len(opts.layerSources)); err != nil {
+			return err
 		}
 		return layersFromSources(plan, opts, algos)
 
 	case len(algos) > 0:
 		// Algorithms alone imply that many password layers.
 		for i, id := range algos {
-			pw, err := passwordForLayer(plan, opts, interactive, i, plan.verifyPasswords)
+			pw, err := passwordForLayer(plan, opts, interactive, i)
 			if err != nil {
 				return err
 			}
-			plan.opts.Layers = append(plan.opts.Layers, core.LayerSpec{
-				Kind: core.PasswordLayer, SchemeID: id, Password: pw,
-			})
-			plan.verifyPasswords = append(plan.verifyPasswords, pw)
+			plan.addPasswordLayer(id, pw)
 		}
 		return nil
 
@@ -386,14 +397,11 @@ func planLayers(plan *splitPlan, opts *cliOptions, interactive, advanced bool) e
 
 	default:
 		// One password layer with the default algorithm.
-		pw, err := passwordForLayer(plan, opts, interactive, 0, nil)
+		pw, err := passwordForLayer(plan, opts, interactive, 0)
 		if err != nil {
 			return err
 		}
-		plan.opts.Layers = []core.LayerSpec{{
-			Kind: core.PasswordLayer, SchemeID: ciphers.Default().ID, Password: pw,
-		}}
-		plan.verifyPasswords = [][]byte{pw}
+		plan.addPasswordLayer(ciphers.Default().ID, pw)
 		if interactive {
 			writeWrapped(os.Stdout, "  ", fmt.Sprintf("one password layer: %s, %s",
 				ciphers.Default().Name, plan.opts.Params.Describe()))
@@ -427,10 +435,7 @@ func layersFromSources(plan *splitPlan, opts *cliOptions, algos []uint8) error {
 			if !isDistinct(pw, plan.verifyPasswords) {
 				return fmt.Errorf("layer %d: %w", i+1, errPasswordReused)
 			}
-			plan.opts.Layers = append(plan.opts.Layers, core.LayerSpec{
-				Kind: core.PasswordLayer, SchemeID: id, Password: pw,
-			})
-			plan.verifyPasswords = append(plan.verifyPasswords, pw)
+			plan.addPasswordLayer(id, pw)
 		}
 	}
 	return nil
@@ -465,14 +470,11 @@ func layersInteractive(plan *splitPlan, opts *cliOptions) error {
 				Kind: core.RecipientLayer, SchemeID: sid, Recipient: pub,
 			})
 		} else {
-			pw, err := choosePassword(i+1, plan.verifyPasswords, plan)
+			pw, err := choosePassword(i+1, plan)
 			if err != nil {
 				return err
 			}
-			plan.opts.Layers = append(plan.opts.Layers, core.LayerSpec{
-				Kind: core.PasswordLayer, SchemeID: sid, Password: pw,
-			})
-			plan.verifyPasswords = append(plan.verifyPasswords, pw)
+			plan.addPasswordLayer(sid, pw)
 		}
 
 		more, err := confirm("Add another layer?", false)
@@ -514,15 +516,7 @@ func recipientForLayer(plan *splitPlan, opts *cliOptions) (*kem.PublicKey, error
 	pubPath, privPath := keyPaths("", base, "", "")
 	// The default base name is keygen's too, so this aims at an existing pair as
 	// readily as a second keygen does, and is refused the same way.
-	for _, p := range []string{pubPath, privPath} {
-		if err := refuseKeyOverwrite(opts, p); err != nil {
-			return nil, err
-		}
-	}
-	if err := writePublicKey(pubPath, priv.Public()); err != nil {
-		return nil, err
-	}
-	if err := writePrivateKey(privPath, priv); err != nil {
+	if err := writeKeyPair(opts, priv, pubPath, privPath); err != nil {
 		return nil, err
 	}
 	fmt.Printf("  wrote %s (share this) and %s (keep secret)\n", pubPath, privPath)
@@ -790,16 +784,17 @@ func parseInfo(spec string) (core.InfoMode, error) {
 }
 
 // passwordForLayer resolves the password for a layer that has no explicit source.
-func passwordForLayer(plan *splitPlan, opts *cliOptions, interactive bool, i int, prior [][]byte) ([]byte, error) {
+func passwordForLayer(plan *splitPlan, opts *cliOptions, interactive bool, i int) ([]byte, error) {
 	if opts.generate || !interactive {
 		return generateAndRecord(plan, fmt.Sprintf("layer %d", i+1))
 	}
-	return choosePassword(i+1, prior, plan)
+	return choosePassword(i+1, plan)
 }
 
 // choosePassword prompts for the password of a layer, counted from 1; empty
-// input generates a strong one.
-func choosePassword(layer int, prior [][]byte, plan *splitPlan) ([]byte, error) {
+// input generates a strong one. A password an earlier layer of plan already has
+// is refused.
+func choosePassword(layer int, plan *splitPlan) ([]byte, error) {
 	for {
 		pw, err := readPasswordMasked(fmt.Sprintf("Password for layer %d (press Enter to generate): ", layer))
 		if err != nil {
@@ -808,7 +803,7 @@ func choosePassword(layer int, prior [][]byte, plan *splitPlan) ([]byte, error) 
 		if len(pw) == 0 {
 			return generateAndRecord(plan, fmt.Sprintf("layer %d", layer))
 		}
-		if !isDistinct(pw, prior) {
+		if !isDistinct(pw, plan.verifyPasswords) {
 			fmt.Println("  that password was already used; choose a different one")
 			continue
 		}
@@ -983,7 +978,7 @@ func resolveFormats(opts *cliOptions, plan *splitPlan, pieceSize int) ([]pieceio
 		if err != nil {
 			return nil, err
 		}
-		return formats, checkFormatsFit(plan, formats, pieceSize, plan.opts.N)
+		return formats, checkFormatsFit(plan, formats, pieceSize)
 	}
 	if !interactive {
 		return []pieceio.Format{pieceio.Binary}, nil
@@ -1007,7 +1002,7 @@ func resolveFormats(opts *cliOptions, plan *splitPlan, pieceSize int) ([]pieceio
 			writeWrapped(os.Stdout, "  ", err.Error())
 			continue
 		}
-		if err := checkFormatsFit(plan, formats, pieceSize, plan.opts.N); err != nil {
+		if err := checkFormatsFit(plan, formats, pieceSize); err != nil {
 			writeWrapped(os.Stdout, "  ", err.Error())
 			continue
 		}
@@ -1044,7 +1039,8 @@ func resolveFormatAnswer(answer string, all []pieceio.Format) ([]pieceio.Format,
 // checkFormatsFit refuses a choice the pieces are too large for, before any file
 // is written. Failing halfway through an export would leave a set that is
 // complete in one format and partial in another.
-func checkFormatsFit(plan *splitPlan, formats []pieceio.Format, pieceSize, count int) error {
+func checkFormatsFit(plan *splitPlan, formats []pieceio.Format, pieceSize int) error {
+	count := plan.opts.N
 	if err := checkQRFeasible(plan, formats, pieceSize, count); err != nil {
 		return err
 	}

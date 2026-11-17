@@ -45,7 +45,7 @@ const (
 
 // SheetPages estimates how many printed pages a piece takes, always at least one.
 func SheetPages(pieceLen int) int {
-	chars := len(base32.StdEncoding.EncodeToString(make([]byte, pieceLen+checksumLen)))
+	chars := base32.StdEncoding.EncodedLen(pieceLen + checksumLen)
 	lines := (chars + sheetCharsPerLine - 1) / sheetCharsPerLine
 	pages := (lines + sheetLinesPerPage - 1) / sheetLinesPerPage
 	if pages < 1 {
@@ -76,26 +76,24 @@ var errSheetTooLarge = errors.New("this piece would take more printed pages than
 //
 // A piece too large for a QR code still gets a sheet, with the text alone. A
 // piece too large to print sensibly does not: see SheetMaxPages.
-func EncodeSheet(piece []byte, info SheetInfo, qrScale int) ([]byte, string, error) {
+func EncodeSheet(piece []byte, info SheetInfo, qrScale int) ([]byte, error) {
 	if len(piece) > SheetMaxPiece {
-		return nil, "", errSheetTooLarge
+		return nil, errSheetTooLarge
 	}
 	text := groupBase32(base32.StdEncoding.EncodeToString(withChecksum(piece)))
 	pages := SheetPages(len(piece))
 
-	var qrTag, note string
+	var qrTag string
 	if QRFits(len(piece)) {
-		png, level, err := qrcode.Encode(piece, qrScale)
+		png, _, err := qrcode.Encode(piece, qrScale)
 		if err != nil {
-			return nil, "", err
+			return nil, err
 		}
-		qrTag = fmt.Sprintf(`<img alt="%s" src="data:image/png;base64,%s">`,
-			info.which(), base64.StdEncoding.EncodeToString(png))
-		note = fmt.Sprintf("error correction %s (~%d%% recoverable)", level.Name, level.Recovery)
+		qrTag = fmt.Sprintf(`<img alt="%s" src="%s%s">`,
+			info.which(), sheetQRSource, base64.StdEncoding.EncodeToString(png))
 	} else {
 		qrTag = fmt.Sprintf(`<p class="none">This piece is %d bytes, too large for a QR code. `+
 			`The text below carries it instead.</p>`, len(piece))
-		note = "too large for a QR code; text only"
 	}
 
 	// A sheet that runs to several pages has to say so on every page, or a lost
@@ -105,7 +103,6 @@ func EncodeSheet(piece []byte, info SheetInfo, qrScale int) ([]byte, string, err
 		pageNote = fmt.Sprintf(
 			`<p class="warn">This piece is about %d printed pages. Keep them together and in order: `+
 				`the text is one continuous block and every page of it is needed.</p>`, pages)
-		note += fmt.Sprintf("; about %d pages per piece", pages)
 	}
 
 	name := info.Name
@@ -134,7 +131,7 @@ func EncodeSheet(piece []byte, info SheetInfo, qrScale int) ([]byte, string, err
 		"{{TEXT}}", html.EscapeString(text),
 	).Replace(sheetTemplate)
 
-	return []byte(page), note, nil
+	return []byte(page), nil
 }
 
 // which names the piece as the page does: "piece 2 of 5", or just "piece" when
@@ -144,6 +141,29 @@ func (info SheetInfo) which() string {
 		return "piece"
 	}
 	return fmt.Sprintf("piece %d of %d", info.Serial, info.Total)
+}
+
+// sheetQRSource starts the image source a sheet embeds its QR code in, as a PNG.
+const sheetQRSource = "data:image/png;base64,"
+
+// sheetQR returns the PNG of the QR code a saved sheet embeds, or false when it
+// has none, as a piece too large for a code is printed as text alone.
+func sheetQR(raw []byte) ([]byte, bool) {
+	open := []byte(`src="` + sheetQRSource)
+	i := bytes.Index(raw, open)
+	if i < 0 {
+		return nil, false
+	}
+	rest := raw[i+len(open):]
+	end := bytes.IndexByte(rest, '"')
+	if end < 0 {
+		return nil, false
+	}
+	png, err := base64.StdEncoding.DecodeString(string(rest[:end]))
+	if err != nil {
+		return nil, false
+	}
+	return png, true
 }
 
 // sheetBody extracts the piece text from a saved sheet. It returns false when

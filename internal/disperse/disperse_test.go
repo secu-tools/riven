@@ -6,6 +6,7 @@ package disperse
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/binary"
 	mathrand "math/rand/v2"
 	"strconv"
 	"testing"
@@ -35,27 +36,15 @@ func randomData(t *testing.T, n int) []byte {
 	return b
 }
 
-// TestFieldTables checks every product and inverse against shift-and-add, so the
-// tables cannot drift from the field docs/format.md names.
-func TestFieldTables(t *testing.T) {
-	for a := 0; a < 256; a++ {
-		for b := 0; b < 256; b++ {
-			if got, want := mulTable[a][b], slowMul(byte(a), byte(b)); got != want {
-				t.Fatalf("%d * %d = %d, want %d", a, b, got, want)
-			}
-		}
-		if a != 0 && slowMul(byte(a), inverse(byte(a))) != 1 {
-			t.Fatalf("inverse(%d) is wrong", a)
-		}
-	}
-}
+// coordinate returns a fragment's x-coordinate.
+func coordinate(f []byte) uint16 { return binary.BigEndian.Uint16(f) }
 
 // TestEveryThresholdSubsetRebuilds covers the promise the format makes: any k
 // fragments, in any order, rebuild the data, for every k of n up to 6.
 func TestEveryThresholdSubsetRebuilds(t *testing.T) {
 	for n := 1; n <= 6; n++ {
 		for k := 1; k <= n; k++ {
-			data := randomData(t, 7*k)
+			data := randomData(t, 7*GroupLen(k))
 			frags, err := split(data, n, k)
 			if err != nil {
 				t.Fatalf("n=%d k=%d: %v", n, k, err)
@@ -82,10 +71,12 @@ func TestEveryThresholdSubsetRebuilds(t *testing.T) {
 	}
 }
 
-// TestLargeThresholds covers the top of the range, where the matrix is largest.
+// TestLargeThresholds covers thresholds past the 255 an 8-bit field allows, where
+// the basis is largest and, past 1024, is made in batches.
 func TestLargeThresholds(t *testing.T) {
-	for _, c := range []struct{ n, k int }{{255, 255}, {255, 128}, {200, 2}, {255, 1}} {
-		data := randomData(t, c.k*3)
+	for _, c := range []struct{ n, k int }{{255, 255}, {300, 256}, {255, 2}, {255, 1},
+		{1500, 1500}, {MaxFragments, 3}} {
+		data := randomData(t, GroupLen(c.k)*3)
 		frags, err := split(data, c.n, c.k)
 		if err != nil {
 			t.Fatalf("n=%d k=%d: %v", c.n, c.k, err)
@@ -105,7 +96,7 @@ func TestLargeThresholds(t *testing.T) {
 // is asked, so a split can compute each as its piece is written, and that any k
 // of its fragments rebuild the data.
 func TestFragmentsOnDemand(t *testing.T) {
-	data := randomData(t, (blockGroups+5)*4)
+	data := randomData(t, (blockWork/4+5)*GroupLen(4))
 	d, err := New(data, 6, 4)
 	if err != nil {
 		t.Fatal(err)
@@ -130,7 +121,7 @@ func TestFragmentsOnDemand(t *testing.T) {
 // the wrong offsets would show.
 func TestManyBlocks(t *testing.T) {
 	const k = 3
-	data := randomData(t, (2*blockGroups+17)*k)
+	data := randomData(t, (2*blockWork/k+17)*GroupLen(k))
 	frags, err := split(data, 5, k)
 	if err != nil {
 		t.Fatal(err)
@@ -148,23 +139,24 @@ func TestManyBlocks(t *testing.T) {
 // it is: coordinates differ within a set and change from one dispersal to the next.
 func TestCoordinatesAreDistinctAndRandom(t *testing.T) {
 	data := randomData(t, 8)
-	first := map[byte]bool{}
+	var first uint16
 	changed := false
-	for run := 0; run < 20; run++ {
-		frags, err := split(data, 255, 2)
+	for run := 0; run < 5; run++ {
+		frags, err := split(data, MaxFragments, 2)
 		if err != nil {
 			t.Fatal(err)
 		}
-		seen := map[byte]bool{}
+		seen := make([]bool, 1<<16)
 		for i, f := range frags {
-			if f[0] == 0 || seen[f[0]] {
-				t.Fatalf("run %d: fragment %d has coordinate %d, zero or repeated", run, i, f[0])
+			if x := coordinate(f); x == 0 || seen[x] {
+				t.Fatalf("run %d: fragment %d has coordinate %d, zero or repeated", run, i, x)
+			} else {
+				seen[x] = true
 			}
-			seen[f[0]] = true
 		}
 		if run == 0 {
-			first[frags[0][0]] = true
-		} else if !first[frags[0][0]] {
+			first = coordinate(frags[0])
+		} else if coordinate(frags[0]) != first {
 			changed = true
 		}
 	}
@@ -177,7 +169,7 @@ func TestCoordinatesAreDistinctAndRandom(t *testing.T) {
 // that padding them out with a forged fragment gives wrong bytes rather than the
 // data, which is why the caller authenticates the result.
 func TestFewerThanThresholdDoesNotRebuild(t *testing.T) {
-	data := randomData(t, 30)
+	data := randomData(t, 5*GroupLen(3))
 	frags, err := split(data, 5, 3)
 	if err != nil {
 		t.Fatal(err)
@@ -185,7 +177,7 @@ func TestFewerThanThresholdDoesNotRebuild(t *testing.T) {
 	if _, err := Combine(frags[:2], 3); err != ErrTooFew {
 		t.Fatalf("two of three fragments: got %v, want ErrTooFew", err)
 	}
-	forged := append([]byte{frags[2][0]}, randomData(t, len(frags[2])-1)...)
+	forged := append(frags[2][:2:2], randomData(t, len(frags[2])-2)...)
 	got, err := Combine([][]byte{frags[0], frags[1], forged}, 3)
 	if err != nil {
 		t.Fatal(err)
@@ -201,11 +193,12 @@ func TestSplitRejectsBadParameters(t *testing.T) {
 		dataLen int
 		n, k    int
 	}{
-		{"zero threshold", 6, 3, 0},
-		{"threshold above parts", 6, 2, 3},
-		{"too many parts", 6, 256, 2},
+		{"zero threshold", 12, 3, 0},
+		{"threshold above parts", 12, 2, 3},
+		{"too many parts", 12, MaxFragments + 1, 2},
 		{"empty data", 0, 3, 2},
-		{"length not a multiple", 7, 3, 2},
+		{"length not a multiple", 6, 3, 2},
+		{"odd length", 3, 3, 1},
 	}
 	for _, c := range cases {
 		if _, err := split(make([]byte, c.dataLen), c.n, c.k); err == nil {
@@ -214,19 +207,48 @@ func TestSplitRejectsBadParameters(t *testing.T) {
 	}
 }
 
+// TestFragmentToWantsItsExactLength checks a destination of the wrong length is
+// refused outright. A short one would fail somewhere inside a worker, and a
+// long one would come back with its end unwritten, to be sealed into a piece as
+// if it were fragment.
+func TestFragmentToWantsItsExactLength(t *testing.T) {
+	data := randomData(t, 3*GroupLen(2))
+	d, err := New(data, 4, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := FragmentLen(len(data), 2)
+	exact := make([]byte, want)
+	d.FragmentTo(exact, 1)
+	if !bytes.Equal(exact, d.Fragment(1)) {
+		t.Fatal("FragmentTo and Fragment disagree")
+	}
+	for _, n := range []int{0, want - 1, want + 1, 2 * want} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("a destination of %d bytes was taken for a fragment of %d", n, want)
+				}
+			}()
+			d.FragmentTo(make([]byte, n), 1)
+		}()
+	}
+}
+
 func TestCombineRejectsMalformedFragments(t *testing.T) {
-	data := randomData(t, 12)
+	data := randomData(t, 3*GroupLen(2))
 	frags, err := split(data, 4, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	short := frags[1][:len(frags[1])-1]
-	zero := append([]byte{0}, frags[1][1:]...)
+	short := frags[1][:len(frags[1])-2]
+	zero := append([]byte{0, 0}, frags[1][2:]...)
 	cases := map[string][][]byte{
 		"different lengths":  {frags[0], short},
 		"repeated fragment":  {frags[0], frags[0]},
 		"coordinate zero":    {frags[0], zero},
-		"coordinate only":    {frags[0][:1], frags[1][:1]},
+		"coordinate only":    {frags[0][:2], frags[1][:2]},
+		"odd length":         {frags[0][:5], frags[1][:5]},
 		"no fragments at k1": {},
 	}
 	for name, use := range cases {
@@ -246,13 +268,13 @@ func TestCombineRejectsMalformedFragments(t *testing.T) {
 // TestThresholdOneIsACopy pins the degenerate case: with k of 1 every fragment is
 // the data itself behind its coordinate.
 func TestThresholdOneIsACopy(t *testing.T) {
-	data := randomData(t, 9)
+	data := randomData(t, 10)
 	frags, err := split(data, 3, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i, f := range frags {
-		if !bytes.Equal(f[1:], data) {
+		if !bytes.Equal(f[2:], data) {
 			t.Fatalf("fragment %d is not a copy of the data", i)
 		}
 	}
@@ -262,12 +284,12 @@ func TestThresholdOneIsACopy(t *testing.T) {
 // all-zero data disperses to all-zero fragments, so the mix is linear and a
 // fragment says something about the data it came from.
 func TestDispersalHidesNothingOnItsOwn(t *testing.T) {
-	frags, err := split(make([]byte, 30), 4, 3)
+	frags, err := split(make([]byte, 5*GroupLen(3)), 4, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i, f := range frags {
-		if !bytes.Equal(f[1:], make([]byte, 10)) {
+		if !bytes.Equal(f[2:], make([]byte, 10)) {
 			t.Fatalf("fragment %d of zeros is not zeros: dispersal is meant to be linear", i)
 		}
 	}
@@ -279,7 +301,7 @@ func FuzzCombine(f *testing.F) {
 		if k == 0 || n < k || len(data) == 0 {
 			return
 		}
-		data = data[:len(data)-len(data)%int(k)]
+		data = data[:len(data)-len(data)%GroupLen(int(k))]
 		if len(data) == 0 {
 			return
 		}
@@ -301,7 +323,7 @@ func FuzzCombine(f *testing.F) {
 // at a wide one, which is where the inner loop matters.
 func BenchmarkCombine(b *testing.B) {
 	for _, k := range []int{3, 10} {
-		data := make([]byte, 64<<20/k*k)
+		data := make([]byte, 64<<20/GroupLen(k)*GroupLen(k))
 		if _, err := rand.Read(data); err != nil {
 			b.Fatal(err)
 		}

@@ -22,8 +22,8 @@ import (
 // passwords from the environment, the KDF parameters and schemes, the recipient
 // private keys, and the callbacks that ask for what a set turns out to need,
 // assembled into a core.OpenOptions. The returned cleanup wipes every password
-// it holds; the caller still owns the pieces.
-func resolveOpenCredentials(opts *cliOptions, pieces [][]byte) (core.OpenOptions, func(), error) {
+// it holds.
+func resolveOpenCredentials(opts *cliOptions) (core.OpenOptions, func(), error) {
 	pws, err := gatherOpenPasswords(opts)
 	if err != nil {
 		return core.OpenOptions{}, nil, err
@@ -45,6 +45,7 @@ func resolveOpenCredentials(opts *cliOptions, pieces [][]byte) (core.OpenOptions
 		AskParams:         p.askParams,
 		AskSchemes:        p.askSchemes,
 		BeforeDerive:      noteCost,
+		Progress:          progress,
 	}
 	if len(pws) == 0 {
 		open.AskPasswords = p.layerPasswords
@@ -54,14 +55,16 @@ func resolveOpenCredentials(opts *cliOptions, pieces [][]byte) (core.OpenOptions
 
 // combinePieces rebuilds a set, asking for whatever it turns out to need, and
 // returns the content and the file name the pieces recorded. damaged, when set,
-// is told about each piece set aside as damaged.
+// is told about each piece set aside as damaged. It takes over pieces, which are
+// released once they have opened, before the rebuild.
 func combinePieces(opts *cliOptions, pieces [][]byte, damaged func(int, error)) ([]byte, string, error) {
-	open, wipe, err := resolveOpenCredentials(opts, pieces)
+	open, wipe, err := resolveOpenCredentials(opts)
 	if err != nil {
 		return nil, "", err
 	}
 	defer wipe()
 	open.Damaged = damaged
+	open.ReleasePieces = true
 	return core.CombineFile(pieces, open)
 }
 

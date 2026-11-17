@@ -211,3 +211,16 @@ func TestParseRefusesNumbersThatWouldWrap(t *testing.T) {
 		}
 	}
 }
+
+// TestParseSkipsEmptyFieldsAndNamesBadOnes checks a stray comma is passed over,
+// as a user is likely to type one, while a field that is not key=value is
+// named rather than ignored.
+func TestParseSkipsEmptyFieldsAndNamesBadOnes(t *testing.T) {
+	p, err := Parse("m=8,,t=2,")
+	if err != nil || p.Memory != 8*1024 || p.Time != 2 {
+		t.Fatalf("got %+v, %v", p, err)
+	}
+	if _, err := Parse("m=8,t"); err == nil || !strings.Contains(err.Error(), `"t"`) {
+		t.Fatalf("a field with no value: %v", err)
+	}
+}

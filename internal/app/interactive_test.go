@@ -87,7 +87,7 @@ func TestMenuSplitsAFileThroughTheRecommendedPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("menu split: %v\n%s\n%s", err, out, errOut)
 	}
-	for _, want := range []string{"Done:", "3 pieces of", verifiedYes, "one password layer"} {
+	for _, want := range []string{"Done:", "3 pieces of", verifiedFull, "one password layer"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
 		}
@@ -153,7 +153,7 @@ func TestSplitAsksTheAdvancedQuestions(t *testing.T) {
 	for _, want := range []string{
 		"layers", "password (", "x25519 recipient key (",
 		"every private key is needed", "compact: pieces",
-		"hidden: one piece shows nothing", verifiedYes,
+		"hidden: one piece shows nothing", verifiedFull,
 	} {
 		// The summary wraps to the terminal, so a phrase may cross a line.
 		if !strings.Contains(strings.Join(strings.Fields(out), " "), want) {

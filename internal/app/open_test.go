@@ -37,17 +37,17 @@ func makePieces(t *testing.T, opts core.SplitOptions, input []byte) [][]byte {
 // password set run without a terminal fails naming the flag.
 func TestKeylessSetOpensWithoutAQuestion(t *testing.T) {
 	keyless := makePieces(t, core.SplitOptions{N: 3, K: 2, Keyless: true}, []byte("open"))
-	got, _, err := combinePieces(&cliOptions{yes: true}, keyless, nil)
+	got, _, err := combinePieces(&cliOptions{yes: true}, copied(keyless), nil)
 	if err != nil || string(got) != "open" {
 		t.Fatalf("a keyless set: %q, %v", got, err)
 	}
 	sealed := makePieces(t, core.SplitOptions{N: 3, K: 2,
 		Layers: []core.LayerSpec{{Kind: core.PasswordLayer, Password: []byte("pw")}}}, []byte("open"))
-	if _, _, err := combinePieces(&cliOptions{yes: true}, sealed, nil); err == nil ||
+	if _, _, err := combinePieces(&cliOptions{yes: true}, copied(sealed), nil); err == nil ||
 		!strings.Contains(err.Error(), "--password-env") {
 		t.Fatalf("a password set without a password: %v", err)
 	}
-	if _, _, err := combinePieces(&cliOptions{yes: true}, [][]byte{[]byte("not a piece")}, nil); err == nil {
+	if _, _, err := combinePieces(&cliOptions{yes: true}, copied([][]byte{[]byte("not a piece")}), nil); err == nil {
 		t.Fatal("junk was combined")
 	}
 }
@@ -72,7 +72,7 @@ func TestGatherOpenPasswords(t *testing.T) {
 	if len(got) != 2 || string(got[0]) != "one" || string(got[1]) != "two" {
 		t.Fatalf("passwords are %q, want them in flag order", got)
 	}
-	if got, _, err := combinePieces(opts, sealed, nil); err == nil {
+	if got, _, err := combinePieces(opts, copied(sealed), nil); err == nil {
 		t.Fatalf("two passwords for a one-layer set rebuilt %q", got)
 	}
 
@@ -140,7 +140,7 @@ func TestCombineNeedsTheHiddenAlgorithms(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := combinePieces(opts, pieces[:2], nil); err == nil ||
+	if _, _, err := combinePieces(opts, copied(pieces[:2]), nil); err == nil ||
 		!strings.Contains(err.Error(), "--algo") || !strings.Contains(err.Error(), "2 needed") {
 		t.Fatalf("automation cannot guess the algorithms: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestCombineNeedsTheHiddenAlgorithms(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, _, err := combinePieces(opts, pieces[:2], nil)
+	got, _, err := combinePieces(opts, copied(pieces[:2]), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,22 +176,12 @@ func TestWriteRecovered(t *testing.T) {
 		t.Fatalf("file holds %q", got)
 	}
 
-	old := os.Stdout
-	r, w, err := os.Pipe()
+	printed := capture(t, func() { err = writeRecovered(&cliOptions{yes: true}, data, "") })
 	if err != nil {
 		t.Fatal(err)
 	}
-	os.Stdout = w
-	err = writeRecovered(&cliOptions{yes: true}, data, "")
-	w.Close()
-	os.Stdout = old
-	if err != nil {
-		t.Fatal(err)
-	}
-	var buf bytes.Buffer
-	buf.ReadFrom(r)
-	if !bytes.Equal(buf.Bytes(), data) {
-		t.Fatalf("standard output carried %q, want exactly the data", buf.Bytes())
+	if printed != string(data) {
+		t.Fatalf("standard output carried %q, want exactly the data", printed)
 	}
 }
 
@@ -207,15 +197,7 @@ func TestPrintPieceInfoStatesWhatOnePieceReveals(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	old := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-	printPieceInfo("piece.3", pieceio.Detected{Format: pieceio.Binary}, info)
-	w.Close()
-	os.Stdout = old
-	var buf bytes.Buffer
-	buf.ReadFrom(r)
-	out := buf.String()
+	out := capture(t, func() { printPieceInfo("piece.3", pieceio.Detected{Format: pieceio.Binary}, info) })
 
 	for _, want := range []string{"3 of 5", "need any 3", "intact", "set id", ciphers.Default().Name} {
 		if !strings.Contains(out, want) {

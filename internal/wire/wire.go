@@ -9,6 +9,7 @@ package wire
 import (
 	"encoding/binary"
 	"errors"
+	"math"
 )
 
 // ErrShort is returned when a read would go past the end of the buffer.
@@ -42,13 +43,29 @@ func (w *Writer) U32(v uint32) {
 	w.buf = append(w.buf, b[:]...)
 }
 
+func (w *Writer) U64(v uint64) {
+	var b [8]byte
+	binary.BigEndian.PutUint64(b[:], v)
+	w.buf = append(w.buf, b[:]...)
+}
+
 // Raw appends bytes with no length prefix.
 func (w *Writer) Raw(b []byte) { w.buf = append(w.buf, b...) }
 
-// Bytes appends a uint32 length prefix followed by b.
+// Bytes appends a uint32 length prefix followed by b. A field too long for the
+// prefix panics rather than being written with its length wrapped, which would
+// never read back; every caller bounds what it writes far below that.
 func (w *Writer) Bytes(b []byte) {
-	w.U32(uint32(len(b)))
+	w.U32(prefixLen(len(b)))
 	w.buf = append(w.buf, b...)
+}
+
+// prefixLen returns n as a uint32 length prefix, panicking if it does not fit.
+func prefixLen(n int) uint32 {
+	if uint64(n) > math.MaxUint32 {
+		panic("wire: a field too long for its uint32 length prefix")
+	}
+	return uint32(n)
 }
 
 // Result returns the accumulated bytes. The Writer must not be used afterward.
@@ -93,6 +110,15 @@ func (r *Reader) U32() (uint32, error) {
 	return v, nil
 }
 
+func (r *Reader) U64() (uint64, error) {
+	if r.Remaining() < 8 {
+		return 0, ErrShort
+	}
+	v := binary.BigEndian.Uint64(r.data[r.pos:])
+	r.pos += 8
+	return v, nil
+}
+
 // Raw reads exactly n bytes and returns a copy.
 func (r *Reader) Raw(n int) ([]byte, error) {
 	if n < 0 {
@@ -128,7 +154,22 @@ func (r *Reader) View(max int) ([]byte, error) {
 	if max > 0 && int64(n) > int64(max) {
 		return nil, ErrTooLarge
 	}
-	if int64(n) > int64(r.Remaining()) {
+	return r.view(uint64(n))
+}
+
+// View64 is View for a uint64 length prefix, bounded only by the buffer.
+func (r *Reader) View64() ([]byte, error) {
+	n, err := r.U64()
+	if err != nil {
+		return nil, err
+	}
+	return r.view(n)
+}
+
+// view returns the next n bytes in place. n is compared as a uint64, so a length
+// past what an int holds is refused rather than wrapped.
+func (r *Reader) view(n uint64) ([]byte, error) {
+	if n > uint64(r.Remaining()) {
 		return nil, ErrTooLarge
 	}
 	end := r.pos + int(n)

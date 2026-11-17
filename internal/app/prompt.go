@@ -58,6 +58,7 @@ var isInteractive = func() bool {
 // readLine prints prompt (with an optional default) and returns the entered
 // line, or def if the user just presses Enter.
 func readLine(prompt, def string) (string, error) {
+	defer holdProgress()()
 	if def != "" {
 		writePrompt(fmt.Sprintf("%s [default: %s]:", prompt, def))
 	} else {
@@ -92,6 +93,7 @@ func readInt(prompt string, def, min, max int) (int, error) {
 
 // confirm asks a yes/no question with a default.
 func confirm(prompt string, def bool) (bool, error) {
+	defer holdProgress()()
 	d := "no"
 	if def {
 		d = "yes"
@@ -119,6 +121,7 @@ func confirm(prompt string, def bool) (bool, error) {
 // terminal. Non-terminal input is read as a plain line. The caller owns the
 // returned bytes and should wipe them.
 func readPasswordMasked(prompt string) ([]byte, error) {
+	defer holdProgress()()
 	fmt.Print(prompt)
 	fd := int(os.Stdin.Fd())
 	if !term.IsTerminal(fd) {
@@ -143,37 +146,41 @@ func readPasswordMasked(prompt string) ([]byte, error) {
 	restore := func() { _ = term.Restore(fd, oldState) }
 	defer memory.OnCleanup(restore)()
 	defer restore()
+	return readMasked(os.Stdin, os.Stdout)
+}
 
+// readMasked reads keystrokes from in until Enter, echoing a '*' to echo for
+// each byte kept. Backspace takes the last one back; Ctrl-C, Ctrl-D and Escape
+// cancel, as does input running out; other control bytes are dropped. It is the
+// loop readPasswordMasked runs on a terminal in raw mode, kept apart from the
+// terminal so scripted keystrokes can test it.
+func readMasked(in io.Reader, echo io.Writer) ([]byte, error) {
 	pw := newPasswordBuf()
 	buf := make([]byte, 1)
 	for {
-		n, err := os.Stdin.Read(buf)
+		n, err := in.Read(buf)
 		if err != nil || n == 0 {
-			fmt.Print("\r\n")
+			fmt.Fprint(echo, "\r\n")
 			pw.free()
 			return nil, promptErr(err)
 		}
 		c := buf[0]
 		switch c {
 		case '\r', '\n':
-			fmt.Print("\r\n")
+			fmt.Fprint(echo, "\r\n")
 			return pw.take(), nil
-		case 3, 4: // Ctrl-C, Ctrl-D
-			fmt.Print("\r\n")
-			pw.free()
-			return nil, errAborted
-		case 27: // Escape also cancels
-			fmt.Print("\r\n")
+		case 3, 4, 27: // Ctrl-C, Ctrl-D, and Escape, which also cancels
+			fmt.Fprint(echo, "\r\n")
 			pw.free()
 			return nil, errAborted
 		case 127, 8: // Backspace / Delete
 			if pw.backspace() {
-				fmt.Print("\b \b")
+				fmt.Fprint(echo, "\b \b")
 			}
 		default:
 			if c >= 32 {
 				pw.add(c)
-				fmt.Print("*")
+				fmt.Fprint(echo, "*")
 			}
 		}
 	}

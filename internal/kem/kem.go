@@ -18,7 +18,6 @@ package kem
 import (
 	"crypto/ecdh"
 	"crypto/hpke"
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -337,9 +336,6 @@ func PrivateFromBytes(b []byte, s Scheme) (*PrivateKey, error) {
 	k, _, err := s.kem()
 	if err != nil {
 		return nil, err
-	}
-	if len(b) == 0 {
-		return nil, errors.New("kem: empty private key")
 	}
 	if want := s.PrivateKeySize(); len(b) != want {
 		return nil, fmt.Errorf("kem: a %s private key is %d bytes, got %d", s.Name(), want, len(b))

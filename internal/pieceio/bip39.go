@@ -53,9 +53,7 @@ func encodeBip39(piece []byte) string {
 	for i, w := range words {
 		sb.WriteString(w)
 		switch {
-		case i == len(words)-1:
-			sb.WriteByte('\n')
-		case (i+1)%bip39WordsLine == 0:
+		case i == len(words)-1, (i+1)%bip39WordsLine == 0:
 			sb.WriteByte('\n')
 		default:
 			sb.WriteByte(' ')
@@ -67,6 +65,13 @@ func encodeBip39(piece []byte) string {
 // tryBip39 decodes word-list text. It accepts any spacing and either case, and
 // ignores the numbering a person may add while writing the words down.
 func tryBip39(raw []byte) (piece []byte, verified, ok bool) {
+	// This decoder is tried against whatever file was handed in, and a word list
+	// is small by construction: past the ceiling the input is something else, and
+	// is turned away before it is copied into a string, and before bip39Indexes
+	// turns every token of it into a string of its own.
+	if len(raw) > bip39MaxText {
+		return nil, false, false
+	}
 	indexes, ok := bip39Indexes(string(raw))
 	if !ok {
 		return nil, false, false
@@ -100,15 +105,9 @@ func tryBip39(raw []byte) (piece []byte, verified, ok bool) {
 
 // bip39Indexes turns text into word indexes, or reports that it is not a word
 // list. Every token has to be on the list, which is what keeps this from
-// claiming arbitrary prose.
+// claiming arbitrary prose. FieldsFunc materialises every token before any of
+// them is checked, so text must already be within bip39MaxText.
 func bip39Indexes(text string) ([]int, bool) {
-	// FieldsFunc materialises every token before any of them is checked, so it is
-	// bounded here rather than after. This decoder is tried against whatever file
-	// was handed in, and a word list is small by construction: past the ceiling
-	// the input is something else, whatever it turns out to be.
-	if len(text) > bip39MaxText {
-		return nil, false
-	}
 	fields := strings.FieldsFunc(text, func(r rune) bool {
 		return unicode.IsSpace(r) || r == ',' || r == ';'
 	})
@@ -129,7 +128,8 @@ func bip39Indexes(text string) ([]int, bool) {
 		}
 		indexes = append(indexes, idx)
 	}
-	// A piece is at least 57 bytes, so a real word list is never short.
+	// A piece is at least format.MinPieceLen bytes, so a real word list is never
+	// short.
 	if len(indexes) < Bip39Words(format.MinPieceLen) {
 		return nil, false
 	}

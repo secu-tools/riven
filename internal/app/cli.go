@@ -82,9 +82,9 @@ type cliOptions struct {
 	info      string
 	infoSet   bool
 
-	// verify controls the post-split self-check that re-reads the pieces and
-	// rebuilds the original. Default on; verifySet records an explicit choice.
-	verify    bool
+	// verify is how thoroughly a split checks what it wrote; the zero value is the
+	// default, full. verifySet records an explicit choice.
+	verify    verifyMode
 	verifySet bool
 
 	yes bool
@@ -210,9 +210,16 @@ var valueFlags = map[string]flagValue{
 	"--record-name": boolFlag("--record-name", func(o *cliOptions, b bool) {
 		o.recordName, o.recordNameSet = b, true
 	}),
-	"--verify":       boolFlag("--verify", setVerify),
-	"--password-env": func(o *cliOptions, v string) error { return addLayerSource(o, core.PasswordLayer, v) },
-	"--recipient":    func(o *cliOptions, v string) error { return addLayerSource(o, core.RecipientLayer, v) },
+	"--verify": func(o *cliOptions, v string) error {
+		m, err := parseVerify(v)
+		if err != nil {
+			return err
+		}
+		setVerify(o, m)
+		return nil
+	},
+	"--password-env": func(o *cliOptions, v string) error { addLayerSource(o, core.PasswordLayer, v); return nil },
+	"--recipient":    func(o *cliOptions, v string) error { addLayerSource(o, core.RecipientLayer, v); return nil },
 	"--text-env": func(o *cliOptions, v string) error {
 		secret, err := passwordFromEnv(v)
 		if err != nil {
@@ -231,8 +238,8 @@ var switchFlags = map[string]flagSwitch{
 	"--keyless":       func(o *cliOptions) { o.keyless = true },
 	"--no-encryption": func(o *cliOptions) { o.keyless = true },
 	"--generate":      func(o *cliOptions) { o.generate = true },
-	"-v":              func(o *cliOptions) { setVerify(o, true) },
-	"--no-verify":     func(o *cliOptions) { setVerify(o, false) },
+	"-v":              func(o *cliOptions) { setVerify(o, verifyFull) },
+	"--no-verify":     func(o *cliOptions) { setVerify(o, verifyOff) },
 	// Colour is set up before parsing, from the raw arguments; the flag is only
 	// accepted here.
 	"--no-color": func(*cliOptions) {},
@@ -240,16 +247,32 @@ var switchFlags = map[string]flagSwitch{
 	"--yes":      func(o *cliOptions) { o.yes = true },
 }
 
-// setVerify records the post-split self-check preference, marking it explicitly
-// set so verifyEnabled honours it over the default. It backs --verify, -v and
-// --no-verify so they cannot drift apart.
-func setVerify(o *cliOptions, b bool) {
-	o.verify, o.verifySet = b, true
+// setVerify records how the split checks its pieces, marking it explicitly set.
+// It backs --verify, -v and --no-verify so they cannot drift apart.
+func setVerify(o *cliOptions, m verifyMode) {
+	o.verify, o.verifySet = m, true
+}
+
+// parseVerify reads a --verify value: full, fast or off, or true and false for
+// full and off, as the other true|false flags spell them.
+func parseVerify(v string) (verifyMode, error) {
+	for _, m := range verifyModes {
+		if strings.EqualFold(strings.TrimSpace(v), m.String()) {
+			return m, nil
+		}
+	}
+	if b, err := parseBool(v); err == nil {
+		if b {
+			return verifyFull, nil
+		}
+		return verifyOff, nil
+	}
+	return 0, fmt.Errorf("invalid --verify: %q is not full, fast or off", v)
 }
 
 // addLayerSource records a cascade layer in the order its flag appeared, which
 // is the order the layers are applied.
-func addLayerSource(o *cliOptions, kind core.LayerKind, v string) error {
+func addLayerSource(o *cliOptions, kind core.LayerKind, v string) {
 	src := layerSource{kind: kind}
 	if kind == core.RecipientLayer {
 		src.file = v
@@ -257,7 +280,6 @@ func addLayerSource(o *cliOptions, kind core.LayerKind, v string) error {
 		src.env = v
 	}
 	o.layerSources = append(o.layerSources, src)
-	return nil
 }
 
 func parseArgs(args []string) (*cliOptions, error) {
@@ -372,8 +394,8 @@ EXAMPLES
   riven combine secret.pdf.1 secret.pdf.3 secret.pdf.5 --password-env PW
 
 SPLIT
-  -n, --parts N               pieces to write (default 5)
-  -k, --threshold K           pieces needed to rebuild (default 3)
+  -n, --parts N               pieces to write, at most ` + strconv.Itoa(core.MaxPieces) + ` (default ` + strconv.Itoa(defaultN) + `)
+  -k, --threshold K           pieces needed to rebuild (default ` + strconv.Itoa(defaultK) + `)
   --password-env NAME         add a password layer, read from variable NAME
   --recipient FILE            add a layer for that recipient public key
   --algo a,b,c                algorithm per layer, outermost first
@@ -390,12 +412,15 @@ SPLIT
                               none: guessing needs K pieces
   -f, --format LIST           formats, comma-separated, or all (default binary)
   --kdf SPEC                  Argon2id cost: a preset or m=MiB,t=passes,p=lanes
-  --pad PCT                   size class width in percent (default 1), or none
+  --pad PCT                   size class width in percent (default ` + strconv.Itoa(core.DefaultPadPercent) + `), or none
   --record-algo true|false    record the algorithms (default true)
   --record-kdf true|false     record the Argon2id cost (default true)
   --record-name true|false    record the file name (default true)
-  --verify true|false         rebuild after writing, as a check (default true)
-  --qr-scale N                QR module size in pixels (default ` + strconv.Itoa(defaultQRScale) + `)
+  --verify full|fast|off      check the pieces after writing (default full).
+                              full reads back every file and puts every
+                              piece in a rebuild; fast rebuilds from K pieces
+  --qr-scale N                QR module size in pixels (default ` + strconv.Itoa(defaultQRScale) +
+		`, at most ` + strconv.Itoa(pieceio.QRMaxScale) + `)
   -t, --text STRING           split this string (seen in the process list)
   --text-env NAME             split the contents of variable NAME
   --name BASE                 base name for the piece files
@@ -424,11 +449,11 @@ ALGORITHMS
 
 ARGON2 PRESETS
   ` + strings.Join(kdf.PresetNames(), ", ") + `
-  custom: memory ` + joinUint32(kdf.MemoryChoices()) + ` MiB, passes 1-` +
-		strconv.Itoa(kdf.MaxTime) + `, lanes ` + joinUint8(kdf.ParChoices()) + `
+  custom: memory ` + joinChoices(kdf.MemoryChoices()) + ` MiB, passes 1-` +
+		strconv.Itoa(kdf.MaxTime) + `, lanes ` + joinChoices(kdf.ParChoices()) + `
 
 EXPORT FORMATS
-  ` + formatNames() + `
+  ` + strings.Join(names(pieceio.All()), ", ") + `
   qr holds at most ` + strconv.Itoa(pieceio.QRMaxBytes) + ` bytes per piece, words at most ` +
 		strconv.Itoa(pieceio.Bip39MaxPiece) + `.
 `)
@@ -444,23 +469,8 @@ func indentList(names []string) string {
 // folded to the terminal, so it is kept to what an 80-column window shows.
 const helpWidth = 79
 
-func formatNames() string {
-	names := make([]string, 0, len(pieceio.All()))
-	for _, f := range pieceio.All() {
-		names = append(names, f.String())
-	}
-	return strings.Join(names, ", ")
-}
-
-func joinUint32(v []uint32) string {
-	parts := make([]string, len(v))
-	for i, x := range v {
-		parts[i] = strconv.FormatUint(uint64(x), 10)
-	}
-	return strings.Join(parts, "/")
-}
-
-func joinUint8(v []uint8) string {
+// joinChoices lists numeric choices slash-separated, as the help text shows them.
+func joinChoices[T uint8 | uint32](v []T) string {
 	parts := make([]string, len(v))
 	for i, x := range v {
 		parts[i] = strconv.FormatUint(uint64(x), 10)

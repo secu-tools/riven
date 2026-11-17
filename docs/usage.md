@@ -189,7 +189,7 @@ riven FILE                     # same thing via the wizard
 
 | Flag | Meaning | Default |
 |------|---------|---------|
-| `-n, --parts N` | total pieces to create | 5 |
+| `-n, --parts N` | total pieces to create (1..65535) | 5 |
 | `-k, --threshold K` | pieces required to reconstruct (1..N) | 3 |
 | `--password-env NAME` | add a password layer, read from environment `NAME` | one password layer |
 | `--recipient FILE` | add a recipient layer using that public key | none |
@@ -198,13 +198,13 @@ riven FILE                     # same thing via the wizard
 | `--method full\|compact` | how the content is spread over the pieces (see [Method](#method)) | `full` |
 | `--info protected\|strict\|public\|none` | who can read a piece's details (see [What one piece shows](#what-one-piece-shows)) | `protected`, or `public` with `--keyless` |
 | `-f, --format LIST` | `binary`, `base64`, `base32`, `qr`, `sheet`, `words`, `all`, or a comma-separated subset | `binary` |
-| `--qr-scale N` | QR module size in pixels | 8 |
+| `--qr-scale N` | QR module size in pixels (1..49, so every code reads back) | 8 |
 | `--kdf SPEC` | Argon2id cost: a preset name or `m=<MiB>,t=<passes>,p=<lanes>` | `recommended` |
 | `--record-algo true\|false` | write the algorithms into each piece (see [What each piece records](#what-each-piece-records)) | `true` |
 | `--record-kdf true\|false` | write the Argon2id cost into each piece | `true` |
 | `--identity FILE` | your private key, so the split can be fully verified | none |
 | `--pad PCT` | class width in whole percent; `0` or `none` drops the size class (see [Piece size](#piece-size)) | `1` |
-| `--verify true\|false` | re-read the pieces and rebuild the original before reporting success (`-v` alone turns it on, `--no-verify` off) | `true` |
+| `--verify full\|fast\|off` | how the pieces are checked before success is reported (`true` and `false` mean `full` and `off`; `-v` alone is `full`, `--no-verify` is `off`) | `full` |
 | `--generate` | generate strong password(s) instead of prompting | off |
 | `-t, --text STRING` | split this string instead of a file | none |
 | `--text-env NAME` | split the contents of an environment variable | none |
@@ -219,8 +219,11 @@ formats](#export-formats)).
 If files with those names already exist, Riven asks before replacing them, since
 they are probably an earlier set; under `-y` they are replaced.
 
-By default Riven re-reads K pieces and reconstructs to confirm the split is
-recoverable before reporting success; `--no-verify` skips this.
+Before reporting success, Riven checks what it wrote. `--verify full`, the
+default, reads every file back, the QR code on each sheet included, and rebuilds
+from K pieces at a time until every piece has been in a rebuild, so a fault in
+any one piece or format is caught. `--verify fast` rebuilds once, from the first
+K pieces of one format, and `--verify off` skips the check.
 
 ### The wizard
 
@@ -493,26 +496,37 @@ up to 500. Padding works the same with or without a password.
 
 ## Large inputs
 
-Riven works on any size of input that fits in memory, and the requirement is not
-the file size. Shamir gives every share the full length of the payload, so N shares
-of an X byte input are N*X bytes on their own. A split needs roughly
+Riven works on any input that fits in memory, up to a limit the ciphers set, as
+each seals its data in one pass: about 64 GiB when AES-256-GCM or Twofish-256-GCM
+is a layer, as with the default algorithms and always with the compact method,
+and about 256 GiB otherwise. Memory runs out long before that on most machines.
+Shamir gives every share the full length of the payload, so N shares of an X
+byte input are N*X bytes on their own. A split needs roughly
 
 ```
 full:     (N + 2) * input size
 compact:  (2 + 2/K) * input size (3 times at -k 2, 4 at -k 1)
 ```
 
-The content is encrypted straight into what is shared or dispersed, so it is
-never held twice. For the full method that is the input, the encrypted payload
-and the N shares, with one piece being written once the payload is gone: a 1 GiB
-file into 5 pieces needs about 7 GiB. The compact method holds the input and the
-sealed data, then works out each piece's fragment only when that piece is
-written, so the piece count does not add to it: the same file needs about 3 GiB
-at any N. Above 64 MiB the split prints the figure before it starts.
+The content is encrypted straight into what is shared or dispersed, and each
+share is made inside its piece, so nothing is held twice: a 1 GiB file into 5
+pieces needs about 7 GiB with the full method, and about 3 GiB at any N with the
+compact one. Above 64 MiB the split prints the figure before it starts. Pieces
+are released once written, so the format count does not add to it. `combine`
+holds the pieces it is given until they have opened, then only what they opened
+to, plus the result, so give it K pieces of a large set rather than all N.
 
-Pieces are written and released one at a time rather than all being held, so the
-export format count does not add to this, and neither does the piece count beyond
-its share. `combine` needs the K pieces it was given plus one copy of the result.
+Time grows with the input, and for a large file the disk usually decides it: the
+full method writes N times the input, and the default check reads it all back.
+On a 16-core desktop, a 256 MiB file into 5 pieces with a password took about 2
+seconds of work to split and 1.3 to rebuild.
+
+A set can have up to 65535 pieces. Each piece written or read stretches the
+password once, so 1000 pieces at the default cost take about 75 seconds to split
+and check, and the full method's work also grows with N times K.
+
+On a terminal, a long split, combine, verify or info shows its step and progress
+on one line of standard error.
 
 The N*X floor of the full method is a property of Shamir sharing, not of this
 implementation. Both methods work in memory, so files far past available memory
@@ -551,7 +565,7 @@ choice costs for the pieces at hand: a format the pieces are too large for is
 marked `NOT AVAILABLE` with the size and the limit, and `words` gives the word
 count per piece. A note too long to sit beside its entry takes the line under
 it, and the listing is folded to the width of the terminal. The same limits are
-enforced for `--format`, before any file is written.
+enforced for `--format`, before anything is encrypted or written.
 
 The three text formats carry a checksum, so a mistyped character is reported as a
 damaged file rather than as a wrong password. It sits inside the encoded text, so

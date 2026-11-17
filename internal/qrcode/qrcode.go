@@ -21,6 +21,8 @@ import (
 	_ "image/jpeg" // registered so photographed or converted codes still decode
 	"image/png"
 	"math"
+	"slices"
+	"sync"
 
 	"github.com/makiuchi-d/gozxing"
 	zxmulti "github.com/makiuchi-d/gozxing/multi/qrcode"
@@ -64,6 +66,15 @@ const DefaultScale = 8
 // quietZone is the mandatory light border, in modules, required by the spec.
 const quietZone = 4
 
+// maxModules is the side, in modules, of the largest code, version 40, with its
+// quiet zone.
+const maxModules = 177 + 2*quietZone
+
+// MaxScale is the largest module size Encode takes. At it the largest code is
+// still an image Decode reads, within maxImagePixels and maxImageSide; past it
+// a split would write codes it could not read back.
+var MaxScale = min(maxImageSide, int(math.Sqrt(maxImagePixels))) / maxModules
+
 // ErrTooLarge indicates the payload exceeds even the weakest level's capacity.
 var ErrTooLarge = errors.New("qrcode: data too large for a QR code")
 
@@ -88,7 +99,8 @@ func SelectLevel(n int) (Level, error) {
 func (l Level) Weakest() bool { return l.Name == Capacities[len(Capacities)-1].Name }
 
 // Encode renders data as a QR code PNG. scale is the pixel size of one module;
-// values below one use DefaultScale. It returns the PNG bytes and the level used.
+// values below one use DefaultScale, and values past MaxScale are refused. It
+// returns the PNG bytes and the level used.
 func Encode(data []byte, scale int) ([]byte, Level, error) {
 	level, err := SelectLevel(len(data))
 	if err != nil {
@@ -96,6 +108,10 @@ func Encode(data []byte, scale int) ([]byte, Level, error) {
 	}
 	if scale < 1 {
 		scale = DefaultScale
+	}
+	if scale > MaxScale {
+		return nil, Level{}, fmt.Errorf("qrcode: a module of %d pixels makes a code too large to read back (at most %d)",
+			scale, MaxScale)
 	}
 
 	matrix, err := zxqr.NewQRCodeWriter().Encode(
@@ -143,19 +159,19 @@ func Encode(data []byte, scale int) ([]byte, Level, error) {
 // reads. The order matters only for speed: every attempt is exact, since a QR
 // code carries its own error correction and checksum.
 func Decode(imageBytes []byte) ([]byte, error) {
-	if err := checkImageSize(imageBytes); err != nil {
+	pixels, err := checkImageSize(imageBytes)
+	if err != nil {
 		return nil, err
 	}
+	defer decoding.acquire(pixels)()
 	img, _, err := image.Decode(bytes.NewReader(imageBytes))
 	if err != nil {
 		return nil, fmt.Errorf("qrcode: not a readable image: %w", err)
 	}
 
-	attempts := append(append([]decodeAttempt{}, decodeAttempts...), finderAttempts()...)
-	attempts = append(attempts, blindAttempts()...)
 	var lastErr error
 	for _, candidate := range decodeCandidates(img) {
-		for _, attempt := range attempts {
+		for _, attempt := range allAttempts {
 			text, err := attempt(candidate)
 			if err != nil {
 				lastErr = err
@@ -173,11 +189,7 @@ func Decode(imageBytes []byte) ([]byte, error) {
 // follows in case the reduction cost the code its detail.
 func decodeCandidates(img image.Image) []image.Image {
 	const maxSide = 1600
-	b := img.Bounds()
-	side := b.Dx()
-	if b.Dy() > side {
-		side = b.Dy()
-	}
+	side := longestSide(img)
 	if side <= maxSide {
 		return []image.Image{img}
 	}
@@ -191,8 +203,19 @@ func decodeCandidates(img image.Image) []image.Image {
 	return []image.Image{downscale(img, maxSide), img}
 }
 
+// longestSide is the larger of an image's width and height.
+func longestSide(img image.Image) int {
+	b := img.Bounds()
+	return max(b.Dx(), b.Dy())
+}
+
 // decodeAttempt reads a QR code from an image, or fails.
 type decodeAttempt func(image.Image) (string, error)
+
+// allAttempts is every way Decode tries an image, in the order it tries them:
+// the readers below, then rectifying by the finder patterns, then the blind
+// counter-warps.
+var allAttempts = slices.Concat(decodeAttempts, finderAttempts(), blindAttempts())
 
 // decodeAttempts are ordered cheapest and most likely first:
 //
@@ -258,21 +281,17 @@ func readQR(img image.Image, globalHistogram, multi bool, hints map[gozxing.Deco
 	return res.GetText(), nil
 }
 
-// downscale reduces an image so its longest side is at most maxSide, averaging
-// the pixels that collapse together so module edges stay meaningful.
 // toGray reduces a colour to an 8-bit grey level by averaging its channels.
 func toGray(c color.Color) uint8 {
 	r, g, b, _ := c.RGBA()
 	return uint8((r + g + b) / 3 >> 8)
 }
 
+// downscale reduces an image so its longest side is at most maxSide, averaging
+// the pixels that collapse together so module edges stay meaningful.
 func downscale(src image.Image, maxSide int) image.Image {
 	b := src.Bounds()
-	side := b.Dx()
-	if b.Dy() > side {
-		side = b.Dy()
-	}
-	step := (side + maxSide - 1) / maxSide
+	step := (longestSide(src) + maxSide - 1) / maxSide
 	if step < 2 {
 		return src
 	}
@@ -327,28 +346,67 @@ const (
 )
 
 // checkImageSize rejects an image whose header declares more pixels than the
-// budget allows, before image.Decode allocates for them.
-func checkImageSize(b []byte) error {
+// budget allows, before image.Decode allocates for them, and returns how many it
+// declares.
+func checkImageSize(b []byte) (pixels int64, err error) {
 	cfg, _, err := image.DecodeConfig(bytes.NewReader(b))
 	if err != nil {
-		return fmt.Errorf("qrcode: not a readable image: %w", err)
+		return 0, fmt.Errorf("qrcode: not a readable image: %w", err)
 	}
 	if cfg.Width <= 0 || cfg.Height <= 0 {
-		return fmt.Errorf("qrcode: image declares an empty size (%dx%d)", cfg.Width, cfg.Height)
+		return 0, fmt.Errorf("qrcode: image declares an empty size (%dx%d)", cfg.Width, cfg.Height)
 	}
-	if cfg.Width > maxImageSide || cfg.Height > maxImageSide ||
-		int64(cfg.Width)*int64(cfg.Height) > maxImagePixels {
-		return fmt.Errorf("qrcode: image is %dx%d, larger than this reads (limit %d megapixels, %d per side)",
+	pixels = int64(cfg.Width) * int64(cfg.Height)
+	if cfg.Width > maxImageSide || cfg.Height > maxImageSide || pixels > maxImagePixels {
+		return 0, fmt.Errorf("qrcode: image is %dx%d, larger than this reads (limit %d megapixels, %d per side)",
 			cfg.Width, cfg.Height, maxImagePixels>>20, maxImageSide)
 	}
-	return nil
+	return pixels, nil
+}
+
+// decoding holds the images being decoded at once to the pixels one image may
+// have. Files are read several at a time, and without it the budget above would
+// be multiplied by however many a caller reads together: eight photographs are
+// eight times the memory of one. Small codes are still read side by side, and a
+// large frame waits for the others.
+var decoding = newPixelGate(maxImagePixels)
+
+// pixelGate lets work through while what is under way stays within a budget.
+type pixelGate struct {
+	mu   sync.Mutex
+	room *sync.Cond
+	free int64
+}
+
+func newPixelGate(budget int64) *pixelGate {
+	g := &pixelGate{free: budget}
+	g.room = sync.NewCond(&g.mu)
+	return g
+}
+
+// acquire waits until n of the budget is free and takes it; the returned
+// function gives it back. n must not be more than the whole budget.
+func (g *pixelGate) acquire(n int64) func() {
+	g.mu.Lock()
+	for g.free < n {
+		g.room.Wait()
+	}
+	g.free -= n
+	g.mu.Unlock()
+	return func() {
+		g.mu.Lock()
+		g.free += n
+		g.mu.Unlock()
+		g.room.Broadcast()
+	}
 }
 
 // IsImage reports whether b looks like an image this package can read. It only
 // inspects the header, so it is cheap and safe on hostile input. An image too
 // large to decode within the budget is not one this package can read.
 func IsImage(b []byte) bool {
-	return checkImageSize(b) == nil
+	_, err := checkImageSize(b)
+	return err == nil
 }
 
 // latin1 maps each byte to one code point, which is how byte-mode payloads are
@@ -470,13 +528,7 @@ func rectifyByFinders(img image.Image, scale float64) (image.Image, error) {
 // can produce, so a mismeasured finder cannot fold the image.
 func clampPerspective(v float64) float64 {
 	const limit = 0.6
-	if v > limit {
-		return limit
-	}
-	if v < -limit {
-		return -limit
-	}
-	return v
+	return max(-limit, min(v, limit))
 }
 
 // finderAttempts rectify by the finder patterns, then read the square that
@@ -486,9 +538,8 @@ func clampPerspective(v float64) float64 {
 func finderAttempts() []decodeAttempt {
 	var out []decodeAttempt
 	for _, scale := range []float64{1, 0.75, 1.3, 0.5, 1.7, 0.25, 2.2} {
-		s := scale
 		out = append(out, func(img image.Image) (string, error) {
-			r, err := rectifyByFinders(img, s)
+			r, err := rectifyByFinders(img, scale)
 			if err != nil {
 				return "", err
 			}

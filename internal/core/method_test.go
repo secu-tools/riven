@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/secu-tools/riven/internal/format"
 	"github.com/secu-tools/riven/internal/kdf"
 	"github.com/secu-tools/riven/internal/kem"
+	"github.com/secu-tools/riven/internal/memory"
 	"github.com/secu-tools/riven/internal/split"
 )
 
@@ -67,7 +69,8 @@ func (c credentialSetup) options(n, k int, m Method, info InfoMode) SplitOptions
 
 // TestEveryMethodAndInfoModeRoundTrips rebuilds every combination of method,
 // info mode and protection, from every subset of exactly K pieces and from all
-// of them, across a 512 KiB share chunk so both share layouts are crossed.
+// of them, and past a 512 KiB unit of sharing work, so both a short secret and
+// one the cores share out are crossed.
 func TestEveryMethodAndInfoModeRoundTrips(t *testing.T) {
 	small := []byte("a short secret")
 	large := make([]byte, 600<<10)
@@ -125,11 +128,56 @@ func TestInfoProtectedNeedsASecret(t *testing.T) {
 			t.Fatalf("%s: auto resolved to %v (%v), want %v", c.name, got, err, want)
 		}
 	}
-	if _, err := Split([]byte("x"), SplitOptions{N: 3, K: 2, Keyless: true, Info: InfoMode(9)}); err == nil {
-		t.Fatal("an unknown info mode was accepted")
+	// Each refusal says which it is, so a caller can word it in its own terms.
+	for _, mode := range []InfoMode{InfoProtected, InfoStrict} {
+		_, err := EffectiveInfo(SplitOptions{N: 3, K: 2, Keyless: true, Info: mode})
+		if !errors.Is(err, ErrInfoNeedsSecret) || errors.Is(err, ErrInfoNeedsThreshold) ||
+			!strings.Contains(err.Error(), mode.String()+" details need a password") {
+			t.Fatalf("info %s with no layer gave %v, want ErrInfoNeedsSecret naming the mode", mode, err)
+		}
+	}
+	if _, err := EffectiveInfo(SplitOptions{N: 3, K: 1, Keyless: true, Info: InfoHidden}); !errors.Is(err, ErrInfoNeedsThreshold) {
+		t.Fatalf("hidden details at a threshold of one gave %v, want ErrInfoNeedsThreshold", err)
+	}
+	if _, err := Split([]byte("x"), SplitOptions{N: 3, K: 2, Keyless: true, Info: InfoMode(9)}); err == nil ||
+		errors.Is(err, ErrInfoNeedsSecret) || errors.Is(err, ErrInfoNeedsThreshold) {
+		t.Fatalf("an unknown info mode gave %v, want a refusal of its own", err)
 	}
 	if _, err := Split([]byte("x"), SplitOptions{N: 3, K: 2, Keyless: true, Method: Method(9)}); err == nil {
 		t.Fatal("an unknown method was accepted")
+	}
+}
+
+// TestEnvelopeDerivesOnlyWithAPassword checks which sets derive a key each time
+// a piece is opened: those whose envelope a password seals, which is the first
+// layer's for protected details and any layer's for strict ones.
+func TestEnvelopeDerivesOnlyWithAPassword(t *testing.T) {
+	priv, err := kem.Generate(kem.X25519)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pw := LayerSpec{Kind: PasswordLayer, Password: []byte("pw")}
+	key := LayerSpec{Kind: RecipientLayer, Recipient: priv.Public()}
+	for _, c := range []struct {
+		name   string
+		layers []LayerSpec
+		info   InfoMode
+		want   bool
+	}{
+		{"password, automatic", []LayerSpec{pw}, InfoAuto, true},
+		{"password, protected", []LayerSpec{pw}, InfoProtected, true},
+		{"password, public", []LayerSpec{pw}, InfoPublic, false},
+		{"password, hidden", []LayerSpec{pw}, InfoHidden, false},
+		{"key first, protected", []LayerSpec{key, pw}, InfoProtected, false},
+		{"key first, strict", []LayerSpec{key, pw}, InfoStrict, true},
+		{"password first, protected", []LayerSpec{pw, key}, InfoProtected, true},
+		{"key only, strict", []LayerSpec{key}, InfoStrict, false},
+		{"no layer", nil, InfoAuto, false},
+		{"no layer, protected, which is refused", nil, InfoProtected, false},
+	} {
+		if got := EnvelopeDerives(SplitOptions{N: 3, K: 2, Layers: c.layers, Info: c.info}); got != c.want {
+			t.Errorf("%s: derives %v, want %v", c.name, got, c.want)
+		}
 	}
 }
 
@@ -452,6 +500,66 @@ func TestSharesAreDroppedAfterTheRebuild(t *testing.T) {
 		}
 	}
 	forget([]*format.Manifest{nil})
+}
+
+// TestSparePiecesAreDroppedBeforeTheRebuild checks the pieces given beyond the K
+// a rebuild uses, a second copy of one among them, are wiped once the set is
+// assembled, while the K it uses keep what they carry. A folder of every piece
+// would otherwise hold each one's input-sized share through the rebuild.
+func TestSparePiecesAreDroppedBeforeTheRebuild(t *testing.T) {
+	input := []byte("only what is used is kept")
+	for _, info := range []InfoMode{InfoPublic, InfoHidden} {
+		for _, method := range []Method{MethodFull, MethodCompact} {
+			pieces := mustSplit(t, input, SplitOptions{N: 5, K: 2, Keyless: true, Info: info, Method: method})
+			pieces = append(pieces, bytes.Clone(pieces[0]))
+			o := OpenOptions{}
+			first, params, opened, damaged, err := openPieces(pieces, &o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			set, err := assembleSet(first, params, opened, damaged, o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			shares := make([][]byte, len(opened))
+			for i, m := range opened {
+				shares[i] = m.Share
+			}
+			forgetSpare(opened, set.use)
+
+			kept := 0
+			for i, m := range opened {
+				if slices.Contains(set.use, m) {
+					kept++
+					if m.Share == nil {
+						t.Fatalf("%s %s: piece %d is used and was dropped", info, method, i+1)
+					}
+					continue
+				}
+				if m.Share != nil || m.Fragment != nil || m.DetailsShare != nil {
+					t.Fatalf("%s %s: spare piece %d still holds its shares", info, method, i+1)
+				}
+				if !bytes.Equal(shares[i], make([]byte, len(shares[i]))) {
+					t.Fatalf("%s %s: spare piece %d's share was dropped without being wiped", info, method, i+1)
+				}
+			}
+			if kept != 2 {
+				t.Fatalf("%s %s: %d pieces kept for a threshold of 2", info, method, kept)
+			}
+			// The rebuild still has all it needs.
+			if _, buf, err := set.rebuild(nil); err != nil {
+				t.Fatalf("%s %s: the rebuild after dropping the spares: %v", info, method, err)
+			} else {
+				memory.Zero(buf)
+			}
+			forget(opened)
+			// And a combine given every piece and a repeat is unchanged.
+			if got, err := Combine(pieces, OpenOptions{}); err != nil || !bytes.Equal(got, input) {
+				t.Fatalf("%s %s: combine of every piece: %v", info, method, err)
+			}
+		}
+	}
+	forgetSpare([]*format.Manifest{nil}, nil)
 }
 
 // TestCompactFragmentsAreAllOrNothing reaches inside a compact set to play an

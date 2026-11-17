@@ -5,6 +5,7 @@ package app
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -187,7 +188,7 @@ func TestChoosePasswordGeneratesOnAnEmptyAnswer(t *testing.T) {
 	plan := &splitPlan{}
 	var pw []byte
 	withInput(t, "\n", func() { // Enter asks for a generated one
-		got, err := choosePassword(1, nil, plan)
+		got, err := choosePassword(1, plan)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -198,6 +199,29 @@ func TestChoosePasswordGeneratesOnAnEmptyAnswer(t *testing.T) {
 	}
 	if len(plan.generated) != 1 || string(plan.generated[0]) != string(pw) {
 		t.Fatal("the generated password was not recorded for reporting")
+	}
+}
+
+// TestChoosePasswordRefusesAnEarlierLayersPassword checks a password the plan
+// already has for another layer is refused and asked for again, and that a
+// confirmation that does not match is asked for again too. The plan is where
+// the earlier passwords are looked up.
+func TestChoosePasswordRefusesAnEarlierLayersPassword(t *testing.T) {
+	plan := &splitPlan{}
+	plan.addPasswordLayer(1, []byte("first"))
+	var pw []byte
+	out := withTerminal(t, "first\nsecond\nsecnod\nsecond\nsecond\n", func() {
+		got, err := choosePassword(2, plan)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pw = got
+	})
+	if string(pw) != "second" {
+		t.Fatalf("chose %q, want %q", pw, "second")
+	}
+	if !strings.Contains(out, "already used") || !strings.Contains(out, "did not match") {
+		t.Fatalf("the reused password and the mistyped confirmation were not both refused:\n%s", out)
 	}
 }
 
@@ -344,5 +368,73 @@ func TestAGivenPasswordIsNotDroppedForNoEncryption(t *testing.T) {
 	if plan.opts.Keyless || len(plan.opts.Layers) != 1 || strings.Contains(out, "no encryption") {
 		t.Fatalf("a given password was dropped for no encryption (keyless %v, %d layers):\n%s",
 			plan.opts.Keyless, len(plan.opts.Layers), out)
+	}
+}
+
+// TestWizardAsksAgainForWhatItCannotUse checks the algorithm and cost questions
+// say what was wrong with an answer and ask again, rather than ending the
+// wizard: an algorithm it does not know, the one the layer above used, and a
+// cost that does not parse.
+func TestWizardAsksAgainForWhatItCannotUse(t *testing.T) {
+	above := ciphers.All()[0]
+	var sid uint8
+	var err error
+	out := withTerminal(t, "nonsense\n"+above.Name+"\n2\n", func() { sid, err = chooseScheme(1, above.ID) })
+	if err != nil || sid != ciphers.All()[1].ID {
+		t.Fatalf("chose %d, %v", sid, err)
+	}
+	if !strings.Contains(out, "nonsense") || !strings.Contains(out, "pick another") {
+		t.Fatalf("the refusals were not explained:\n%s", out)
+	}
+
+	var p kdf.Params
+	custom := len(kdf.PresetNames()) + 1
+	out = withTerminal(t, fmt.Sprintf("%d\nm=3\nm=8,t=1,p=1\n", custom), func() { p, err = chooseKDF(kdf.Default()) })
+	if err != nil || p != (kdf.Params{Memory: 8 * 1024, Time: 1, Par: 1}) {
+		t.Fatalf("chose %+v, %v", p, err)
+	}
+	if !strings.Contains(out, "kdf:") {
+		t.Fatalf("the bad cost was not explained:\n%s", out)
+	}
+}
+
+// TestSplitOnlyNeedsTwoPieces checks a set with no encryption is refused at a
+// threshold of one, where any single piece would be the whole file.
+func TestSplitOnlyNeedsTwoPieces(t *testing.T) {
+	opts, err := parseArgs([]string{"split", "f", "--keyless", "-n", "2", "-k", "1", "-y"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := planSplit(opts, t.TempDir()); err == nil || !strings.Contains(err.Error(), "at least 2") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// TestLayerPasswordsAreAskedForOnce checks a combine asks only for the layer
+// passwords it does not have: those typed for the envelope count as the first
+// layers', all of them when they are all it needs, and a second call is
+// answered from what was typed rather than asked again.
+func TestLayerPasswordsAreAskedForOnce(t *testing.T) {
+	p := &prompter{opts: &cliOptions{}, envelope: [][]byte{[]byte("a"), []byte("b")}, asked: true}
+	defer p.wipe()
+	var got [][]byte
+	var err error
+	out := withTerminal(t, "c\n", func() { got, err = p.layerPasswords(3) })
+	if err != nil || len(got) != 3 || string(got[0]) != "a" || string(got[1]) != "b" || string(got[2]) != "c" {
+		t.Fatalf("got %q, %v", got, err)
+	}
+	if !strings.Contains(out, "Layers 1 to 2 are the ones entered above") {
+		t.Fatalf("the question did not say which were known:\n%s", out)
+	}
+	out = withTerminal(t, "", func() { got, err = p.layerPasswords(3) })
+	if err != nil || len(got) != 3 || out != "" {
+		t.Fatalf("asked again: %q, %v, %q", got, err, out)
+	}
+
+	q := &prompter{opts: &cliOptions{}, envelope: [][]byte{[]byte("a"), []byte("b")}, asked: true}
+	defer q.wipe()
+	out = withTerminal(t, "", func() { got, err = q.layerPasswords(2) })
+	if err != nil || len(got) != 2 || out != "" {
+		t.Fatalf("the envelope's passwords were not enough: %q, %v, %q", got, err, out)
 	}
 }

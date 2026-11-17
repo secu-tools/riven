@@ -5,6 +5,7 @@ package app
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -156,5 +157,26 @@ func TestWritePromptLeavesTheCursorAfterTheQuestion(t *testing.T) {
 		if n := utf8.RuneCountInString(l); n > 60 {
 			t.Errorf("line %q is %d columns, over 60", l, n)
 		}
+	}
+}
+
+// TestAnEmptyBodyLeavesTheLeadAlone checks a message with nothing after its lead
+// prints the lead on its own, with no trailing space, coloured or not.
+func TestAnEmptyBodyLeavesTheLeadAlone(t *testing.T) {
+	var buf bytes.Buffer
+	writeWrapped(&buf, "  1) ", "   ")
+	writeLabeled(&buf, "warning:", toneWarning, "")
+	if got, want := buf.String(), "  1)\nwarning:\n"; got != want {
+		t.Fatalf("printed %q, want %q", got, want)
+	}
+	f := tempFile(t)
+	withColor(t, f)
+	writeLabeled(f, "warning:", toneWarning, "")
+	raw, err := os.ReadFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(raw), paint(f, toneWarning, "warning:")+"\n"; got != want {
+		t.Fatalf("printed %q, want %q", got, want)
 	}
 }

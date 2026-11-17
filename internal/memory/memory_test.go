@@ -234,3 +234,18 @@ func TestBytesZeroLength(t *testing.T) {
 	FreeAll(nil)
 	FreeAll([][]byte{nil, {}})
 }
+
+// TestWipeAfterDestroyIsSafe checks a wipe that reaches a buffer after it was
+// destroyed, as WipeAll from a signal can, does nothing rather than write to
+// memory that is gone.
+func TestWipeAfterDestroyIsSafe(t *testing.T) {
+	b, err := NewLocked(32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Destroy()
+	b.Wipe()
+	if b.Bytes() != nil {
+		t.Fatal("a destroyed buffer has bytes again")
+	}
+}

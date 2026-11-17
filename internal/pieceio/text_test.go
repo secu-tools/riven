@@ -7,10 +7,12 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/base32"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/secu-tools/riven/internal/format"
+	"github.com/secu-tools/riven/internal/qrcode"
 )
 
 // samplePiece returns bytes shaped like a piece: at least the minimum length and
@@ -33,7 +35,7 @@ func TestTextFormatsRoundTrip(t *testing.T) {
 	for _, f := range []Format{Base64, Base32} {
 		for _, size := range []int{format.MinPieceLen, 100, 1000, 4096} {
 			piece := samplePiece(t, size)
-			data, _, err := Encode(piece, f, 4)
+			data, err := Encode(piece, f, 4)
 			if err != nil {
 				t.Fatalf("%s %d: %v", f, size, err)
 			}
@@ -59,7 +61,7 @@ func TestTextFormatsRoundTrip(t *testing.T) {
 func TestChecksumCatchesACopyingMistake(t *testing.T) {
 	for _, f := range []Format{Base64, Base32} {
 		piece := samplePiece(t, 300)
-		data, _, err := Encode(piece, f, 4)
+		data, err := Encode(piece, f, 4)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -98,7 +100,7 @@ func TestChecksumCatchesACopyingMistake(t *testing.T) {
 func TestChecksumIsInvisible(t *testing.T) {
 	piece := samplePiece(t, 200)
 	for _, f := range []Format{Base64, Base32} {
-		data, _, err := Encode(piece, f, 4)
+		data, err := Encode(piece, f, 4)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -122,7 +124,7 @@ func TestChecksumIsInvisible(t *testing.T) {
 // extra spaces, hyphens between groups, and lines rejoined.
 func TestBase32SurvivesHandCopying(t *testing.T) {
 	piece := samplePiece(t, 300)
-	data, _, err := Encode(piece, Base32, 4)
+	data, err := Encode(piece, Base32, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +155,7 @@ func TestBase32SurvivesHandCopying(t *testing.T) {
 // TestBase32IsGroupedForReading checks the layout a person has to work through:
 // short blocks, a bounded line length, and nothing but the alphabet and spaces.
 func TestBase32IsGroupedForReading(t *testing.T) {
-	data, _, err := Encode(samplePiece(t, 400), Base32, 4)
+	data, err := Encode(samplePiece(t, 400), Base32, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +180,7 @@ func TestTextFormatsAreNotConfused(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		piece := samplePiece(t, 200+i)
 		for _, f := range []Format{Base64, Base32} {
-			data, _, err := Encode(piece, f, 4)
+			data, err := Encode(piece, f, 4)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -218,7 +220,7 @@ func TestBinaryIsNotMistakenForText(t *testing.T) {
 // piece it is, and reads back as an input file.
 func TestSheetRoundTrip(t *testing.T) {
 	piece := samplePiece(t, 300)
-	data, note, err := EncodeSheet(piece, SheetInfo{Serial: 2, Total: 5, Needed: 3, Name: "secret.pdf"}, 4)
+	data, err := EncodeSheet(piece, SheetInfo{Serial: 2, Total: 5, Needed: 3, Name: "secret.pdf"}, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,8 +234,13 @@ func TestSheetRoundTrip(t *testing.T) {
 			t.Fatalf("the sheet is missing %q", want)
 		}
 	}
-	if note == "" {
-		t.Fatal("the sheet should report its error correction level")
+	// The code on the page carries the same piece as the text.
+	png, ok := sheetQR(data)
+	if !ok {
+		t.Fatal("the sheet's QR code was not found")
+	}
+	if code, err := qrcode.Decode(png); err != nil || !bytes.Equal(code, piece) {
+		t.Fatalf("the sheet's QR code does not carry the piece: %v", err)
 	}
 	// Self-contained: nothing to fetch when it is opened years later.
 	for _, bad := range []string{"http://", "https://", "<script"} {
@@ -262,7 +269,7 @@ func TestSheetRoundTrip(t *testing.T) {
 // the file name. It still explains itself and still reads back.
 func TestSheetForHiddenDetails(t *testing.T) {
 	piece := samplePiece(t, 300)
-	data, _, err := EncodeSheet(piece, SheetInfo{Serial: 2, Total: 5, Needed: 3, Name: "secret.pdf", Hidden: true}, 4)
+	data, err := EncodeSheet(piece, SheetInfo{Serial: 2, Total: 5, Needed: 3, Name: "secret.pdf", Hidden: true}, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,7 +294,7 @@ func TestSheetForHiddenDetails(t *testing.T) {
 // scan: the text is there and the page says so.
 func TestSheetWithoutAQRCode(t *testing.T) {
 	piece := samplePiece(t, QRMaxBytes+500)
-	data, note, err := EncodeSheet(piece, SheetInfo{Serial: 1, Total: 2, Needed: 2}, 4)
+	data, err := EncodeSheet(piece, SheetInfo{Serial: 1, Total: 2, Needed: 2}, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,7 +303,7 @@ func TestSheetWithoutAQRCode(t *testing.T) {
 		t.Fatal("a piece over the QR limit should have no code")
 	}
 	if !strings.Contains(page, "too large for a QR code") {
-		t.Fatalf("the page should explain the missing code:\n%s", note)
+		t.Fatalf("the page should explain the missing code:\n%s", page)
 	}
 	got, f, err := Decode(data)
 	if err != nil {
@@ -334,7 +341,7 @@ func TestSheetGrowsToSeveralPages(t *testing.T) {
 		t.Fatalf("a %d byte piece should need several pages, got %d", len(piece), pages)
 	}
 
-	data, note, err := EncodeSheet(piece, SheetInfo{Serial: 1, Total: 3, Needed: 2}, 4)
+	data, err := EncodeSheet(piece, SheetInfo{Serial: 1, Total: 3, Needed: 2}, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -342,8 +349,8 @@ func TestSheetGrowsToSeveralPages(t *testing.T) {
 	if !strings.Contains(page, "Keep them together") {
 		t.Fatalf("a multi-page sheet should warn about keeping the pages:\n%s", page)
 	}
-	if !strings.Contains(note, "pages per piece") {
-		t.Fatalf("the note should report the page count, got %q", note)
+	if !strings.Contains(page, fmt.Sprintf("about %d printed pages", pages)) {
+		t.Fatalf("the page should say it is %d pages:\n%s", pages, page)
 	}
 	// The identity has to repeat, or a stray page cannot be placed.
 	if !strings.Contains(page, "<header>") || !strings.Contains(page, "position: fixed") {
@@ -361,10 +368,10 @@ func TestSheetGrowsToSeveralPages(t *testing.T) {
 // TestSheetRefusesAnUnprintablePiece checks the upper limit exists, since past it
 // the format is not doing what it is for.
 func TestSheetRefusesAnUnprintablePiece(t *testing.T) {
-	if _, _, err := EncodeSheet(samplePiece(t, SheetMaxPiece), SheetInfo{Serial: 1, Total: 1, Needed: 1}, 4); err != nil {
+	if _, err := EncodeSheet(samplePiece(t, SheetMaxPiece), SheetInfo{Serial: 1, Total: 1, Needed: 1}, 4); err != nil {
 		t.Fatalf("a piece at the limit must still work: %v", err)
 	}
-	_, _, err := EncodeSheet(samplePiece(t, SheetMaxPiece+1), SheetInfo{Serial: 1, Total: 1, Needed: 1}, 4)
+	_, err := EncodeSheet(samplePiece(t, SheetMaxPiece+1), SheetInfo{Serial: 1, Total: 1, Needed: 1}, 4)
 	if err == nil {
 		t.Fatal("a piece over the limit must be refused")
 	}
@@ -396,7 +403,7 @@ func TestSheetPagesIsMonotone(t *testing.T) {
 // TestSheetTellsYouHowToReadItBack checks the instructions offer a way that is
 // not retyping thousands of characters.
 func TestSheetTellsYouHowToReadItBack(t *testing.T) {
-	data, _, err := EncodeSheet(samplePiece(t, 300), SheetInfo{Serial: 1, Total: 2, Needed: 2}, 4)
+	data, err := EncodeSheet(samplePiece(t, 300), SheetInfo{Serial: 1, Total: 2, Needed: 2}, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -410,7 +417,7 @@ func TestSheetTellsYouHowToReadItBack(t *testing.T) {
 
 // TestSheetNameIsEscaped checks a file name cannot inject markup into the page.
 func TestSheetNameIsEscaped(t *testing.T) {
-	data, _, err := EncodeSheet(samplePiece(t, 100),
+	data, err := EncodeSheet(samplePiece(t, 100),
 		SheetInfo{Serial: 1, Total: 1, Needed: 1, Name: `<script>alert(1)</script>`}, 4)
 	if err != nil {
 		t.Fatal(err)
@@ -445,11 +452,37 @@ func TestFormatPathsAndNames(t *testing.T) {
 
 // TestEncodeRejectsSheet checks the one format Encode cannot produce says why.
 func TestEncodeRejectsSheet(t *testing.T) {
-	_, _, err := Encode(samplePiece(t, 100), Sheet, 4)
+	_, err := Encode(samplePiece(t, 100), Sheet, 4)
 	if err == nil {
 		t.Fatal("Encode should refuse a sheet")
 	}
 	if !strings.Contains(err.Error(), "EncodeSheet") {
 		t.Fatalf("the error should name the alternative: %v", err)
+	}
+}
+
+// TestBlankTextIsNotAPiece checks a file of nothing but spaces, line breaks and
+// hyphens is not taken for base32 or base64 with nothing in it.
+func TestBlankTextIsNotAPiece(t *testing.T) {
+	for _, raw := range []string{" ", "\n\t \r\n", "- - -", "  --\n"} {
+		if _, _, ok := tryBase32([]byte(raw)); ok {
+			t.Errorf("%q was read as base32", raw)
+		}
+		if _, _, ok := tryBase64([]byte(raw)); ok {
+			t.Errorf("%q was read as base64", raw)
+		}
+	}
+}
+
+// TestASheetIsNotWrittenWithACodeThatCannotBeRead checks a sheet asked for at a
+// module size past the most that reads back is refused, rather than written
+// with a code nothing can scan.
+func TestASheetIsNotWrittenWithACodeThatCannotBeRead(t *testing.T) {
+	info := SheetInfo{Serial: 1, Total: 2, Needed: 2}
+	if _, err := EncodeSheet(samplePiece(t, 300), info, QRMaxScale+1); err == nil {
+		t.Fatal("a sheet with an unreadable code was written")
+	}
+	if _, err := EncodeSheet(samplePiece(t, 300), info, QRMaxScale); err != nil {
+		t.Fatalf("a sheet at the largest module size was refused: %v", err)
 	}
 }

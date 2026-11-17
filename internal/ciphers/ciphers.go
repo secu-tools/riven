@@ -13,6 +13,7 @@ import (
 	"crypto/cipher"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 
@@ -28,6 +29,7 @@ type Scheme struct {
 	KeyLen   int    // key length in bytes
 	NonceLen int    // nonce length in bytes
 	TagLen   int    // bytes the AEAD adds, so a buffer can be sized before a key exists
+	MaxLen   int64  // the most plaintext one Seal takes; the AEAD panics on more
 	design   string // the cipher underneath, which one break would reach in every scheme sharing it
 	newAEAD  func(key []byte) (cipher.AEAD, error)
 }
@@ -58,14 +60,23 @@ func twofishBlock(key []byte) (cipher.Block, error) {
 	return c, nil
 }
 
+// The most plaintext one call seals: GCM counts 2^32 - 2 blocks of 16 bytes (NIST
+// SP 800-38D) and ChaCha20-Poly1305 2^32 - 1 blocks of 64 (RFC 8439). CTR runs a
+// full 128-bit counter, which no input reaches.
+const (
+	gcmMaxLen    = (1<<32 - 2) * 16
+	chachaMaxLen = (1<<32 - 1) * 64
+	ctrMaxLen    = math.MaxInt64
+)
+
 // registry is ordered by ID. IDs are permanent: never reuse or renumber one, or
 // pieces already written stop decoding.
 var registry = []Scheme{
-	{ID: 1, Name: "aes-256-gcm", KeyLen: 32, NonceLen: 12, TagLen: 16, design: "aes", newAEAD: gcmOf(aes.NewCipher)},
-	{ID: 2, Name: "chacha20-poly1305", KeyLen: 32, NonceLen: chacha20poly1305.NonceSize, TagLen: 16, design: "chacha20", newAEAD: chacha20poly1305.New},
-	{ID: 3, Name: "xchacha20-poly1305", KeyLen: 32, NonceLen: chacha20poly1305.NonceSizeX, TagLen: 16, design: "chacha20", newAEAD: chacha20poly1305.NewX},
-	{ID: 4, Name: "twofish-256-gcm", KeyLen: 32, NonceLen: 12, TagLen: 16, design: "twofish", newAEAD: gcmOf(twofishBlock)},
-	{ID: 5, Name: "aes-256-ctr-hmac", KeyLen: 32, NonceLen: ctrHMACNonceSize, TagLen: ctrHMACTagSize, design: "aes", newAEAD: newAESCTRHMAC},
+	{ID: 1, Name: "aes-256-gcm", KeyLen: 32, NonceLen: 12, TagLen: 16, MaxLen: gcmMaxLen, design: "aes", newAEAD: gcmOf(aes.NewCipher)},
+	{ID: 2, Name: "chacha20-poly1305", KeyLen: 32, NonceLen: chacha20poly1305.NonceSize, TagLen: 16, MaxLen: chachaMaxLen, design: "chacha20", newAEAD: chacha20poly1305.New},
+	{ID: 3, Name: "xchacha20-poly1305", KeyLen: 32, NonceLen: chacha20poly1305.NonceSizeX, TagLen: 16, MaxLen: chachaMaxLen, design: "chacha20", newAEAD: chacha20poly1305.NewX},
+	{ID: 4, Name: "twofish-256-gcm", KeyLen: 32, NonceLen: 12, TagLen: 16, MaxLen: gcmMaxLen, design: "twofish", newAEAD: gcmOf(twofishBlock)},
+	{ID: 5, Name: "aes-256-ctr-hmac", KeyLen: 32, NonceLen: ctrHMACNonceSize, TagLen: ctrHMACTagSize, MaxLen: ctrMaxLen, design: "aes", newAEAD: newAESCTRHMAC},
 }
 
 // suggested is the order layers that name no algorithm take one in, repeating.

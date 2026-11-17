@@ -54,7 +54,7 @@ func (d *Details) Equal(o *Details) bool {
 
 // validate rejects details no piece can carry.
 func (d *Details) validate() error {
-	if d.K < 1 || d.N < d.K || d.N > 255 {
+	if d.K < 1 || d.N < d.K || d.N > MaxPieces {
 		return errors.New("format: invalid k/n/serial")
 	}
 	if len(d.Name) > MaxNameLen {
@@ -114,7 +114,7 @@ func (d *Details) writeMeta(w *wire.Writer) {
 // detailsFixedLen is the details overhead that does not depend on the layers or
 // the strings: flags, k, n, cost, layer count, three length prefixes, and the
 // closing hash.
-const detailsFixedLen = 5 + 12 + hashLen
+const detailsFixedLen = 7 + 12 + hashLen
 
 // detailsStep is what the details are padded to a multiple of. The length of a
 // details share is the one thing a hidden piece shows of them, so without the
@@ -155,8 +155,8 @@ func EncodeDetails(d Details) ([]byte, error) {
 	size := DetailsLen(len(d.Layers), d.TextLen())
 	w := wire.NewWriter(size)
 	w.U8(d.flags())
-	w.U8(uint8(d.K))
-	w.U8(uint8(d.N))
+	w.U16(uint16(d.K))
+	w.U16(uint16(d.N))
 	w.U8(cost)
 	d.writeMeta(w)
 	body := w.Result()
@@ -175,7 +175,7 @@ func DecodeDetails(b []byte) (*Details, bool) {
 		return nil, false
 	}
 	r := newReader(body)
-	flags, k, n, cost := r.u8(), r.u8(), r.u8(), r.u8()
+	flags, k, n, cost := r.u8(), r.u16(), r.u16(), r.u8()
 	d := &Details{K: int(k), N: int(n)}
 	d.setFlags(flags)
 	r.meta(d)
@@ -248,6 +248,24 @@ func (r *reader) view(max int) []byte {
 	v, err := r.View(max)
 	r.err = err
 	return v
+}
+
+// view64 reads a field with a u64 length as a sub-slice of the buffer.
+func (r *reader) view64() []byte {
+	if r.err != nil {
+		return nil
+	}
+	v, err := r.View64()
+	r.err = err
+	return v
+}
+
+// rest reads everything left as a sub-slice of the buffer.
+func (r *reader) rest() []byte {
+	if r.err != nil {
+		return nil
+	}
+	return r.RestView()
 }
 
 // meta reads what writeMeta wrote into d, whose flags are already set.

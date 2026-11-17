@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 )
 
 func TestDoRunsEveryIndexOnce(t *testing.T) {
@@ -163,5 +164,164 @@ func TestWorkers(t *testing.T) {
 	big := Workers(1000)
 	if big > runtime.GOMAXPROCS(0) {
 		t.Fatalf("Workers(1000) = %d, over GOMAXPROCS %d", big, runtime.GOMAXPROCS(0))
+	}
+}
+
+// TestOrderedUsesEveryIndexInOrder checks Ordered hands every index to use once
+// and in order, however the work finishes, and never runs work more than
+// workers indexes ahead of use.
+func TestOrderedUsesEveryIndexInOrder(t *testing.T) {
+	for _, n := range []int{0, 1, 5, 100} {
+		for _, w := range []int{1, 3, 16} {
+			var started atomic.Int64
+			var used []int
+			err := Ordered(n, w, func(i int) error {
+				started.Add(1)
+				if i%3 == 0 {
+					runtime.Gosched() // finish out of order
+				}
+				return nil
+			}, func(i int) error {
+				if s := started.Load(); s > int64(i+w) {
+					return fmt.Errorf("index %d started while %d was in use, %d workers", s-1, i, w)
+				}
+				used = append(used, i)
+				return nil
+			}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i, u := range used {
+				if u != i {
+					t.Fatalf("n=%d w=%d: used %v, want 0 to %d in order", n, w, used, n-1)
+				}
+			}
+			if len(used) != n || started.Load() != int64(n) {
+				t.Fatalf("n=%d w=%d: used %d and started %d", n, w, len(used), started.Load())
+			}
+		}
+	}
+}
+
+// TestOrderedStopsAtTheFirstError checks an error from work or from use stops
+// Ordered there: use sees nothing past it, no work starts long after it, and the
+// error is what comes back.
+func TestOrderedStopsAtTheFirstError(t *testing.T) {
+	const n, w, at = 50, 4, 10
+	errAt := errors.New("failed")
+	for _, inWork := range []bool{true, false} {
+		var started atomic.Int64
+		var used []int
+		err := Ordered(n, w, func(i int) error {
+			started.Add(1)
+			if inWork && i == at {
+				return errAt
+			}
+			return nil
+		}, func(i int) error {
+			used = append(used, i)
+			if !inWork && i == at {
+				return errAt
+			}
+			return nil
+		}, nil)
+		if !errors.Is(err, errAt) {
+			t.Fatalf("in work %v: got %v", inWork, err)
+		}
+		want := at
+		if !inWork {
+			want++
+		}
+		if len(used) != want || used[len(used)-1] != want-1 {
+			t.Fatalf("in work %v: used %v, want 0 to %d", inWork, used, want-1)
+		}
+		if s := started.Load(); s > at+w {
+			t.Fatalf("in work %v: %d indexes started, at most %d should", inWork, s, at+w)
+		}
+	}
+}
+
+// TestOrderedSaysWhatItWaitsFor checks waiting hears of an index whose work is
+// not done when use reaches it, and not of those whose work is.
+func TestOrderedSaysWhatItWaitsFor(t *testing.T) {
+	// The first index's work finishes only once Ordered says it is waiting for
+	// it, so without the call it would never finish. The rest are done by the time
+	// use reaches them: use of the first waits until every other goroutine has
+	// finished or is blocked, which the workers are only once they have handed
+	// their results over.
+	synctest.Test(t, func(t *testing.T) {
+		const n = 6
+		told := make(chan struct{})
+		var waited []int
+		err := Ordered(n, n, func(i int) error {
+			if i == 0 {
+				<-told
+			}
+			return nil
+		}, func(i int) error {
+			if i == 0 {
+				synctest.Wait()
+			}
+			return nil
+		}, func(i int) {
+			waited = append(waited, i)
+			if i == 0 {
+				close(told)
+			}
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(waited) != 1 || waited[0] != 0 {
+			t.Fatalf("waited for %v, want index 0 alone", waited)
+		}
+	})
+}
+
+func TestOrderedPassesAPanicToTheCaller(t *testing.T) {
+	var used atomic.Int32
+	got := func() (r any) {
+		defer func() { r = recover() }()
+		_ = Ordered(20, 4, func(i int) error {
+			if i == 3 {
+				panic("worker failed")
+			}
+			return nil
+		}, func(int) error {
+			used.Add(1)
+			return nil
+		}, nil)
+		return nil
+	}()
+	if got == nil || !strings.Contains(fmt.Sprint(got), "worker failed") {
+		t.Fatalf("the caller recovered %v, want the worker's panic", got)
+	}
+	if used.Load() != 3 {
+		t.Fatalf("use took %d indexes, want the 3 before the panic", used.Load())
+	}
+}
+
+// TestOrderedKeepsAPanicInUse checks a panic in use reaches the caller as it is,
+// even when a worker has panicked meanwhile: use runs on the caller's goroutine,
+// so its panic is the caller's own, and the worker's once replaced it. The
+// worker panics first, and use waits for that before it panics too.
+func TestOrderedKeepsAPanicInUse(t *testing.T) {
+	workerDone := make(chan struct{})
+	got := func() (r any) {
+		defer func() { r = recover() }()
+		_ = Ordered(4, 2, func(i int) error {
+			if i == 1 {
+				defer close(workerDone)
+				panic("worker failed")
+			}
+			return nil
+		}, func(i int) error {
+			<-workerDone
+			panic("use failed")
+		}, nil)
+		return nil
+	}()
+	if fmt.Sprint(got) != "use failed" {
+		t.Fatalf("the caller recovered %v, want use's own panic", got)
 	}
 }

@@ -5,47 +5,11 @@ package app
 
 import (
 	"bytes"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
-
-// captureBoth runs fn with stdout and stderr replaced by pipes. Both are drained
-// while fn runs, since output larger than a pipe buffer would otherwise deadlock.
-func captureBoth(t *testing.T, fn func()) (stdout, stderr string) {
-	t.Helper()
-	oldOut, oldErr := os.Stdout, os.Stderr
-	rOut, wOut, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	rErr, wErr, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout, os.Stderr = wOut, wErr
-
-	outCh, errCh := make(chan string), make(chan string)
-	drain := func(r *os.File, ch chan string) {
-		var b bytes.Buffer
-		io.Copy(&b, r)
-		ch <- b.String()
-	}
-	go drain(rOut, outCh)
-	go drain(rErr, errCh)
-
-	fn()
-
-	wOut.Close()
-	wErr.Close()
-	os.Stdout, os.Stderr = oldOut, oldErr
-	o, e := <-outCh, <-errCh
-	rOut.Close()
-	rErr.Close()
-	return o, e
-}
 
 // A generated password is the only copy that will exist. isInteractive tests
 // stdin, so with stdin a terminal and stdout redirected -- `riven split x > log`

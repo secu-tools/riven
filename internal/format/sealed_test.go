@@ -6,8 +6,11 @@ package format
 import (
 	"bytes"
 	"errors"
+	"runtime"
 	"slices"
 	"testing"
+
+	"golang.org/x/crypto/chacha20poly1305"
 
 	"github.com/secu-tools/riven/internal/cascade"
 	"github.com/secu-tools/riven/internal/kem"
@@ -68,6 +71,31 @@ func TestSealedToKeysOnly(t *testing.T) {
 	}
 }
 
+// TestTryingKeysReusesOneBuffer checks the ways tried on one piece share the
+// memory they open into: a wrong key leaves it wiped for the next attempt, so a
+// piece that opens at the third subset of keys costs one piece's worth, not
+// three. Every subset here decapsulates, since any 32 bytes do for X25519, so
+// each one that is wrong gets as far as a full open.
+func TestTryingKeysReusesOneBuffer(t *testing.T) {
+	a, b, other := genKey(t, kem.X25519), genKey(t, kem.X25519), genKey(t, kem.X25519)
+	piece, err := Encode(sealedInput(make([]byte, 4<<20), nil, a, b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	m, _, err := DecodeSealed(piece, nil, []*kem.PrivateKey{a, other, b}, nil)
+	runtime.ReadMemStats(&after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Wipe()
+	if got := after.TotalAlloc - before.TotalAlloc; got > uint64(2*len(piece)) {
+		t.Fatalf("trying keys on a %d-byte piece allocated %d bytes", len(piece), got)
+	}
+}
+
 // TestSealedToPasswordAndKey checks a set with both takes both: the key alone
 // and the password alone each fail.
 func TestSealedToPasswordAndKey(t *testing.T) {
@@ -99,7 +127,7 @@ func TestSealedToPasswordAndKey(t *testing.T) {
 // TestDecodeSealedOpensAPasswordPiece checks a piece sealed with passwords alone
 // opens through DecodeSealed too, whatever keys come with them.
 func TestDecodeSealedOpensAPasswordPiece(t *testing.T) {
-	piece, err := Encode(buildInput([]byte("share")))
+	piece, err := Encode(buildInput([]byte("shares")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +144,7 @@ func TestDecodeSealedOpensAPasswordPiece(t *testing.T) {
 // to once, so its one private key opens the piece.
 func TestSealedRepeatedRecipient(t *testing.T) {
 	k := genKey(t, kem.X25519)
-	in := sealedInput([]byte("share"), nil, k, k)
+	in := sealedInput([]byte("shares"), nil, k, k)
 	piece, err := Encode(in)
 	if err != nil {
 		t.Fatal(err)
@@ -147,7 +175,7 @@ func TestSealedPieceLen(t *testing.T) {
 // sit outside the AEAD, is caught.
 func TestSealedHeaderIsBound(t *testing.T) {
 	k := genKey(t, kem.X25519)
-	piece, err := Encode(sealedInput([]byte("share"), nil, k))
+	piece, err := Encode(sealedInput([]byte("shares"), nil, k))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +194,7 @@ func TestSealedHeaderHasNoFixedBytes(t *testing.T) {
 	k := genKey(t, kem.P256)
 	seen := map[byte]bool{}
 	for range 16 {
-		piece, err := Encode(sealedInput([]byte("share"), nil, k))
+		piece, err := Encode(sealedInput([]byte("shares"), nil, k))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -178,7 +206,7 @@ func TestSealedHeaderHasNoFixedBytes(t *testing.T) {
 }
 
 func TestSealedRejectsKeyless(t *testing.T) {
-	in := sealedInput([]byte("share"), nil, genKey(t, kem.X25519))
+	in := sealedInput([]byte("shares"), nil, genKey(t, kem.X25519))
 	in.Keyless = true
 	if _, err := Encode(in); err == nil {
 		t.Fatal("a keyless piece sealed to keys should be rejected")
@@ -263,4 +291,132 @@ func FuzzDecodeSealed(f *testing.F) {
 				m.Keyless, m.SealedToKeys, m.PasswordOpened)
 		}
 	})
+}
+
+// TestEncodeToSealsInPlace checks a piece sealed around a share and a fragment
+// already where they go, in a buffer that held other bytes before, opens to them
+// with every kind of envelope; and that EncodeTo refuses a buffer of the wrong
+// length rather than writing past what the shape needs.
+func TestEncodeToSealsInPlace(t *testing.T) {
+	share, frag := bytes.Repeat([]byte("sh"), 500), bytes.Repeat([]byte("f"), 301)
+	key := genKey(t, kem.X25519)
+	pw := [][]byte{[]byte("password")}
+	cases := map[string]struct {
+		in   EncodeInput
+		open func(piece []byte) (*Manifest, error)
+	}{
+		"password": {buildInput(share), func(p []byte) (*Manifest, error) {
+			m, _, err := Decode(p, pw, nil)
+			return m, err
+		}},
+		"recipient and password": {sealedInput(share, pw, key), func(p []byte) (*Manifest, error) {
+			m, _, err := DecodeSealed(p, pw, []*kem.PrivateKey{key}, nil)
+			return m, err
+		}},
+	}
+	hidden := buildInput(share)
+	hidden.Keyless, hidden.Passwords, hidden.DetailsShare, hidden.Pad = true, nil, []byte("details share"), true
+	cases["keyless, hidden, padded"] = struct {
+		in   EncodeInput
+		open func(piece []byte) (*Manifest, error)
+	}{hidden, func(p []byte) (*Manifest, error) {
+		m, _, err := Decode(p, nil, nil)
+		return m, err
+	}}
+
+	for name, tc := range cases {
+		in := tc.in
+		in.Fragment = frag
+		shape := in.Shape()
+		piece := bytes.Repeat([]byte{0xff}, PieceLen(shape))
+		in.Fragment = piece[shape.FragmentAt():shape.ShareAt()]
+		in.Share = piece[shape.ShareAt() : shape.ShareAt()+len(share)]
+		copy(in.Fragment, frag)
+		copy(in.Share, share)
+		if err := EncodeTo(piece, in); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if bytes.Contains(piece, share[:64]) {
+			t.Fatalf("%s: the share is still in the clear", name)
+		}
+		m, err := tc.open(piece)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !bytes.Equal(m.Share, share) || !bytes.Equal(m.Fragment, frag) {
+			t.Fatalf("%s: the share or the fragment did not come back", name)
+		}
+	}
+
+	in := buildInput(share)
+	for _, n := range []int{-1, 1} {
+		piece := make([]byte, PieceLen(in.Shape())+n)
+		if err := EncodeTo(piece, in); err == nil {
+			t.Fatalf("a buffer %d bytes off was accepted", n)
+		}
+	}
+}
+
+// TestEncodeToWipesOnAnError checks a piece refused before it is sealed is wiped
+// all the same: its share may already be in it, in the clear.
+func TestEncodeToWipesOnAnError(t *testing.T) {
+	in := buildInput([]byte("shares"))
+	bad := in
+	bad.Serial = 0
+	for name, c := range map[string]struct {
+		in    EncodeInput
+		extra int
+	}{"invalid input": {bad, 0}, "wrong length": {in, 1}} {
+		piece := bytes.Repeat([]byte{0xAB}, PieceLen(c.in.Shape())+c.extra)
+		if err := EncodeTo(piece, c.in); err == nil {
+			t.Fatalf("%s: encoded", name)
+		}
+		if !bytes.Equal(piece, make([]byte, len(piece))) {
+			t.Fatalf("%s: the piece was left as it was", name)
+		}
+	}
+}
+
+// TestAMislabelledPasswordEnvelopeIsRefused forges a piece whose envelope opens
+// with the password key alone while its manifest says it is keyless: a keyless
+// piece's manifest, sealed again under the password key. Both ways of opening a
+// password piece must refuse it as mislabelled, rather than open it, and
+// DecodeSealed must not go on to try the keys after that refusal.
+func TestAMislabelledPasswordEnvelopeIsRefused(t *testing.T) {
+	in := buildInput([]byte("keyless shares"))
+	in.Keyless, in.Encrypted, in.Layers, in.Passwords = true, false, nil, nil
+	piece, err := Encode(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	header := saltLen + kdfLen
+	nonce := piece[header : header+nonceLen]
+	keyless, err := chacha20poly1305.NewX(keylessKey(piece[:saltLen]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := keyless.Open(nil, nonce, piece[header+nonceLen:], envelopeAD(piece[:header]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	passwords := [][]byte{[]byte("password")}
+	byPassword, err := chacha20poly1305.NewX(envelopeKey(passwords, piece[:saltLen], fast))
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged := append(bytes.Clone(piece[:header+nonceLen]),
+		byPassword.Seal(nil, nonce, manifest, envelopeAD(piece[:header]))...)
+
+	if _, _, err := DecodePassword(forged, passwords, &fast); !errors.Is(err, errNotPasswordSealed) {
+		t.Fatalf("DecodePassword: %v, want the piece refused as mislabelled", err)
+	}
+	priv, err := kem.Generate(kem.X25519)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, keys := range [][]*kem.PrivateKey{nil, {priv}} {
+		if _, _, err := DecodeSealed(forged, passwords, keys, &fast); !errors.Is(err, errNotPasswordSealed) {
+			t.Fatalf("DecodeSealed with %d key(s): %v, want the piece refused as mislabelled", len(keys), err)
+		}
+	}
 }

@@ -22,6 +22,7 @@ SOFTWARE.
 
 --------------------------------------------------------------------------
 
-This project vendors third-party source under separate licenses. See
-THIRD_PARTY_NOTICES for the full list. In particular, internal/shamir/ is
-licensed under MPL-2.0 (see internal/shamir/LICENSE), not MIT.
+This license covers Riven's own code. A Riven program also contains
+third-party software under its own licenses: the Go runtime and standard
+library, the Go modules Riven depends on, and the BIP-39 English word list.
+THIRD_PARTY_NOTICES lists each with its license text.

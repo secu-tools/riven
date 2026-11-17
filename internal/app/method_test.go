@@ -222,7 +222,7 @@ func TestCombineAsksForWhatAHiddenSetWithheld(t *testing.T) {
 			t.Fatal(err)
 		}
 		opts.yes = true
-		got, _, err := combinePieces(opts, pieces[:2], nil)
+		got, _, err := combinePieces(opts, copied(pieces[:2]), nil)
 		return got, err
 	}
 	if _, err := run(); err == nil || !strings.Contains(err.Error(), "--algo") {
@@ -249,7 +249,7 @@ func TestCombineAsksAPublicSetForItsPasswords(t *testing.T) {
 	opts := &cliOptions{command: "combine"}
 	var got []byte
 	var err error
-	out := withTerminal(t, "first\nsecond\n", func() { got, _, err = combinePieces(opts, pieces[:2], nil) })
+	out := withTerminal(t, "first\nsecond\n", func() { got, _, err = combinePieces(opts, copied(pieces[:2]), nil) })
 	if err != nil || !bytes.Equal(got, input) {
 		t.Fatalf("rebuilt %q, %v\n%s", got, err, out)
 	}
@@ -274,7 +274,7 @@ func TestCombineKeepsThePasswordThatOpenedThePieces(t *testing.T) {
 	opts := &cliOptions{command: "combine"}
 	var got []byte
 	var err error
-	out := withTerminal(t, "first\n\nsecond\n", func() { got, _, err = combinePieces(opts, pieces[:2], nil) })
+	out := withTerminal(t, "first\n\nsecond\n", func() { got, _, err = combinePieces(opts, copied(pieces[:2]), nil) })
 	if err != nil || !bytes.Equal(got, input) {
 		t.Fatalf("rebuilt %q, %v\n%s", got, err, out)
 	}
@@ -322,7 +322,7 @@ func TestCostNoticeIgnoresNoise(t *testing.T) {
 	for i := 0; i < 8; i++ {
 		pieces := makePieces(t, core.SplitOptions{N: 2, K: 2, Keyless: true}, []byte("noise"))
 		out := withTerminal(t, "", func() {
-			if _, _, err := combinePieces(&cliOptions{command: "combine"}, pieces, nil); err != nil {
+			if _, _, err := combinePieces(&cliOptions{command: "combine"}, copied(pieces), nil); err != nil {
 				t.Error(err)
 			}
 		})
@@ -339,7 +339,7 @@ func TestSheetKeepsHiddenDetailsHidden(t *testing.T) {
 	plan := planFor(t, "--password-env", "RIVEN_UNIT_SH", "-n", "5", "-k", "3", "--info", "none")
 	plan.opts.Name = "wallet.kdbx"
 	pieces := makePieces(t, plan.opts, []byte("printed"))
-	page, _, err := encodeOne(pieces[1], pieceio.Sheet, plan, 2)
+	page, err := encodeOne(pieces[1], pieceio.Sheet, plan, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -351,7 +351,7 @@ func TestSheetKeepsHiddenDetailsHidden(t *testing.T) {
 	// A set that shows its details still prints them.
 	plan = planFor(t, "--password-env", "RIVEN_UNIT_SH", "-n", "5", "-k", "3")
 	plan.opts.Name = "wallet.kdbx"
-	page, _, err = encodeOne(makePieces(t, plan.opts, []byte("printed"))[1], pieceio.Sheet, plan, 2)
+	page, err = encodeOne(makePieces(t, plan.opts, []byte("printed"))[1], pieceio.Sheet, plan, 2)
 	if err != nil || !strings.Contains(string(page), "2 of 5") || !strings.Contains(string(page), "wallet.kdbx") {
 		t.Fatalf("the sheet of a visible set lost its details: %v", err)
 	}
@@ -399,7 +399,7 @@ func TestCombineAsksForTheCostBeforeThePasswords(t *testing.T) {
 	}
 	var got []byte
 	out := withTerminal(t, "m=8,t=1,p=1\nonly once\n", func() {
-		got, _, err = combinePieces(&cliOptions{command: "combine"}, pieces, nil)
+		got, _, err = combinePieces(&cliOptions{command: "combine"}, copied(pieces), nil)
 	})
 	if err != nil || !bytes.Equal(got, input) {
 		t.Fatalf("rebuilt %q, %v\n%s", got, err, out)
@@ -419,7 +419,7 @@ func TestCraftedKeylessPieceStillAsksForThePassword(t *testing.T) {
 	var got []byte
 	var err error
 	out := withTerminal(t, "pw\n\n", func() {
-		got, _, err = combinePieces(&cliOptions{command: "combine"}, [][]byte{crafted[0], genuine[0], genuine[1]}, nil)
+		got, _, err = combinePieces(&cliOptions{command: "combine"}, copied([][]byte{crafted[0], genuine[0], genuine[1]}), nil)
 	})
 	if !strings.Contains(out, "Some pieces opened without a password") {
 		t.Fatalf("the password was not asked for:\n%s", out)
@@ -428,7 +428,7 @@ func TestCraftedKeylessPieceStillAsksForThePassword(t *testing.T) {
 		t.Fatalf("the crafted content came back: %q", got)
 	}
 	// Under -y it refuses rather than guessing.
-	if _, _, err := combinePieces(&cliOptions{yes: true}, [][]byte{crafted[0], genuine[0], genuine[1]}, nil); err == nil {
+	if _, _, err := combinePieces(&cliOptions{yes: true}, copied([][]byte{crafted[0], genuine[0], genuine[1]}), nil); err == nil {
 		t.Fatal("automation combined a mixed set without a password")
 	}
 }
@@ -440,6 +440,33 @@ func TestInfoNoneNeedsAThresholdAboveOne(t *testing.T) {
 	o, _ := parseArgs([]string{"split", "f", "--password-env", "RIVEN_UNIT_K1", "-n", "3", "-k", "1", "--info", "none", "-y"})
 	if _, err := planSplit(o, t.TempDir()); err == nil || !strings.Contains(err.Error(), "-k 1") {
 		t.Fatalf("-k 1 with --info none: %v", err)
+	}
+}
+
+// TestInfoRefusalsAreWordedForTheCommandLine checks each mode core refuses comes
+// back naming the flags to change, and that a mode it accepts passes. The
+// planner once took any refusal for a missing password, whatever core's reason.
+func TestInfoRefusalsAreWordedForTheCommandLine(t *testing.T) {
+	password := []core.LayerSpec{{Kind: core.PasswordLayer, Password: []byte("pw")}}
+	for _, c := range []struct {
+		opts core.SplitOptions
+		want string
+	}{
+		{core.SplitOptions{N: 3, K: 2, Keyless: true, Info: core.InfoProtected}, "--info protected needs a password or a recipient key"},
+		{core.SplitOptions{N: 3, K: 2, Keyless: true, Info: core.InfoStrict}, "--info strict needs a password or a recipient key"},
+		{core.SplitOptions{N: 3, K: 1, Layers: password, Info: core.InfoHidden}, "--info none needs -k 2 or more"},
+		{core.SplitOptions{N: 3, K: 2, Info: core.InfoMode(99)}, "unknown info mode"},
+		{core.SplitOptions{N: 3, K: 2, Layers: password, Info: core.InfoStrict}, ""},
+		{core.SplitOptions{N: 3, K: 2, Keyless: true, Info: core.InfoHidden}, ""},
+		{core.SplitOptions{N: 3, K: 1, Keyless: true}, ""},
+	} {
+		err := checkInfo(&splitPlan{opts: c.opts})
+		switch {
+		case c.want == "" && err != nil:
+			t.Errorf("--info %s at K %d was refused: %v", c.opts.Info, c.opts.K, err)
+		case c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)):
+			t.Errorf("--info %s at K %d: got %v, want %q", c.opts.Info, c.opts.K, err, c.want)
+		}
 	}
 }
 
@@ -462,5 +489,111 @@ func TestInfoAsksOnceForSeveralPieces(t *testing.T) {
 	}
 	if n := strings.Count(out, "piece      :"); n != 3 {
 		t.Fatalf("info described %d of 3 pieces:\n%s", n, out)
+	}
+}
+
+// copied gives combinePieces a copy of pieces of its own. It takes over what it
+// is given and wipes it, so a test that hands it the same pieces twice would
+// otherwise hand it wiped ones the second time.
+func copied(pieces [][]byte) [][]byte {
+	out := make([][]byte, len(pieces))
+	for i, p := range pieces {
+		out[i] = bytes.Clone(p)
+	}
+	return out
+}
+
+// TestInfoDescribesWhatASetNeeds covers the info lines about what a set needs
+// besides its pieces: a recipient key and no password, and a cost it did not
+// record; the grouping of pieces whose details are hidden; and the failure when
+// no piece can be read at all, which a script has to be able to see.
+func TestInfoDescribesWhatASetNeeds(t *testing.T) {
+	priv, err := kem.Generate(kem.X25519)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipient := makePieces(t, core.SplitOptions{N: 2, K: 2, Info: core.InfoPublic,
+		Layers: []core.LayerSpec{{Kind: core.RecipientLayer, Recipient: priv.Public()}}}, []byte("x"))
+	noCost, err := core.Split([]byte("x"), core.SplitOptions{N: 2, K: 2, Info: core.InfoPublic, Params: fastKDF,
+		RecordAlgo: true, Layers: []core.LayerSpec{{Kind: core.PasswordLayer, Password: []byte("pw")}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hidden := makePieces(t, core.SplitOptions{N: 3, K: 2, Keyless: true, Info: core.InfoHidden}, []byte("x"))
+	locked := makePieces(t, core.SplitOptions{N: 2, K: 2,
+		Layers: []core.LayerSpec{{Kind: core.PasswordLayer, Password: []byte("pw")}}}, []byte("x"))
+
+	run := func(paths ...string) (string, error) {
+		opts, err := parseArgs(append([]string{"info"}, paths...))
+		if err != nil {
+			t.Fatal(err)
+		}
+		opts.yes = true
+		var runErr error
+		out := capture(t, func() { runErr = cmdInfo(opts) })
+		return out, runErr
+	}
+	for name, c := range map[string]struct {
+		paths []string
+		want  []string
+	}{
+		"recipient only": {writePieces(t, t.TempDir(), recipient)[:1],
+			[]string{"password   : none; a recipient private key is required", "recipients : 1 layer(s) need a private key"}},
+		"cost not recorded": {writePieces(t, t.TempDir(), noCost)[:1],
+			[]string{"kdf        : not recorded; give it with --kdf to combine"}},
+		"hidden grouped": {writePieces(t, t.TempDir(), hidden)[:2],
+			[]string{"2 piece(s), details hidden"}},
+	} {
+		out, err := run(c.paths...)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		for _, w := range c.want {
+			if !strings.Contains(out, w) {
+				t.Errorf("%s: info lacks %q:\n%s", name, w, out)
+			}
+		}
+	}
+	if _, err := run(writePieces(t, t.TempDir(), locked)[:1]...); err == nil ||
+		!strings.Contains(err.Error(), "no piece could be opened") {
+		t.Fatalf("a piece nothing opens: %v", err)
+	}
+}
+
+// TestSummaryCoversEveryThresholdAndSecret covers the summary lines the other
+// cases do not reach: at a threshold of one there is no promise about fewer
+// pieces to make, and a strict set says what reads it, with the guessing it
+// allows only when a password alone does.
+func TestSummaryCoversEveryThresholdAndSecret(t *testing.T) {
+	t.Setenv("RIVEN_UNIT_SK", "one")
+	for method, want := range map[string]string{
+		"full": "full; any one piece rebuilds it", "compact": "compact; any one piece rebuilds it",
+	} {
+		plan := planFor(t, "--password-env", "RIVEN_UNIT_SK", "-n", "2", "-k", "1", "--method", method)
+		if got := methodSummary(plan); got != want {
+			t.Errorf("%s at k=1: %q, want %q", method, got, want)
+		}
+	}
+	plan := planFor(t, "--password-env", "RIVEN_UNIT_SK", "--info", "strict")
+	if got, want := infoSummary(plan), "readable with the password; one piece can test guesses"; got != want {
+		t.Errorf("strict, one password: %q, want %q", got, want)
+	}
+
+	dir := t.TempDir()
+	var args []string
+	for _, name := range []string{"a.pub", "b.pub"} {
+		priv, err := kem.Generate(kem.X25519)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(dir, name)
+		if err := writePublicKey(path, priv.Public()); err != nil {
+			t.Fatal(err)
+		}
+		args = append(args, "--recipient", path)
+	}
+	plan = planFor(t, append(args, "--info", "strict")...)
+	if got, want := infoSummary(plan), "readable with every private key"; got != want {
+		t.Errorf("strict, two keys: %q, want %q", got, want)
 	}
 }

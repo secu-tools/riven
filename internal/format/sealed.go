@@ -78,7 +78,7 @@ func EncapsLen(recipients []*kem.PublicKey) int {
 func sealTo(recipients []*kem.PublicKey, passwords [][]byte, salt []byte, p kdf.Params) (masked, key []byte, err error) {
 	var encs []byte
 	var secrets [][]byte
-	defer func() { wipeAll(secrets) }()
+	defer func() { memory.FreeAll(secrets) }()
 	for _, r := range sealOrder(recipients) {
 		ss, enc, err := r.Encapsulate()
 		if err != nil {
@@ -93,12 +93,6 @@ func sealTo(recipients []*kem.PublicKey, passwords [][]byte, salt []byte, p kdf.
 		defer memory.Zero(pwKey)
 	}
 	return maskEncs(encs, salt), sealedKey(salt, pwKey, encs, secrets), nil
-}
-
-func wipeAll(bs [][]byte) {
-	for _, b := range bs {
-		memory.Zero(b)
-	}
 }
 
 // maskEncs XORs the encapsulated keys with a keystream drawn from the salt. The
@@ -147,21 +141,20 @@ func DecodeSealed(piece []byte, passwords [][]byte, keys []*kem.PrivateKey, over
 	if override != nil {
 		params = *override
 	}
-	var pwKey []byte
+	var pwKey, buf []byte
 	if len(passwords) > 0 {
 		pwKey = envelopeKey(passwords, piece[:saltLen], params)
 		defer memory.Zero(pwKey)
-		if m, err := openAt(piece, 0, bytes.Clone(pwKey)); err == nil {
-			if m.Keyless || m.SealedToKeys {
-				m.Wipe()
-				return nil, kdf.Params{}, errors.New("format: the piece opened with the password alone but is not marked so")
-			}
-			m.PasswordOpened = true
+		m, err := openWithPassword(piece, bytes.Clone(pwKey), &buf)
+		if err == nil {
 			return m, params, nil
+		}
+		if errors.Is(err, errNotPasswordSealed) {
+			return nil, kdf.Params{}, err
 		}
 	}
 	m := eachSubset(openOrder(keys), func(sub []*kem.PrivateKey) *Manifest {
-		m, _ := openSealed(piece, pwKey, sub)
+		m, _ := openSealed(piece, pwKey, sub, &buf)
 		return m
 	})
 	if m == nil {
@@ -181,8 +174,8 @@ func DecodeSealed(piece []byte, passwords [][]byte, keys []*kem.PrivateKey, over
 }
 
 // openSealed opens a piece whose header carries one encapsulation for each of
-// keys, in that order.
-func openSealed(piece, pwKey []byte, keys []*kem.PrivateKey) (*Manifest, error) {
+// keys, in that order, into buf: see openAt.
+func openSealed(piece, pwKey []byte, keys []*kem.PrivateKey, buf *[]byte) (*Manifest, error) {
 	encLen := 0
 	for _, k := range keys {
 		encLen += k.Scheme().CiphertextSize()
@@ -193,7 +186,7 @@ func openSealed(piece, pwKey []byte, keys []*kem.PrivateKey) (*Manifest, error) 
 	salt := piece[:saltLen]
 	encs := maskEncs(piece[saltLen+kdfLen:saltLen+kdfLen+encLen], salt)
 	secrets := make([][]byte, 0, len(keys))
-	defer func() { wipeAll(secrets) }()
+	defer func() { memory.FreeAll(secrets) }()
 	off := 0
 	for _, k := range keys {
 		n := k.Scheme().CiphertextSize()
@@ -204,7 +197,7 @@ func openSealed(piece, pwKey []byte, keys []*kem.PrivateKey) (*Manifest, error) 
 		secrets = append(secrets, ss)
 		off += n
 	}
-	return openAt(piece, encLen, sealedKey(salt, pwKey, encs, secrets))
+	return openAt(piece, encLen, sealedKey(salt, pwKey, encs, secrets), buf)
 }
 
 // eachSubset calls try with keys, then, when there are few enough of them, with

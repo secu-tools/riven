@@ -165,46 +165,37 @@ func (f Format) String() string { return string(f) }
 
 // Encode converts one piece into the bytes to store for the given format.
 // qrScale is the QR module size in pixels; values below one use the default.
-// note is a human-readable remark about the encoding, empty when there is
-// nothing worth saying.
 //
 // Sheet is not produced here because it needs to state which piece it is; use
 // EncodeSheet.
-func Encode(piece []byte, f Format, qrScale int) (data []byte, note string, err error) {
+func Encode(piece []byte, f Format, qrScale int) ([]byte, error) {
 	switch f {
 	case Binary:
 		out := make([]byte, len(piece))
 		copy(out, piece)
-		return out, "", nil
+		return out, nil
 
 	case Base64:
-		return []byte(wrap(base64.StdEncoding.EncodeToString(withChecksum(piece)))), "", nil
+		return []byte(wrap(base64.StdEncoding.EncodeToString(withChecksum(piece)))), nil
 
 	case Base32:
-		return []byte(groupBase32(base32.StdEncoding.EncodeToString(withChecksum(piece)))), "", nil
+		return []byte(groupBase32(base32.StdEncoding.EncodeToString(withChecksum(piece)))), nil
 
 	case QR:
-		png, level, err := qrcode.Encode(piece, qrScale)
-		if err != nil {
-			return nil, "", err
-		}
-		note = fmt.Sprintf("error correction %s (~%d%% recoverable)", level.Name, level.Recovery)
-		if level.Weakest() {
-			note += "; near capacity, print at high quality"
-		}
-		return png, note, nil
+		png, _, err := qrcode.Encode(piece, qrScale)
+		return png, err
 
 	case Words:
 		if len(piece) > Bip39MaxPiece {
-			return nil, "", errBip39TooLarge
+			return nil, errBip39TooLarge
 		}
-		return []byte(encodeBip39(piece)), fmt.Sprintf("%d words per piece", Bip39Words(len(piece))), nil
+		return []byte(encodeBip39(piece)), nil
 
 	case Sheet:
-		return nil, "", errors.New("a recovery sheet needs the piece number; use EncodeSheet")
+		return nil, errors.New("a recovery sheet needs the piece number; use EncodeSheet")
 
 	default:
-		return nil, "", fmt.Errorf("unknown export format %q", f)
+		return nil, fmt.Errorf("unknown export format %q", f)
 	}
 }
 
@@ -291,6 +282,10 @@ func QRLevelFor(pieceLen int) (name string, recovery int, weakest, ok bool) {
 // QRMaxBytes is the largest piece that fits in a QR code.
 var QRMaxBytes = qrcode.MaxBytes
 
+// QRMaxScale is the largest QR module size, in pixels, a code is written at:
+// past it the largest code would be too large to read back.
+var QRMaxScale = qrcode.MaxScale
+
 // QRPhotoFriendlyBytes is the piece size below which a printed code still reads
 // from a poor photograph: small in frame, angled, rotated and blurred. Larger
 // symbols have smaller modules and need a flatter, sharper shot.
@@ -322,24 +317,13 @@ type Detected struct {
 // This is a backstop against a file that claims an absurd size, not a limit on
 // how large a piece may be: the whole file is read before anything is decoded,
 // so without it os.ReadFile would try to allocate whatever was named. It sits
-// far above any piece that could actually be combined, since rebuilding needs
-// several times the piece size in memory at once.
-const MaxStoredLen = 16 << 30
+// above the largest form of the largest piece: a piece holds at most about 256
+// GiB, and base32 text of it is about twice that.
+const MaxStoredLen = 1 << 40
 
 // Load reads a file and returns the piece bytes plus what was detected.
 func Load(path string) ([]byte, Detected, error) {
-	st, err := os.Stat(path)
-	if err != nil {
-		return nil, Detected{}, err
-	}
-	if !st.Mode().IsRegular() {
-		return nil, Detected{}, fmt.Errorf("%q: not a regular file", path)
-	}
-	if st.Size() > MaxStoredLen {
-		return nil, Detected{}, fmt.Errorf("%q: %d bytes is larger than a piece can be (limit %d)",
-			path, st.Size(), MaxStoredLen)
-	}
-	raw, err := os.ReadFile(path)
+	raw, err := readStored(path)
 	if err != nil {
 		return nil, Detected{}, err
 	}
@@ -349,6 +333,55 @@ func Load(path string) ([]byte, Detected, error) {
 	}
 	det.Path = path
 	return piece, det, nil
+}
+
+// LoadAll reads every copy of the piece a file carries, for a check of what was
+// written: a recovery sheet holds it twice, as text and, when the piece fits one,
+// as a QR code. Load reads only a sheet's text, which is what a person types in.
+// A sheet whose piece fits a code and that has none to read is an error: the
+// code is half of what was written.
+func LoadAll(path string) ([][]byte, error) {
+	raw, err := readStored(path)
+	if err != nil {
+		return nil, err
+	}
+	piece, det, err := decodeDetail(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%q: %w", path, err)
+	}
+	copies := [][]byte{piece}
+	if det.Format != Sheet {
+		return copies, nil
+	}
+	png, ok := sheetQR(raw)
+	if !ok {
+		if QRFits(len(piece)) {
+			return nil, fmt.Errorf("%q: its QR code does not read: none was found", path)
+		}
+		return copies, nil
+	}
+	code, err := qrcode.Decode(png)
+	if err != nil {
+		return nil, fmt.Errorf("%q: its QR code does not read: %w", path, err)
+	}
+	return append(copies, code), nil
+}
+
+// readStored reads a file that should hold a piece, refusing anything that is
+// not a regular file or is larger than one can be.
+func readStored(path string) ([]byte, error) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !st.Mode().IsRegular() {
+		return nil, fmt.Errorf("%q: not a regular file", path)
+	}
+	if st.Size() > MaxStoredLen {
+		return nil, fmt.Errorf("%q: %d bytes is larger than a piece can be (limit %d)",
+			path, st.Size(), MaxStoredLen)
+	}
+	return os.ReadFile(path)
 }
 
 // Decode turns stored bytes back into a piece, detecting the format.
@@ -425,28 +458,37 @@ func tryEncoded(raw []byte, valid func(byte) bool, skipHyphen, foldCase bool, gr
 // collect strips separators and keeps the rest, failing if any byte is outside
 // the alphabet. skipHyphen also treats '-' as a separator, and foldCase folds
 // letters to upper case, which base32 allows.
+//
+// It is tried against whatever file was handed in, so the alphabet is checked
+// before anything is allocated: a binary piece, which fails within a few bytes,
+// then costs nothing, however large it is.
 func collect(raw []byte, valid func(byte) bool, skipHyphen, foldCase bool) (string, bool) {
-	var sb strings.Builder
-	sb.Grow(len(raw))
+	separator := func(c byte) bool {
+		return c == ' ' || c == '\t' || c == '\r' || c == '\n' || (skipHyphen && c == '-')
+	}
+	kept := 0
 	for _, c := range raw {
-		switch c {
-		case ' ', '\t', '\r', '\n':
+		if separator(c) {
 			continue
-		case '-':
-			if skipHyphen {
-				continue
-			}
 		}
 		if c >= 0x80 || !valid(c) {
 			return "", false
+		}
+		kept++
+	}
+	if kept == 0 {
+		return "", false
+	}
+	var sb strings.Builder
+	sb.Grow(kept)
+	for _, c := range raw {
+		if separator(c) {
+			continue
 		}
 		if foldCase && c >= 'a' && c <= 'z' {
 			c -= 'a' - 'A'
 		}
 		sb.WriteByte(c)
-	}
-	if sb.Len() == 0 {
-		return "", false
 	}
 	return sb.String(), true
 }
@@ -499,9 +541,7 @@ func groupBase32(s string) string {
 		sb.WriteString(s[i:end])
 		group := i/base32GroupLen + 1
 		switch {
-		case end == len(s):
-			sb.WriteByte('\n')
-		case group%base32GroupsPerLine == 0:
+		case end == len(s), group%base32GroupsPerLine == 0:
 			sb.WriteByte('\n')
 		default:
 			sb.WriteByte(' ')

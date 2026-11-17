@@ -29,6 +29,9 @@ func TestSafeNameRejectsAnythingButAName(t *testing.T) {
 		// Windows drops trailing dots and spaces when it creates a file, so they
 		// are dropped here instead, and the name means the same everywhere.
 		"trailing.  ": "trailing",
+		// A device name followed by more than spaces is an ordinary name.
+		"console .txt": "console .txt",
+		"nul x.txt":    "nul x.txt",
 	}
 	for in, want := range keep {
 		if got := SafeName(in); got != want {
@@ -39,6 +42,8 @@ func TestSafeNameRejectsAnythingButAName(t *testing.T) {
 	refuse := []string{
 		"", ".", "..", "...", "/", `\`, "/////", "..//..//",
 		"con", "CON", "nul.txt", "com1", "LPT9.log", "aux",
+		// Windows takes a device name with spaces after it for the device too.
+		"nul .txt", "conout$ .txt", "com1 .txt", "LPT1   .pdf", "NUL .tar.gz", "aux. .txt",
 		"bad\x00name", "bell\x07", "line\nbreak", "tab\there",
 		`quote"name`, "pipe|name", "star*", "question?", "less<", "greater>",
 		"   ", "...   ",

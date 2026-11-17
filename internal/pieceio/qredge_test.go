@@ -56,12 +56,12 @@ func TestQRLevelForMatchesEncoder(t *testing.T) {
 		if !ok {
 			t.Fatalf("%d bytes: no level reported", n)
 		}
-		_, note, err := Encode(piece, QR, 2)
+		_, level, err := qrcode.Encode(piece, 2)
 		if err != nil {
 			t.Fatalf("%d bytes: encode: %v", n, err)
 		}
-		if !bytes.Contains([]byte(note), []byte("error correction "+want)) {
-			t.Fatalf("%d bytes: reported %s but the encoder said %q", n, want, note)
+		if level.Name != want {
+			t.Fatalf("%d bytes: reported %s but the encoder used %s", n, want, level.Name)
 		}
 	}
 }
@@ -80,7 +80,7 @@ func TestQRRoundTripAtEveryBoundary(t *testing.T) {
 	for _, n := range sizes {
 		piece := make([]byte, n)
 		rand.Read(piece)
-		data, _, err := Encode(piece, QR, 3)
+		data, err := Encode(piece, QR, 3)
 		if err != nil {
 			t.Fatalf("%d bytes: encode: %v", n, err)
 		}
@@ -114,7 +114,7 @@ func TestQRMixedLevelsAllRoundTrip(t *testing.T) {
 		}
 		levels[name] = true
 
-		data, _, err := Encode(piece, QR, 3)
+		data, err := Encode(piece, QR, 3)
 		if err != nil {
 			t.Fatalf("%d bytes: %v", n, err)
 		}
@@ -137,7 +137,7 @@ func TestQROverCapacityIsRefused(t *testing.T) {
 		if QRFits(n) {
 			t.Fatalf("%d bytes should not be reported as fitting", n)
 		}
-		if _, _, err := Encode(piece, QR, 2); err == nil {
+		if _, err := Encode(piece, QR, 2); err == nil {
 			t.Fatalf("%d bytes should not encode", n)
 		}
 	}

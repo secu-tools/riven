@@ -83,12 +83,29 @@ var ErrIntegrity = errors.New("compact: the package did not open (wrong or damag
 // PackageLen returns the least data a payload of payloadLen bytes seals into.
 func PackageLen(payloadLen int) int { return payloadLen + Overhead }
 
+// CheckLen refuses a payload Seal cannot take. The inner layer seals the whole
+// payload in one call, so its limit is the method's, and its AEAD would panic
+// past it.
+func CheckLen(payloadLen int) error {
+	inner, _ := ciphers.ByID(innerID)
+	if int64(payloadLen) > inner.MaxLen {
+		return fmt.Errorf("compact: too large to split: the compact method seals at most about %d GiB",
+			(inner.MaxLen+1<<29)>>30)
+	}
+	return nil
+}
+
 // Seal seals the payloadLen bytes the caller wrote at data[PayloadAt:], in place,
 // fills the room after them with random bytes and transforms the lot, so that all
 // of data is what gets dispersed. It returns the secret to share. len(data) must
 // be at least PackageLen(payloadLen); on an error data is wiped.
 func Seal(data []byte, payloadLen int) (secret []byte, err error) {
+	if err := CheckLen(payloadLen); err != nil {
+		memory.Zero(data)
+		return nil, err
+	}
 	if payloadLen < 0 || len(data) < PackageLen(payloadLen) {
+		memory.Zero(data)
 		return nil, fmt.Errorf("compact: %d bytes do not hold a package of %d", len(data), PackageLen(payloadLen))
 	}
 	outerLen := payloadLen + sealedOverhead

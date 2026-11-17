@@ -1,7 +1,7 @@
 # Testing
 
-Five tiers. Unit and fuzz tests live next to the code in `internal/`; the rest
-live under `tests/` behind build tags.
+Five tiers, and a sixth run only by hand. Unit and fuzz tests live next to the
+code in `internal/`; the rest live under `tests/` behind build tags.
 
 ```
 go test ./... -count=1                             # unit and fuzz seeds
@@ -10,13 +10,15 @@ go test -tags e2e ./tests/e2e/                     # the compiled binary
 go test -tags smoke ./tests/smoke/                 # binary starts and answers
 go test -tags scripts ./tests/scripts/             # the build scripts, against a copy
 ./build.sh -testall                                # all five, as the release does
+go test -tags large -timeout 30m ./tests/large/    # by hand: about 32 GiB of memory
 ```
 
 ## What the tiers cover
 
 - **Unit** (`internal/*/`) -- each package against its own contract: the pipeline
   in every mode, both split methods and every `--info` setting, the dispersal and
-  the all-or-nothing package, the byte format against [format.md](format.md), padding, the
+  the all-or-nothing package, the Shamir sharing against a second, textbook
+  implementation, the byte format against [format.md](format.md), padding, the
   transport encodings, key types, the CLI surface, and the stealth properties
   (no constant offsets, uniform bytes, nothing recognisable in a piece), that
   fewer than K pieces reveal nothing, every order of the algorithms, and that
@@ -34,6 +36,9 @@ go test -tags scripts ./tests/scripts/             # the build scripts, against 
   copy of the tree: the build number convention, a failed compile, a failed
   package, finding or failing to install nfpm, and `-native` building only this
   host.
+- **Large** (`tests/large/`) -- a split and combine just past 4 GiB with each
+  method, where a 32-bit length would wrap. Too large for CI or `-testall`; the
+  unit tests cover the same limits cheaply, without allocating them.
 
 Every defect found during development has a regression test naming the original
 behaviour (`*/regression_test.go`). Keyless mode is checked from both directions:
@@ -54,8 +59,7 @@ go test ./internal/format -fuzz "^FuzzDecode" -fuzztime=60s   # active fuzzing
 
 - Tests use a low-cost Argon2id configuration; production defaults are far
   stronger.
-- `go vet ./...` and `gofmt -l .` are expected to be clean, except for the two
-  vendored files in `internal/shamir/`, which are left byte-for-byte as upstream.
+- `go vet ./...` and `gofmt -l .` are expected to be clean.
 - Some tests skip where the platform cannot host them, and say so when they do:
   file mode checks on Windows, where access follows inherited ACLs instead;
   creating a symlink or a file name containing a terminal escape, which not every

@@ -768,8 +768,8 @@ func qrEdgeLen(t *testing.T, dir, name string) int {
 	}
 
 	// Aim for the middle of the window, between the class under the limit and the
-	// limit itself. Below a Shamir chunk a byte of content adds one to a piece, so
-	// the second split should land there.
+	// limit itself. Unpadded, a piece grows with the content a symbol, two bytes,
+	// at a time, so the second split should land there.
 	target := (under + 1 + limit) / 2
 	n := 2048
 	for try := 1; ; try++ {

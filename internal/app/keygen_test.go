@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/secu-tools/riven/internal/core"
 )
 
 // -o was accepted and ignored, so a private key landed in the working directory
@@ -123,6 +125,8 @@ func TestKeygenRejectsFlagsThatDoNothing(t *testing.T) {
 		{"--text", cliOptions{text: "x", textSet: true}},
 		{"stray operand", cliOptions{files: []string{"extra"}}},
 		{"--out with both named", cliOptions{outDir: "d", pubOut: "a.pub", privOut: "b.key"}},
+		{"--password-env", cliOptions{layerSources: []layerSource{{kind: core.PasswordLayer, env: "PW"}}}},
+		{"--recipient", cliOptions{layerSources: []layerSource{{kind: core.RecipientLayer, file: "r.pub"}}}},
 	}
 	for _, c := range cases {
 		o := c.opts

@@ -174,33 +174,6 @@ jobs:
           if $FAILED; then exit 1; fi
 
   # ---------------------------------------------------------------
-  # Vendored Shamir: fail when the upstream copy drifts
-  # ---------------------------------------------------------------
-  vendored-shamir:
-    name: Vendored Shamir Drift
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      # internal/shamir is a copy of an MPL-2.0 file from a BUSL-1.1 repository,
-      # so it cannot be tracked by go modules. Fail the build when upstream moves,
-      # rather than letting the copy drift unnoticed. See internal/shamir/UPSTREAM.
-      - name: Compare against upstream
-        shell: bash
-        run: |
-          base=https://raw.githubusercontent.com/hashicorp/vault/main/shamir
-          status=0
-          for f in shamir.go shamir_test.go; do
-            curl -fsSL "$base/$f" -o "upstream-$f"
-            if ! diff -u "upstream-$f" "internal/shamir/$f"; then
-              echo "::error::internal/shamir/$f differs from upstream; see internal/shamir/UPSTREAM"
-              status=1
-            fi
-          done
-          grep -q 'SPDX-License-Identifier: MPL-2.0' internal/shamir/shamir.go || {
-            echo "::error::the vendored shamir file lost its MPL-2.0 header"; status=1; }
-          exit $status
-
-  # ---------------------------------------------------------------
   # Cross-compile every release target
   # ---------------------------------------------------------------
   cross-compile:
@@ -238,13 +211,12 @@ jobs:
           go vet -tags e2e ./tests/e2e/
           go vet -tags smoke ./tests/smoke/
           go vet -tags scripts ./tests/scripts/
+          go vet -tags large ./tests/large/
 
       - name: Format check
         shell: bash
         run: |
-          # The two vendored shamir files are third-party source and are left
-          # as-is. Riven's own files beside them are checked like any other.
-          unformatted=$(gofmt -l . | grep -v '^internal/shamir/shamir\(_test\)\?\.go$' || true)
+          unformatted=$(gofmt -l .)
           if [ -n "$unformatted" ]; then
             echo "::error::These files need gofmt:"
             echo "$unformatted"
@@ -268,7 +240,7 @@ jobs:
         run: |
           # Production code only (test helpers and table-driven tests are exempt)
           # at threshold 25. gocognit exits zero either way, so its output decides.
-          report=$(gocognit -over 25 -ignore '_test\.go|internal/shamir/' ./internal/)
+          report=$(gocognit -over 25 -ignore '_test\.go' ./internal/)
           if [ -n "$report" ]; then
             echo "::error::These functions exceed a cognitive complexity of 25:"
             echo "$report"
@@ -279,14 +251,12 @@ jobs:
         shell: bash
         run: |
           # Comments, docs and messages stay ASCII so they render the same in
-          # every console and editor. Two exceptions are allowed non-ASCII: the
-          # two vendored shamir files, left as upstream wrote them, and the tests
-          # whose subject is Unicode password handling (composition, scripts,
-          # legacy encodings).
+          # every console and editor. The exceptions are the tests whose subject
+          # is Unicode password handling (composition, scripts, legacy
+          # encodings).
           files=$(grep -rlP '[^\x00-\x7F]' \
             --include='*.go' --include='*.md' --include='*.yml' \
             --include='*.sh' --include='*.ps1' --include='*.cmd' . \
-            | grep -v '^./internal/shamir/shamir\(_test\)\?\.go$' \
             | grep -v '^./internal/password/password_test\.go$' \
             | grep -v '^./internal/core/i18n_test\.go$' \
             | grep -v '^./internal/app/split_output_test\.go$' || true)

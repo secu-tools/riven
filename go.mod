@@ -5,14 +5,14 @@ module github.com/secu-tools/riven
 
 go 1.26.0
 
-toolchain go1.26.10
+toolchain go1.27.4
 
 require (
 	github.com/makiuchi-d/gozxing v0.1.1
-	golang.org/x/crypto v0.58.0
-	golang.org/x/sys v0.49.0
-	golang.org/x/term v0.47.0
-	golang.org/x/text v0.43.0
+	golang.org/x/crypto v0.59.0
+	golang.org/x/sys v0.50.0
+	golang.org/x/term v0.48.0
+	golang.org/x/text v0.44.0
 )
 
 require golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect

@@ -29,8 +29,8 @@ correct password(s), rebuild the original -- and fewer than K reveal nothing.
 Pieces are cascade-encrypted, quantum-resistant, and indistinguishable from
 random data.
 
-- **Shamir secret sharing** -- choose how many pieces exist (N) and how many are
-  needed (K). Below K, a piece tells you nothing about the content.
+- **Shamir secret sharing** -- choose how many pieces exist (N, up to 65535) and
+  how many are needed (K). Below K, a piece tells you nothing about the content.
 - **[Two methods](docs/usage.md#method)** -- `full` (the default, and the safer)
   makes each piece a share of the whole file, so fewer than K reveal nothing,
   and that is mathematically proven. `compact` makes each piece about 1/K of the
@@ -230,7 +230,7 @@ Two consequences worth knowing before you start:
 
 ## License
 
-MIT -- see [LICENSE](LICENSE). One vendored component
-(`internal/shamir/`) is MPL-2.0; see [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES).
+MIT -- see [LICENSE](LICENSE), and [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES)
+for the dependencies.
 
 Copyright (c) 2026 Jack L. (Cpt-JackL) (https://jack-l.com)
