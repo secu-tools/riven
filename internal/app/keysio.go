@@ -4,12 +4,12 @@
 package app
 
 import (
+	"bytes"
 	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 
 	"github.com/secu-tools/riven/internal/kem"
 	"github.com/secu-tools/riven/internal/memory"
@@ -80,25 +80,28 @@ func (k keyKind) describe() string {
 }
 
 // decodeKeyBody reads a key file, returning its bytes and the scheme named by
-// its label.
+// its label. A private key file holds the key itself, in base64, so the file
+// is read as bytes and never copied into a string, and is wiped once decoded;
+// the caller wipes what is returned.
 func decodeKeyBody(path string, kind keyKind) ([]byte, kem.Scheme, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, 0, err
 	}
+	defer memory.Zero(raw)
 
 	var scheme kem.Scheme
 	haveScheme := false
-	var b64 string
+	var b64 []byte
 
-	for _, line := range strings.Split(string(raw), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 || line[0] == '#' {
 			continue
 		}
-		if strings.HasPrefix(line, "riven-") {
+		if bytes.HasPrefix(line, []byte("riven-")) {
 			all := kem.All()
-			i := slices.IndexFunc(all, func(s kem.Scheme) bool { return line == kind.label(s) })
+			i := slices.IndexFunc(all, func(s kem.Scheme) bool { return string(line) == kind.label(s) })
 			if i < 0 {
 				// A label of the other role, or an unknown scheme.
 				return nil, 0, fmt.Errorf("%q is not a riven recipient %s file", path, kind.describe())
@@ -110,13 +113,16 @@ func decodeKeyBody(path string, kind keyKind) ([]byte, kem.Scheme, error) {
 		break
 	}
 
-	if b64 == "" {
+	if len(b64) == 0 {
 		return nil, 0, fmt.Errorf("no key data found in %q", path)
 	}
-	body, err := base64.StdEncoding.DecodeString(b64)
+	body := make([]byte, base64.StdEncoding.DecodedLen(len(b64)))
+	n, err := base64.StdEncoding.Decode(body, b64)
 	if err != nil {
+		memory.Zero(body)
 		return nil, 0, fmt.Errorf("%q is not valid base64: %w", path, err)
 	}
+	body = body[:n]
 	if !haveScheme {
 		return nil, 0, fmt.Errorf("%q has no riven key label, so its key type is unknown", path)
 	}
@@ -147,8 +153,7 @@ func readPrivateKey(path string) (*kem.PrivateKey, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The key keeps its own copy, so the decoded bytes are wiped, as
-	// writePrivateKey wipes its own.
+	// The key keeps its own copy, so the decoded bytes are wiped too.
 	defer memory.Zero(b)
 	priv, err := kem.PrivateFromBytes(b, scheme)
 	if err != nil {

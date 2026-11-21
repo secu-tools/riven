@@ -536,9 +536,10 @@ Register-ArgumentCompleter -Native -CommandName riven -ScriptBlock {
             if ($parent -eq '.') { $path = $_.Name }
             # The name is whatever is in the folder, which may have come from
             # anyone: a ; or a $( in it would run as a command once the line is
-            # entered, and a leading - would be read as a flag. So it is quoted,
+            # entered, a leading - would be read as a flag, and one starting with
+            # a digit or a dot, such as 1kb or .5, as a number. So it is quoted,
             # quotes in it doubled, unless every character is plainly a name.
-            if ($path -cnotmatch '^[A-Za-z0-9_.\\/:][A-Za-z0-9_.\\/:-]*$') {
+            if ($path -cnotmatch '^[A-Za-z_\\/][A-Za-z0-9_.\\/:-]*$') {
                 $path = "'" + [System.Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($path) + "'"
             }
             [System.Management.Automation.CompletionResult]::new(

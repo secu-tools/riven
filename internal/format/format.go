@@ -472,11 +472,23 @@ func PeekParams(piece []byte) (kdf.Params, bool) {
 // when the manifest says it is real; for hidden details it comes from the
 // details instead, which this function cannot read.
 func Decode(piece []byte, passwords [][]byte, override *kdf.Params) (*Manifest, kdf.Params, error) {
+	return new(OpenBuffer).Decode(piece, passwords, override)
+}
+
+// OpenBuffer is the memory the attempts to open one piece decrypt into. A wrong
+// key leaves it there, wiped, for the next attempt, so a piece tried several
+// ways, by one call or by several, holds one piece's worth rather than one for
+// each; the attempt that opens hands it to its manifest. The zero value is
+// ready to use. It is for one piece at a time, and not for use by two
+// goroutines at once.
+type OpenBuffer struct{ b []byte }
+
+// Decode is the package's Decode, opening into ob.
+func (ob *OpenBuffer) Decode(piece []byte, passwords [][]byte, override *kdf.Params) (*Manifest, kdf.Params, error) {
 	if err := checkDecode(piece, override); err != nil {
 		return nil, kdf.Params{}, err
 	}
-	var buf []byte
-	m, err := openAt(piece, 0, keylessKey(piece[:saltLen]), &buf)
+	m, err := openAt(piece, 0, keylessKey(piece[:saltLen]), &ob.b)
 	if err == nil {
 		if !m.Keyless {
 			m.Wipe()
@@ -491,21 +503,25 @@ func Decode(piece []byte, passwords [][]byte, override *kdf.Params) (*Manifest, 
 	if !errors.Is(err, ErrWrongPassword) || len(passwords) == 0 {
 		return nil, kdf.Params{}, err
 	}
-	return decodePassword(piece, passwords, override, &buf)
+	return decodePassword(piece, passwords, override, &ob.b)
 }
 
 // DecodePassword is Decode without the keyless attempt, for a piece of a set
 // already known to seal its envelopes with passwords: it saves a full pass over
 // the piece, and a keyless piece slipped in among them fails rather than opens.
 func DecodePassword(piece []byte, passwords [][]byte, override *kdf.Params) (*Manifest, kdf.Params, error) {
+	return new(OpenBuffer).DecodePassword(piece, passwords, override)
+}
+
+// DecodePassword is the package's DecodePassword, opening into ob.
+func (ob *OpenBuffer) DecodePassword(piece []byte, passwords [][]byte, override *kdf.Params) (*Manifest, kdf.Params, error) {
 	if len(passwords) == 0 {
 		return nil, kdf.Params{}, ErrWrongPassword
 	}
 	if err := checkDecode(piece, override); err != nil {
 		return nil, kdf.Params{}, err
 	}
-	var buf []byte
-	return decodePassword(piece, passwords, override, &buf)
+	return decodePassword(piece, passwords, override, &ob.b)
 }
 
 // decodePassword is DecodePassword once the piece and the override are checked,

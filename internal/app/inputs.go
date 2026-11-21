@@ -86,7 +86,9 @@ func dirPieceFiles(dir string) ([]pieceArg, error) {
 			notPieceExts[strings.ToLower(filepath.Ext(name))] {
 			continue
 		}
-		var size int64
+		// A size that cannot be read is taken as the largest a piece can be, so
+		// it holds the reading to one file at a time rather than lifting it.
+		size := int64(pieceio.MaxStoredLen)
 		if info, err := e.Info(); err == nil {
 			size = info.Size()
 		}

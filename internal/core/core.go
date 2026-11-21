@@ -534,7 +534,7 @@ func prepare(input []byte, opts SplitOptions) (*splitPrep, error) {
 	if err != nil {
 		return nil, err
 	}
-	layers, _, _, layerCleanup, err := buildLayers(opts.Layers, schemeIDs)
+	layers, layerCleanup, err := buildLayers(opts.Layers, schemeIDs)
 	defer layerCleanup()
 	if err != nil {
 		return nil, err
@@ -693,19 +693,16 @@ func layoutSplit(inputLen int, opts SplitOptions, schemeIDs []uint8) (*splitLayo
 	sized := make([]cascade.Layer, len(opts.Layers))
 	hybrid := false
 	for i, l := range opts.Layers {
+		if err := checkLayerSpec(i, l); err != nil {
+			return nil, err
+		}
 		d := cascade.Descriptor{Kind: cascade.Password, SchemeID: schemeIDs[i], Recorded: opts.RecordAlgo}
 		var encap []byte
-		switch l.Kind {
-		case PasswordLayer:
-			lay.stretched = true
-		case RecipientLayer:
-			if l.Recipient == nil {
-				return nil, fmt.Errorf("core: layer %d is a recipient layer with no key", i+1)
-			}
+		if l.Kind == RecipientLayer {
 			d.Kind, hybrid = cascade.KEM, true
 			encap = make([]byte, l.Recipient.Scheme().CiphertextSize())
-		default:
-			return nil, fmt.Errorf("core: layer %d has an unknown kind %d", i+1, l.Kind)
+		} else {
+			lay.stretched = true
 		}
 		descs[i] = d
 		sized[i] = cascade.Layer{Kind: d.Kind, SchemeID: d.SchemeID, KEMCiphertext: encap}
@@ -867,9 +864,9 @@ func Split(input []byte, opts SplitOptions) ([][]byte, error) {
 //
 // The pieces are sealed in parallel ahead of the one being written, since each
 // password envelope derives its own key and that is the slow part of a split
-// into many pieces. No step is under way when the first piece is handed over,
-// which is when a caller learns how large the pieces are and may ask about it;
-// a later one may find "sealing piece i of N" reported, when it waited for that.
+// into many pieces. A piece may be handed over with "sealing piece i of N"
+// reported, when the write waited for that. PieceLen gives the piece size
+// before any of this, for a caller that has questions to ask first.
 func SplitTo(input []byte, opts SplitOptions, write func(serial int, piece []byte) error) error {
 	prep, err := prepare(input, opts)
 	if err != nil {
@@ -887,9 +884,6 @@ func SplitTo(input []byte, opts SplitOptions, write func(serial int, piece []byt
 		piece := sealed[i]
 		sealed[i] = nil
 		prep.handOver(i)
-		if i == 0 {
-			opts.Progress.idle()
-		}
 		return write(i+1, piece)
 	}, func(i int) {
 		opts.Progress.report(fmt.Sprintf("sealing piece %d of %d", i+1, opts.N), 0, 0)
@@ -1068,50 +1062,58 @@ func checkSplitOptions(opts *SplitOptions) error {
 	return opts.Padding.Validate()
 }
 
-// buildLayers turns the caller's layer list into cascade layers, encapsulating
-// to every recipient key on the way. It returns whether any layer stretches a
-// password, whether any recipient layer is present, and a cleanup that wipes the
-// shared secrets; the cleanup is always safe to call, including after an error.
-func buildLayers(specs []LayerSpec, schemeIDs []uint8) (layers []cascade.Layer, stretched, hybrid bool, cleanup func(), err error) {
+// buildLayers turns the caller's layer list, already passed by checkLayerSpec,
+// into cascade layers, encapsulating to every recipient key on the way. The
+// cleanup it returns wipes the shared secrets, and is always safe to call,
+// including after an error.
+func buildLayers(specs []LayerSpec, schemeIDs []uint8) (layers []cascade.Layer, cleanup func(), err error) {
 	var secrets [][]byte
 	cleanup = func() {
 		memory.FreeAll(secrets)
 	}
 
 	for i, l := range specs {
-		switch l.Kind {
-		case PasswordLayer:
-			if len(l.Password) == 0 {
-				return nil, false, false, cleanup, fmt.Errorf("core: layer %d is a password layer with no password", i+1)
-			}
-			if l.Recipient != nil {
-				return nil, false, false, cleanup, fmt.Errorf("core: layer %d is a password layer but also names a recipient key", i+1)
-			}
+		if l.Kind == PasswordLayer {
 			layers = append(layers, cascade.Layer{
 				Kind: cascade.Password, SchemeID: schemeIDs[i], Password: l.Password,
 			})
-			stretched = true
-
-		case RecipientLayer:
-			if l.Recipient == nil {
-				return nil, false, false, cleanup, fmt.Errorf("core: layer %d is a recipient layer with no key", i+1)
-			}
-			if len(l.Password) > 0 {
-				return nil, false, false, cleanup, fmt.Errorf("core: layer %d is a recipient layer but also carries a password", i+1)
-			}
-			ss, ct, eerr := l.Recipient.Encapsulate()
-			if eerr != nil {
-				return nil, false, false, cleanup, fmt.Errorf("core: layer %d: %w", i+1, eerr)
-			}
-			secrets = append(secrets, ss)
-			layers = append(layers, cascade.Layer{
-				Kind: cascade.KEM, SchemeID: schemeIDs[i], KEMSecret: ss, KEMCiphertext: ct,
-			})
-			hybrid = true
-
-		default:
-			return nil, false, false, cleanup, fmt.Errorf("core: layer %d has an unknown kind %d", i+1, l.Kind)
+			continue
 		}
+		ss, ct, eerr := l.Recipient.Encapsulate()
+		if eerr != nil {
+			return nil, cleanup, fmt.Errorf("core: layer %d: %w", i+1, eerr)
+		}
+		secrets = append(secrets, ss)
+		layers = append(layers, cascade.Layer{
+			Kind: cascade.KEM, SchemeID: schemeIDs[i], KEMSecret: ss, KEMCiphertext: ct,
+		})
 	}
-	return layers, stretched, hybrid, cleanup, nil
+	return layers, cleanup, nil
+}
+
+// checkLayerSpec refuses a layer that is not one whole kind: a password layer
+// with no password or with a recipient key too, a recipient layer with no key
+// or with a password too, or a kind there is none of. layoutSplit runs it on
+// every layer, so a split, and PieceLen, refuse such a layer before anything
+// else, and buildLayers can take the layers as sound.
+func checkLayerSpec(i int, l LayerSpec) error {
+	switch l.Kind {
+	case PasswordLayer:
+		if len(l.Password) == 0 {
+			return fmt.Errorf("core: layer %d is a password layer with no password", i+1)
+		}
+		if l.Recipient != nil {
+			return fmt.Errorf("core: layer %d is a password layer but also names a recipient key", i+1)
+		}
+	case RecipientLayer:
+		if l.Recipient == nil {
+			return fmt.Errorf("core: layer %d is a recipient layer with no key", i+1)
+		}
+		if len(l.Password) > 0 {
+			return fmt.Errorf("core: layer %d is a recipient layer but also carries a password", i+1)
+		}
+	default:
+		return fmt.Errorf("core: layer %d has an unknown kind %d", i+1, l.Kind)
+	}
+	return nil
 }

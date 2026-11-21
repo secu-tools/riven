@@ -363,6 +363,8 @@ func TestPowerShellCompletionQuotesFileNames(t *testing.T) {
 		// PowerShell takes the typographic quotes for quotes as well.
 		"curly" + string(rune(0x2019)) + " ; Write-Output INJECTED ; " + string(rune(0x2018)) + "q",
 		"plain.piece.1",
+		// Bare, PowerShell reads these as the numbers 1024, 16, 1000 and 0.5.
+		"1kb", "0x10", "1e3", ".5",
 	}
 	for _, n := range names {
 		if err := os.WriteFile(filepath.Join(pieces, n), nil, 0o600); err != nil {
@@ -378,10 +380,10 @@ func TestPowerShellCompletionQuotesFileNames(t *testing.T) {
 	// A line that is one statement of riven and two plain words is safe; the
 	// file's own name must come back from the argument's value.
 	harness := filepath.Join(dir, "try.ps1")
-	body := `param($script, $dir)
+	body := `param($script, $where, $prefix = '')
 . $script
-Set-Location $dir
-$line = 'riven combine pieces\'
+Set-Location $where
+$line = 'riven combine ' + $prefix
 $r = TabExpansion2 -inputScript $line -cursorColumn $line.Length
 foreach ($c in $r.CompletionMatches) {
     $text = 'riven combine ' + $c.CompletionText
@@ -396,28 +398,39 @@ foreach ($c in $r.CompletionMatches) {
 	if err := os.WriteFile(harness, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	out, err := exec.Command(ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-		"-File", harness, script, dir).CombinedOutput()
-	if err != nil {
-		t.Fatalf("PowerShell: %v\n%s", err, out)
-	}
-	seen := 0
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		f := strings.Split(strings.TrimRight(line, "\r"), "|")
-		if len(f) != 5 {
-			t.Fatalf("unexpected harness output: %q\n%s", line, out)
+	// From the folder above, each name follows "pieces\"; from inside it, each
+	// is bare, which is where one that reads as a number has to be quoted.
+	for _, c := range []struct{ where, prefix string }{{dir, `pieces\`}, {pieces, ""}} {
+		args := []string{"-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", harness, script, c.where}
+		if c.prefix != "" {
+			args = append(args, c.prefix)
 		}
-		seen++
-		if f[1] != "1" || f[2] != "0" || f[3] != "3" {
-			t.Errorf("%q completes to a line of %s statement(s), %s parse error(s) and %s word(s); want 1, 0 and 3",
-				f[0], f[1], f[2], f[3])
+		out, err := exec.Command(ps, args...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("PowerShell: %v\n%s", err, out)
 		}
-		if want := filepath.Join("pieces", f[0]); f[4] != want {
-			t.Errorf("%q completes to the argument %q, want %q", f[0], f[4], want)
+		seen := 0
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			f := strings.Split(strings.TrimRight(line, "\r"), "|")
+			if len(f) != 5 {
+				t.Fatalf("unexpected harness output: %q\n%s", line, out)
+			}
+			seen++
+			if f[1] != "1" || f[2] != "0" || f[3] != "3" {
+				t.Errorf("%q completes to a line of %s statement(s), %s parse error(s) and %s word(s); want 1, 0 and 3",
+					f[0], f[1], f[2], f[3])
+			}
+			want := f[0]
+			if c.prefix != "" {
+				want = filepath.Join("pieces", f[0])
+			}
+			if f[4] != want {
+				t.Errorf("%q completes to the argument %q, want %q", f[0], f[4], want)
+			}
 		}
-	}
-	if seen < 3 {
-		t.Fatalf("only %d completions came back:\n%s", seen, out)
+		if seen < 3 {
+			t.Fatalf("only %d completions came back:\n%s", seen, out)
+		}
 	}
 }
 

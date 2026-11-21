@@ -71,6 +71,38 @@ func TestSealedToKeysOnly(t *testing.T) {
 	}
 }
 
+// TestOneBufferServesEveryCall checks an OpenBuffer carries across separate
+// calls, as a combine tries a piece first without a password, then with the
+// first password, then with all of them: three attempts, one piece's worth.
+func TestOneBufferServesEveryCall(t *testing.T) {
+	in := buildInput(make([]byte, 4<<20))
+	in.Passwords = [][]byte{[]byte("one"), []byte("two")}
+	piece, err := Encode(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ob OpenBuffer
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	if _, _, err := ob.Decode(piece, nil, &fast); !errors.Is(err, ErrWrongPassword) {
+		t.Fatalf("keyless: %v", err)
+	}
+	if _, _, err := ob.DecodePassword(piece, in.Passwords[:1], &fast); !errors.Is(err, ErrWrongPassword) {
+		t.Fatalf("the first password alone: %v", err)
+	}
+	m, _, err := ob.DecodePassword(piece, in.Passwords, &fast)
+	runtime.ReadMemStats(&after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Wipe()
+	// Two derivations at the test cost take 8 MiB each, and give it back.
+	if got := after.TotalAlloc - before.TotalAlloc; got > uint64(2*len(piece))+uint64(2*fast.Memory)<<10 {
+		t.Fatalf("three attempts on a %d-byte piece allocated %d bytes", len(piece), got)
+	}
+}
+
 // TestTryingKeysReusesOneBuffer checks the ways tried on one piece share the
 // memory they open into: a wrong key leaves it wiped for the next attempt, so a
 // piece that opens at the third subset of keys costs one piece's worth, not

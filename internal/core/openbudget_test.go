@@ -144,13 +144,12 @@ func TestTheRestOpenTheWayTheReferenceDid(t *testing.T) {
 			t.Fatal(err)
 		}
 		o := OpenOptions{Passwords: [][]byte{[]byte("outermost"), []byte("innermost")}}
-		op := &opening{pieces: pieces, o: &o, opened: make([]*format.Manifest, n),
-			params: make([]kdf.Params, n), failed: make([]error, n)}
+		op := newOpening(pieces, &o)
 		var tries [2]atomic.Int32
 		for w, way := range op.passwordWays() {
-			op.ways = append(op.ways, func(p []byte) (*format.Manifest, kdf.Params, error) {
+			op.ways = append(op.ways, func(ob *format.OpenBuffer, p []byte) (*format.Manifest, kdf.Params, error) {
 				tries[w].Add(1)
-				return way(p)
+				return way(ob, p)
 			})
 		}
 		if err := op.withPasswords(); err != nil || op.count() != n {
@@ -175,12 +174,11 @@ func TestTheRestOpenAtTheCostTheReferenceDid(t *testing.T) {
 		t.Fatal(err)
 	}
 	o := OpenOptions{Passwords: [][]byte{[]byte("pw")}}
-	op := &opening{pieces: pieces, o: &o, opened: make([]*format.Manifest, n),
-		params: make([]kdf.Params, n), failed: make([]error, n)}
+	op := newOpening(pieces, &o)
 	// Tried at its own cost byte, only the first piece's noise is the cost. The
 	// others fail without the derivation their noise asks for, which can be a
 	// gibibyte.
-	op.ways = []decoder{func(p []byte) (*format.Manifest, kdf.Params, error) {
+	op.ways = []decoder{func(ob *format.OpenBuffer, p []byte) (*format.Manifest, kdf.Params, error) {
 		cost := o.Params
 		if cost == nil {
 			if !bytes.Equal(p, pieces[0]) {
@@ -188,7 +186,7 @@ func TestTheRestOpenAtTheCostTheReferenceDid(t *testing.T) {
 			}
 			cost = &cheap
 		}
-		return format.DecodePassword(p, o.Passwords, cost)
+		return ob.DecodePassword(p, o.Passwords, cost)
 	}}
 	if err := op.withPasswords(); err != nil || op.count() != n {
 		t.Fatalf("%d of %d opened once the first opened at its own cost byte: %v", op.count(), n, err)

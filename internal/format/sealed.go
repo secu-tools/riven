@@ -134,6 +134,11 @@ func sealedKey(salt, pwKey, encs []byte, secrets [][]byte) []byte {
 // together first, then, for up to maxSubsetKeys of them, fewer. A keyless piece,
 // like a piece of another set, does not open here.
 func DecodeSealed(piece []byte, passwords [][]byte, keys []*kem.PrivateKey, override *kdf.Params) (*Manifest, kdf.Params, error) {
+	return new(OpenBuffer).DecodeSealed(piece, passwords, keys, override)
+}
+
+// DecodeSealed is the package's DecodeSealed, opening into ob.
+func (ob *OpenBuffer) DecodeSealed(piece []byte, passwords [][]byte, keys []*kem.PrivateKey, override *kdf.Params) (*Manifest, kdf.Params, error) {
 	if err := checkDecode(piece, override); err != nil {
 		return nil, kdf.Params{}, err
 	}
@@ -141,11 +146,11 @@ func DecodeSealed(piece []byte, passwords [][]byte, keys []*kem.PrivateKey, over
 	if override != nil {
 		params = *override
 	}
-	var pwKey, buf []byte
+	var pwKey []byte
 	if len(passwords) > 0 {
 		pwKey = envelopeKey(passwords, piece[:saltLen], params)
 		defer memory.Zero(pwKey)
-		m, err := openWithPassword(piece, bytes.Clone(pwKey), &buf)
+		m, err := openWithPassword(piece, bytes.Clone(pwKey), &ob.b)
 		if err == nil {
 			return m, params, nil
 		}
@@ -154,7 +159,7 @@ func DecodeSealed(piece []byte, passwords [][]byte, keys []*kem.PrivateKey, over
 		}
 	}
 	m := eachSubset(openOrder(keys), func(sub []*kem.PrivateKey) *Manifest {
-		m, _ := openSealed(piece, pwKey, sub, &buf)
+		m, _ := openSealed(piece, pwKey, sub, &ob.b)
 		return m
 	})
 	if m == nil {

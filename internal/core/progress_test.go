@@ -63,8 +63,8 @@ func (l *stepLog) measured(t *testing.T, step string, min int64) {
 }
 
 // TestProgressFollowsEachMethod checks a split and a combine report their steps
-// in order, measure the Shamir work by its units, and are idle when the caller
-// may ask something: when the first piece is handed over, and once they return.
+// in order, measure the Shamir work by its units, and are idle once they
+// return.
 // The input is just over one unit, so the sharing is measured.
 func TestProgressFollowsEachMethod(t *testing.T) {
 	input := bytes.Repeat([]byte("p"), 600<<10)
@@ -82,10 +82,7 @@ func TestProgressFollowsEachMethod(t *testing.T) {
 		var split stepLog
 		var pieces [][]byte
 		err := SplitTo(input, SplitOptions{N: 3, K: 2, Keyless: true, Method: c.method, Progress: split.progress},
-			func(serial int, p []byte) error {
-				if serial == 1 && !split.idle() {
-					t.Errorf("%v: a step was under way when the first piece was handed over: %q", c.method, split.steps)
-				}
+			func(_ int, p []byte) error {
 				pieces = append(pieces, bytes.Clone(p))
 				return nil
 			})

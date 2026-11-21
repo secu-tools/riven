@@ -601,19 +601,15 @@ func openWorkers(pieces [][]byte, opts OpenOptions, first kdf.Params, rest int) 
 // for exactly this. Consistency is checked in index order, so an inconsistent
 // set names the same piece whatever the scheduling.
 func openPieces(pieces [][]byte, o *OpenOptions) (*format.Manifest, kdf.Params, []*format.Manifest, []error, error) {
-	op := &opening{pieces: pieces, o: o,
-		opened: make([]*format.Manifest, len(pieces)),
-		params: make([]kdf.Params, len(pieces)),
-		failed: make([]error, len(pieces)),
-	}
+	op := newOpening(pieces, o)
 	// The public key, then the recipient keys alone.
 	o.Progress.report("opening pieces", 0, 0)
-	op.tryAll(op.closed(), func(p []byte) (*format.Manifest, kdf.Params, error) {
-		return format.Decode(p, nil, o.Params)
+	op.tryAll(op.closed(), func(ob *format.OpenBuffer, p []byte) (*format.Manifest, kdf.Params, error) {
+		return ob.Decode(p, nil, o.Params)
 	})
 	if len(o.PrivateKeys) > 0 {
-		op.tryAll(op.closed(), func(p []byte) (*format.Manifest, kdf.Params, error) {
-			return format.DecodeSealed(p, nil, o.PrivateKeys, o.Params)
+		op.tryAll(op.closed(), func(ob *format.OpenBuffer, p []byte) (*format.Manifest, kdf.Params, error) {
+			return ob.DecodeSealed(p, nil, o.PrivateKeys, o.Params)
 		})
 	}
 	o.Progress.idle()
@@ -644,10 +640,23 @@ type opening struct {
 	failed    []error
 	ways      []decoder // how a piece may open with the passwords
 	announced bool
+
+	// bufs is what each piece opens into, kept across every way it is tried,
+	// so a piece that takes several holds one piece's worth of memory.
+	bufs []format.OpenBuffer
 }
 
-// decoder opens a piece one way.
-type decoder func(piece []byte) (*format.Manifest, kdf.Params, error)
+func newOpening(pieces [][]byte, o *OpenOptions) *opening {
+	return &opening{pieces: pieces, o: o,
+		opened: make([]*format.Manifest, len(pieces)),
+		params: make([]kdf.Params, len(pieces)),
+		failed: make([]error, len(pieces)),
+		bufs:   make([]format.OpenBuffer, len(pieces)),
+	}
+}
+
+// decoder opens a piece one way, into ob.
+type decoder func(ob *format.OpenBuffer, piece []byte) (*format.Manifest, kdf.Params, error)
 
 // closed returns the pieces not yet open that could still open: a piece that
 // failed for any reason but the key is malformed, and no key will change that.
@@ -676,7 +685,7 @@ func (op *opening) count() int {
 func (op *opening) tryAll(idx []int, way decoder) {
 	_ = parallel.Do(len(idx), parallel.Workers(len(idx)), func(j int) error {
 		i := idx[j]
-		op.opened[i], op.params[i], op.failed[i] = way(op.pieces[i])
+		op.opened[i], op.params[i], op.failed[i] = way(&op.bufs[i], op.pieces[i])
 		return nil
 	})
 }
@@ -689,17 +698,17 @@ func (op *opening) passwordWays() []decoder {
 	o := op.o
 	var ways []decoder
 	if len(o.Passwords) > 1 {
-		ways = append(ways, func(p []byte) (*format.Manifest, kdf.Params, error) {
-			return format.DecodePassword(p, o.Passwords[:1], o.Params)
+		ways = append(ways, func(ob *format.OpenBuffer, p []byte) (*format.Manifest, kdf.Params, error) {
+			return ob.DecodePassword(p, o.Passwords[:1], o.Params)
 		})
 	}
 	if len(o.PrivateKeys) > 0 {
-		return append(ways, func(p []byte) (*format.Manifest, kdf.Params, error) {
-			return format.DecodeSealed(p, o.Passwords, o.PrivateKeys, o.Params)
+		return append(ways, func(ob *format.OpenBuffer, p []byte) (*format.Manifest, kdf.Params, error) {
+			return ob.DecodeSealed(p, o.Passwords, o.PrivateKeys, o.Params)
 		})
 	}
-	return append(ways, func(p []byte) (*format.Manifest, kdf.Params, error) {
-		return format.DecodePassword(p, o.Passwords, o.Params)
+	return append(ways, func(ob *format.OpenBuffer, p []byte) (*format.Manifest, kdf.Params, error) {
+		return ob.DecodePassword(p, o.Passwords, o.Params)
 	})
 }
 
@@ -707,7 +716,7 @@ func (op *opening) passwordWays() []decoder {
 // wrong key, and returns the way that opened it, or -1.
 func (op *opening) decode(i int) int {
 	for w, way := range op.ways {
-		op.opened[i], op.params[i], op.failed[i] = way(op.pieces[i])
+		op.opened[i], op.params[i], op.failed[i] = way(&op.bufs[i], op.pieces[i])
 		if op.opened[i] != nil {
 			return w
 		}

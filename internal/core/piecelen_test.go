@@ -81,3 +81,26 @@ func TestAnUnknownAlgorithmIsRefused(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+// TestPieceLenRefusesALayerOfNoOneKind checks the layer checks run before the
+// size is given, so a caller asking about the pieces never asks its questions
+// for a split that cannot run.
+func TestPieceLenRefusesALayerOfNoOneKind(t *testing.T) {
+	rec, err := kem.Generate(kem.X25519)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, l := range map[string]LayerSpec{
+		"password with none":  {Kind: PasswordLayer},
+		"password with a key": {Kind: PasswordLayer, Password: []byte("pw"), Recipient: rec.Public()},
+		"key with a password": {Kind: RecipientLayer, Recipient: rec.Public(), Password: []byte("pw")},
+	} {
+		opts := SplitOptions{N: 3, K: 2, Params: testParams, Layers: []LayerSpec{l}}
+		if _, err := PieceLen(10, opts); err == nil {
+			t.Errorf("%s: PieceLen gave a size", name)
+		}
+		if _, err := Split([]byte("x"), opts); err == nil {
+			t.Errorf("%s: the split ran", name)
+		}
+	}
+}
