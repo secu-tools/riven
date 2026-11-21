@@ -409,7 +409,8 @@ func TestCombineNamesTheDamagedPiece(t *testing.T) {
 	if got, _ := os.ReadFile(out); string(got) != "despite it" {
 		t.Fatalf("rebuilt %q", got)
 	}
-	if said := stdout + stderr; !strings.Contains(said, "is damaged") || !strings.Contains(said, filepath.Base(paths[1])) {
+	// The warning wraps where the path ends, which differs with the temp folder.
+	if said := strings.Join(strings.Fields(stdout+stderr), " "); !strings.Contains(said, "is damaged") || !strings.Contains(said, filepath.Base(paths[1])) {
 		t.Fatalf("the damaged piece was not named:\n%s", said)
 	}
 }

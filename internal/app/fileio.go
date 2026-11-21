@@ -31,8 +31,9 @@ func workersFor(size int64) int {
 // pieceWriter writes the pieces of a split in every format, on several
 // goroutines, so the files are created while the next pieces are sealed. It
 // owns each piece it is given and wipes it once written. The first failure stops
-// it: the pieces after it are wiped unwritten, and the error comes back from the
-// next add and from wait.
+// it: the pieces after it are wiped unwritten, those before it a writer already
+// holds are still written, and the error comes back from the next add and from
+// wait.
 type pieceWriter struct {
 	plan    *splitPlan
 	formats []pieceio.Format
@@ -76,7 +77,9 @@ func newPieceWriter(plan *splitPlan, formats []pieceio.Format, name func(int) st
 			defer memory.GuardPanic()
 			defer w.wg.Done()
 			for j := range w.jobs {
-				if w.failure() != nil {
+				// A piece before the one that failed is still written: it may fail
+				// too, and the earlier failure is the one to report.
+				if w.failedBefore(j.serial) {
 					memory.Zero(j.piece)
 					continue
 				}
@@ -156,6 +159,13 @@ func (f *firstFailure) fail(at int, err error) {
 	if f.err == nil || at < f.at {
 		f.err, f.at = err, at
 	}
+}
+
+// failedBefore reports whether a failure was kept for an index before at.
+func (f *firstFailure) failedBefore(at int) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.err != nil && f.at < at
 }
 
 // failure returns the failure kept, if there is one.

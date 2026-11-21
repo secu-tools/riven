@@ -258,4 +258,30 @@ func TestFailuresAreReportedByTheFirst(t *testing.T) {
 	if w.failure().Error() != "piece 3" || c.failure().Error() != "group 3" {
 		t.Fatalf("kept %v and %v, want the failures at 3", w.failure(), c.failure())
 	}
+	if w.failedBefore(3) || !w.failedBefore(4) {
+		t.Fatal("failedBefore does not compare with the failure at 3")
+	}
+}
+
+// TestAPieceBeforeAFailureIsStillWritten checks a writer that takes a piece
+// once a later piece has failed still writes it, and skips a piece after. A
+// split on a busy machine gets there when the writer holding the later piece
+// fails first, and the earlier failure is then the one reported.
+func TestAPieceBeforeAFailureIsStillWritten(t *testing.T) {
+	plan := planFor(t, "--keyless", "-n", "60", "-k", "2")
+	plan.outDir = t.TempDir()
+	if err := os.Mkdir(filepath.Join(plan.outDir, "doc.050"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	name := func(serial int) string { return fmt.Sprintf("doc.%03d", serial) }
+	w := newPieceWriter(plan, []pieceio.Format{pieceio.Binary}, name, 4, false)
+	w.fail(53, fmt.Errorf("piece 53"))
+	w.jobs <- writeJob{50, make([]byte, 4)}
+	w.jobs <- writeJob{54, make([]byte, 4)}
+	if err := w.wait(); err == nil || !strings.Contains(err.Error(), "doc.050") {
+		t.Fatalf("got %v, want the failure writing doc.050", err)
+	}
+	if _, err := os.Stat(filepath.Join(plan.outDir, "doc.054")); err == nil {
+		t.Fatal("piece 54 was written after piece 53 failed")
+	}
 }
