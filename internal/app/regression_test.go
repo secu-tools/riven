@@ -12,8 +12,10 @@ import (
 	"testing"
 
 	"github.com/secu-tools/riven/internal/core"
+	"github.com/secu-tools/riven/internal/format"
 	"github.com/secu-tools/riven/internal/kem"
 	"github.com/secu-tools/riven/internal/pieceio"
+	"github.com/secu-tools/riven/internal/testkit"
 )
 
 // One test per command-line defect found during development, so a fix cannot
@@ -213,10 +215,17 @@ func TestRegressionWizardKeyPairDoesNotReplaceAKey(t *testing.T) {
 func TestRegressionCombineAsksForAlgorithmsAfterTheCost(t *testing.T) {
 	pw := []byte("cost and algorithms both withheld")
 	input := []byte("rebuilt through two questions")
-	pieces, err := core.Split(input, core.SplitOptions{N: 2, K: 2, Params: fastKDF,
-		Layers: []core.LayerSpec{{Kind: core.PasswordLayer, SchemeID: 2, Password: pw}}})
-	if err != nil {
-		t.Fatal(err)
+	// The cost is not recorded, so each piece is tried at the cost its byte of
+	// noise reads as before the question; noise that is the cost or dear is split
+	// again.
+	var pieces [][]byte
+	for pieces == nil || testkit.NoiseUnfit(pieces, fastKDF, format.PeekParams) {
+		var err error
+		pieces, err = core.Split(input, core.SplitOptions{N: 2, K: 2, Params: fastKDF,
+			Layers: []core.LayerSpec{{Kind: core.PasswordLayer, SchemeID: 2, Password: pw}}})
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	t.Setenv("RIVEN_UNIT_RCA", string(pw))
 	opts, err := parseArgs([]string{"combine", "p", "--password-env", "RIVEN_UNIT_RCA"})

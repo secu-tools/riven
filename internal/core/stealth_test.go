@@ -272,10 +272,12 @@ func TestPieceSurvivesUnknownBytes(t *testing.T) {
 	if _, err := rand.Read(junk); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Info(junk, OpenOptions{Passwords: [][]byte{[]byte("p")}}); err == nil {
+	// At the cost given, as the cost random bytes read as is random too.
+	cost := testParams
+	if _, err := Info(junk, OpenOptions{Passwords: [][]byte{[]byte("p")}, Params: &cost}); err == nil {
 		t.Fatal("random bytes must not open as a piece")
 	}
-	if _, err := Combine([][]byte{junk}, OpenOptions{Passwords: [][]byte{[]byte("p")}}); err == nil {
+	if _, err := Combine([][]byte{junk}, OpenOptions{Passwords: [][]byte{[]byte("p")}, Params: &cost}); err == nil {
 		t.Fatal("random bytes must not combine")
 	}
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/secu-tools/riven/internal/format"
 	"github.com/secu-tools/riven/internal/kdf"
 	"github.com/secu-tools/riven/internal/pieceio"
+	"github.com/secu-tools/riven/internal/testkit"
 )
 
 // fast keeps Argon2 cheap so the matrix stays quick; production defaults are
@@ -73,7 +74,7 @@ func TestRecordingMatrix(t *testing.T) {
 				// cost below derives at it, up to 1 GiB and 8 passes. Either way
 				// the set is split again, so chance sets neither result nor time.
 				var pieces [][]byte
-				for pieces == nil || !recKDF && noiseUnfit(pieces[:2], custom) {
+				for pieces == nil || !recKDF && testkit.NoiseUnfit(pieces[:2], custom, format.PeekParams) {
 					var err error
 					pieces, err = core.Split(input, core.SplitOptions{
 						N: 4, K: 2, Params: custom,
@@ -122,19 +123,6 @@ func TestRecordingMatrix(t *testing.T) {
 			})
 		}
 	}
-}
-
-// noiseUnfit reports whether a cost byte among pieces, noise in a set that did
-// not record its cost, decodes to cost itself or to more work than 128 MiB at
-// one pass, which a combine without the cost spends deriving.
-func noiseUnfit(pieces [][]byte, cost kdf.Params) bool {
-	for _, p := range pieces {
-		d, ok := format.PeekParams(p)
-		if ok && (d == cost || uint64(d.Memory)*uint64(d.Time) > 128*1024) {
-			return true
-		}
-	}
-	return false
 }
 
 // TestMixedTransportFormats reconstructs from pieces that each arrived in a

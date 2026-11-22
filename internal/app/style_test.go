@@ -271,7 +271,10 @@ func TestMessagesFitEightyColumns(t *testing.T) {
 		{"info", "o", "--password-env", "RIVEN_UNIT_W", "--algo", "chacha20-poly1305", "--kdf", "m=8,t=1,p=1", "-y"},
 		{"verify", "o", "--password-env", "RIVEN_UNIT_W", "--algo", "chacha20-poly1305", "--kdf", "m=8,t=1,p=1", "-y"},
 		{"combine", piece, other[0], "-y"},
-		{"combine", piece, "--password-env", "RIVEN_UNIT_W", "-y"},
+		// A wrong cost, so the piece does not open. Without one it is tried at the
+		// cost its byte of noise reads as, which under the race detector can take
+		// the better part of an hour.
+		{"combine", piece, "--password-env", "RIVEN_UNIT_W", "--kdf", "m=16,t=1,p=1", "-y"},
 		{"split", ".", "-y"},
 	}
 	withLineWidth(t, fallbackLineWidth-1, func() {

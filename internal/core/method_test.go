@@ -365,14 +365,17 @@ func TestDamagedPieceIsSetAside(t *testing.T) {
 			pieces := mustSplit(t, []byte("spare"), SplitOptions{N: 4, K: 2, Layers: specs, Method: m, Info: info})
 			bad := append([]byte(nil), pieces[1]...)
 			bad[len(bad)/2] ^= 0xFF
+			// The cost is given, as the damaged piece would otherwise be tried at
+			// the cost its byte reads as, which a public envelope leaves as noise.
+			cost := testParams
 			reported := -1
-			got, err := Combine([][]byte{pieces[0], bad, pieces[2]}, OpenOptions{Passwords: pws,
+			got, err := Combine([][]byte{pieces[0], bad, pieces[2]}, OpenOptions{Passwords: pws, Params: &cost,
 				Damaged: func(i int, _ error) { reported = i }})
 			if err != nil || string(got) != "spare" || reported != 1 {
 				t.Fatalf("%s/%s: rebuilt %q, reported %d, %v", m, info, got, reported, err)
 			}
 			// With no spare, the damaged file is the error.
-			if _, err := Combine([][]byte{pieces[0], bad}, OpenOptions{Passwords: pws}); err == nil ||
+			if _, err := Combine([][]byte{pieces[0], bad}, OpenOptions{Passwords: pws, Params: &cost}); err == nil ||
 				!strings.Contains(err.Error(), "damaged") {
 				t.Fatalf("%s/%s: no spare gave %v", m, info, err)
 			}

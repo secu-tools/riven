@@ -14,6 +14,7 @@ import (
 	"github.com/secu-tools/riven/internal/cascade"
 	"github.com/secu-tools/riven/internal/ciphers"
 	"github.com/secu-tools/riven/internal/kdf"
+	"github.com/secu-tools/riven/internal/testkit"
 )
 
 var fast = kdf.Params{Memory: 8 * 1024, Time: 1, Par: 1}
@@ -141,16 +142,19 @@ func TestKDFRecoveredFromPiece(t *testing.T) {
 func TestHiddenKDFNeedsOverride(t *testing.T) {
 	in := buildInput([]byte("share bytes."))
 	in.KDFStored = false
-	// Use a non-default cost so a lucky mask cannot coincide with it.
 	in.Params = kdf.Params{Memory: 16 * 1024, Time: 5, Par: 2}
-	piece, err := Encode(in)
-	if err != nil {
-		t.Fatal(err)
+	// The masked byte is noise, so decoding without an override derives at the
+	// cost it reads as: a piece whose noise is the cost, or dear, is encoded
+	// again.
+	var piece []byte
+	for piece == nil || testkit.NoiseUnfit([][]byte{piece}, in.Params, PeekParams) {
+		var err error
+		if piece, err = Encode(in); err != nil {
+			t.Fatal(err)
+		}
 	}
-	// The masked byte is random, so decoding without an override almost never
-	// picks the right cost.
 	if _, _, err := Decode(piece, [][]byte{[]byte("password")}, nil); err == nil {
-		t.Skip("random cost byte happened to match the real cost")
+		t.Fatal("the piece opened at a cost byte of noise")
 	}
 	m, got, err := Decode(piece, [][]byte{[]byte("password")}, &in.Params)
 	if err != nil {
@@ -197,12 +201,26 @@ func TestTamperDetected(t *testing.T) {
 	piece, _ := Encode(buildInput([]byte("share bytes here")))
 	// Every region matters: salt, cost byte, nonce, body, and tag.
 	for _, pos := range []int{0, saltLen, saltLen + 1, headerLen + 2, len(piece) - 1} {
-		bad := append([]byte(nil), piece...)
-		bad[pos] ^= 0xFF
-		if _, _, err := Decode(bad, [][]byte{[]byte("password")}, nil); err == nil {
+		if _, _, err := Decode(tampered(t, piece, pos), [][]byte{[]byte("password")}, nil); err == nil {
 			t.Fatalf("tamper at %d not detected", pos)
 		}
 	}
+}
+
+// tampered returns a copy of piece with the byte at pos changed. A change to the
+// salt or the cost byte changes the cost the piece declares, so the byte is
+// changed to a value that still declares a cheap one.
+func tampered(t *testing.T, piece []byte, pos int) []byte {
+	t.Helper()
+	bad := append([]byte(nil), piece...)
+	for x := 1; x < 256; x++ {
+		bad[pos] = piece[pos] ^ byte(x)
+		if p, _ := PeekParams(bad); testkit.CheapCost(p) {
+			return bad
+		}
+	}
+	t.Fatalf("no change to byte %d declares a cheap cost", pos)
+	return nil
 }
 
 func TestTruncationRejected(t *testing.T) {

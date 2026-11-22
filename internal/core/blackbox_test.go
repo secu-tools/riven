@@ -14,6 +14,7 @@ import (
 	"github.com/secu-tools/riven/internal/format"
 	"github.com/secu-tools/riven/internal/kdf"
 	"github.com/secu-tools/riven/internal/kem"
+	"github.com/secu-tools/riven/internal/testkit"
 )
 
 // These tests use only what the package exports, the way a caller or an attacker
@@ -251,9 +252,12 @@ func TestDamagedFirstPieceInTheNewModes(t *testing.T) {
 				Layers: password("pw"), RecordAlgo: true, RecordKDF: true})
 			bad := append([]byte(nil), pieces[0]...)
 			bad[len(bad)-1] ^= 1
+			// The cost is given, as the damaged piece would otherwise be tried at
+			// the cost its byte reads as, which these envelopes leave as noise.
+			cost := cheap
 			damaged := -1
 			got, err := core.Combine([][]byte{bad, pieces[1], pieces[2], pieces[3]}, core.OpenOptions{
-				Passwords: [][]byte{[]byte("pw")}, Damaged: func(i int, _ error) { damaged = i }})
+				Passwords: [][]byte{[]byte("pw")}, Params: &cost, Damaged: func(i int, _ error) { damaged = i }})
 			if err != nil || string(got) != "first is broken" || damaged != 0 {
 				t.Fatalf("%v/%v: %q, damaged %d, %v", m, info, got, damaged, err)
 			}
@@ -456,7 +460,9 @@ func TestProtectedDetailsTakeTheFirstLayer(t *testing.T) {
 		if err != nil || !info.SealedToKeys || info.PasswordLayers() != 1 {
 			t.Fatalf("the key alone: %+v, %v", info, err)
 		}
-		if _, err := core.Info(pieces[0], core.OpenOptions{Passwords: [][]byte{second}}); err == nil {
+		// At the cost given: the byte of a piece sealed to a key is noise.
+		cost := cheap
+		if _, err := core.Info(pieces[0], core.OpenOptions{Passwords: [][]byte{second}, Params: &cost}); err == nil {
 			t.Fatal("the password read details sealed to the key")
 		}
 		_, err = core.Combine(pieces[:2], core.OpenOptions{Passwords: [][]byte{second},
@@ -464,7 +470,6 @@ func TestProtectedDetailsTakeTheFirstLayer(t *testing.T) {
 		if !errors.Is(err, core.ErrParamsRequired) {
 			t.Fatalf("an unrecorded cost was not asked for: %v", err)
 		}
-		cost := cheap
 		got, err := core.Combine(pieces[:2], core.OpenOptions{Passwords: [][]byte{second},
 			PrivateKeys: []*kem.PrivateKey{key}, Params: &cost})
 		if err != nil || string(got) != "key first" {
@@ -573,7 +578,7 @@ func TestCostAndAlgorithmsAreAskedForOnce(t *testing.T) {
 	// noise is derived at, up to 1 GiB and 8 passes, so dear noise is split
 	// again too, to keep the time from depending on chance.
 	var pieces [][]byte
-	for pieces == nil || noiseUnfit(pieces[:2], cheap) {
+	for pieces == nil || testkit.NoiseUnfit(pieces[:2], cheap, format.PeekParams) {
 		var err error
 		pieces, err = core.Split([]byte("withheld"), core.SplitOptions{N: 3, K: 2, Params: cheap,
 			Layers: []core.LayerSpec{{Kind: core.PasswordLayer, Password: []byte("pw"), SchemeID: 2}}})
@@ -606,19 +611,6 @@ func TestCostAndAlgorithmsAreAskedForOnce(t *testing.T) {
 	if !errors.Is(err, format.ErrWrongPassword) {
 		t.Fatalf("a declined cost question gave %v", err)
 	}
-}
-
-// noiseUnfit reports whether a cost byte among pieces, noise in a set that did
-// not record its cost, decodes to cost itself or to more work than 128 MiB at
-// one pass, which a combine without the cost spends deriving.
-func noiseUnfit(pieces [][]byte, cost kdf.Params) bool {
-	for _, p := range pieces {
-		d, ok := format.PeekParams(p)
-		if ok && (d == cost || uint64(d.Memory)*uint64(d.Time) > 128*1024) {
-			return true
-		}
-	}
-	return false
 }
 
 // TestBeforeDeriveOnlyWhenAKeyIsDerived checks the slow-open notice is given

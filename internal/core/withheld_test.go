@@ -8,7 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/secu-tools/riven/internal/format"
 	"github.com/secu-tools/riven/internal/kdf"
+	"github.com/secu-tools/riven/internal/testkit"
 )
 
 // TestCombineNamesWhatItWasNotGiven checks a combine missing something a set
@@ -41,22 +43,21 @@ func TestCombineNamesWhatItWasNotGiven(t *testing.T) {
 func TestADeclinedCostStopsTheCombine(t *testing.T) {
 	cancelled := errors.New("cancelled")
 	ask := func(bool) (*kdf.Params, error) { return nil, cancelled }
-	// The cost is not recorded, so the byte in its place is noise, which reads as
-	// the real cost one time in 256; a set where it does needs no question.
-	for range 4 {
-		pieces, err := Split([]byte("no cost"), SplitOptions{N: 2, K: 2, Params: testParams, RecordAlgo: true,
+	// The cost is not recorded, so each piece is tried at the cost its byte of
+	// noise reads as before the question. A set whose noise is the cost needs no
+	// question, and one whose noise is dear takes long to try, so either is split
+	// again.
+	var pieces [][]byte
+	for pieces == nil || testkit.NoiseUnfit(pieces, testParams, format.PeekParams) {
+		var err error
+		pieces, err = Split([]byte("no cost"), SplitOptions{N: 2, K: 2, Params: testParams, RecordAlgo: true,
 			Layers: []LayerSpec{{Kind: PasswordLayer, Password: []byte("pw")}}})
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, err = Combine(pieces, OpenOptions{Passwords: [][]byte{[]byte("pw")}, AskParams: ask})
-		if err == nil {
-			continue
-		}
-		if !errors.Is(err, cancelled) {
-			t.Fatalf("got %v, want the cancelled question", err)
-		}
-		return
 	}
-	t.Fatal("four sets in a row opened at a cost byte of noise")
+	_, err := Combine(pieces, OpenOptions{Passwords: [][]byte{[]byte("pw")}, AskParams: ask})
+	if !errors.Is(err, cancelled) {
+		t.Fatalf("got %v, want the cancelled question", err)
+	}
 }

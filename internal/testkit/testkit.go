@@ -5,6 +5,31 @@
 // outside a test imports it.
 package testkit
 
+import "github.com/secu-tools/riven/internal/kdf"
+
+// CheapCost reports whether a key derivation at p is quick wherever the tests
+// run: no more work than 128 MiB at one pass. A cost byte that is noise, as it
+// is when the cost is not recorded, when the envelope derives no key, or when
+// the piece is damaged, can read as up to a gibibyte and 8 passes, and under the
+// race detector on a small runner one such derivation takes the better part of
+// an hour. A test that has riven try a password at such a byte makes sure the
+// byte reads as a cheap cost first.
+func CheapCost(p kdf.Params) bool { return uint64(p.Memory)*uint64(p.Time) <= 128*1024 }
+
+// NoiseUnfit reports whether a cost byte among pieces, noise in a set that did
+// not record its cost, reads as cost itself, which opens the set without it, or
+// as a cost that is not cheap, which a combine without the cost spends deriving.
+// peek reads the byte: it is format.PeekParams, passed in because format's own
+// tests use this package.
+func NoiseUnfit(pieces [][]byte, cost kdf.Params, peek func([]byte) (kdf.Params, bool)) bool {
+	for _, p := range pieces {
+		if d, ok := peek(p); ok && (d == cost || !CheapCost(d)) {
+			return true
+		}
+	}
+	return false
+}
+
 // ChiSquare measures how far the byte distribution of b is from uniform. With 255
 // degrees of freedom a uniform source lands near 255; 400 is over six standard
 // deviations above that.
